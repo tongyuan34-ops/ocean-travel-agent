@@ -1,0 +1,14 @@
+# 生产依赖（Python 3.13 实测）
+fastapi
+uvicorn
+langchain-core
+langchain-openai
+langgraph
+httpx
+lxml
+python-dotenv
+redis
+
+# 测试
+pytest
+pytest-asyncio

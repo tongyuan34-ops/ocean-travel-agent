@@ -1,0 +1,35 @@
+# ============ 密钥与登录态：绝不提交 ============
+.env
+.env.local
+.env.*.local
+
+# 用户 Cookie（等于账号登录态，明文存储）
+cookies/
+
+# 抓取产物（写 /data/ 而非 data/，避免误伤 frontend/src/ 下的同名目录）
+/data/
+
+# 本地浏览器 profile（MediaCrawler 的真 Chrome/Edge 登录态也在这里）
+browser_data/
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache*/
+.pytest_cache - 副本/
+
+# ============ 第一天练手脚本（本地保留，不入库）============
+/01_first_call.py
+/04chat.py
+/1.py
+/model_config.py
+
+# ============ 编辑器与系统 ============
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

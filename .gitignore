@@ -21,6 +21,9 @@ venv/
 .pytest_cache*/
 .pytest_cache - 副本/
 
+# 打包上传用的临时产物（供外部工具读取，不随仓库分发）
+/docs/upload-source.zip
+
 # ============ 第一天练手脚本（本地保留，不入库）============
 /01_first_call.py
 /04chat.py

@@ -108,12 +108,21 @@ async def run_crawler_subprocess(
     单独抽出来是为了能被独立验证——真正跑采集需要真实 Cookie 与真实平台，
     而超时/清理这条路径必须能确定性地测到。
     """
+    # POSIX 上必须让子进程成为独立会话的首进程。
+    # 否则它继承本进程的进程组，_kill_process_tree 里的 os.getpgid(pid)
+    # 拿到的就是**我们自己**的组号，killpg 会把 API 服务/测试进程一起 SIGKILL 掉。
+    # Windows 走 taskkill /T，不需要也无法用这个参数。
+    spawn_kwargs: dict[str, Any] = {}
+    if sys.platform != "win32":
+        spawn_kwargs["start_new_session"] = True
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=cwd,
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **spawn_kwargs,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -142,6 +151,11 @@ async def _kill_process_tree(pid: int) -> None:
 
     MediaCrawler 会拉起 Chromium，只 kill 父进程会留下孤儿浏览器，
     因此必须按树清理（SPEC 4.8）。
+
+    **绝不能误杀自己**：子进程由 run_crawler_subprocess 以 start_new_session
+    启动，正常情况组号等于它自己的 pid。这里再做一次比对，
+    万一将来有人改了启动参数、子进程又落回本进程组，宁可只杀单个进程，
+    也不能把整个服务端进程组带走。
     """
     if sys.platform == "win32":
         killer = await asyncio.create_subprocess_exec(
@@ -155,8 +169,24 @@ async def _kill_process_tree(pid: int) -> None:
         )
         await killer.wait()
         return
+
+    try:
+        pgid = os.getpgid(pid)
+    except (OSError, ProcessLookupError):
+        return
+
+    if pgid == os.getpgid(0):
+        logger.error(
+            "拒绝清理进程组 %s：与当前进程同组，退化为只杀该进程。"
+            "请检查子进程是否漏了 start_new_session",
+            pgid,
+        )
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        return
+
     with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def _decode(raw: bytes | None) -> str:

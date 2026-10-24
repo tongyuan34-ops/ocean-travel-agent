@@ -37,6 +37,25 @@ async def test_timeout_reports_and_returns_promptly():
     assert elapsed < 25, f"超时后没有及时返回：{elapsed:.1f}s"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="进程组是 POSIX 概念，Windows 走 taskkill")
+async def test_child_runs_in_its_own_process_group():
+    """子进程必须独立成组，否则超时清理会误杀自己。
+
+    回归用例：_kill_process_tree 在 POSIX 上用 killpg(getpgid(pid))。
+    如果子进程没以 start_new_session 启动，它继承的就是本进程的组号，
+    killpg 会把 API 服务（以及 CI 里的 pytest）连同整组一起 SIGKILL——
+    表现是 job 卡死而不是报错，极难排查。
+    """
+    code = "import os; print(os.getpgid(0), os.getpgid(os.getppid()))"
+    run = await run_crawler_subprocess([sys.executable, "-c", code], cwd=".", timeout=60)
+
+    assert run.returncode == 0, run.stderr
+    child_pgid, parent_pgid = run.stdout.split()
+    assert child_pgid != parent_pgid, (
+        f"子进程未独立成组（child={child_pgid} parent={parent_pgid}），超时清理会把父进程一起杀掉"
+    )
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="进程树清理按 Windows taskkill 实现")
 async def test_timeout_kills_descendant_processes():
     """孙进程也必须一起清掉，否则后台会留下孤儿浏览器。"""

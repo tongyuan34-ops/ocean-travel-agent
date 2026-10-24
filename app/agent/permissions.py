@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -26,9 +26,7 @@ logger = logging.getLogger(__name__)
 DECISION_TIMEOUT_SEC = 120
 
 # 当前会话的权限代理；由 ChatService 在跑图之前设置
-current_broker: ContextVar["PermissionBroker | None"] = ContextVar(
-    "current_broker", default=None
-)
+current_broker: ContextVar[PermissionBroker | None] = ContextVar("current_broker", default=None)
 
 
 @dataclass
@@ -58,10 +56,10 @@ class PermissionDenied(Exception):
 
 
 # 待决请求 → 所属 broker。前端回调只带 request_id，需要据此找到对应的 broker。
-_pending_registry: dict[str, "PermissionBroker"] = {}
+_pending_registry: dict[str, PermissionBroker] = {}
 
 
-def find_broker(request_id: str) -> "PermissionBroker | None":
+def find_broker(request_id: str) -> PermissionBroker | None:
     """按 request_id 找到持有该待决请求的 broker。"""
     return _pending_registry.get(request_id)
 
@@ -74,16 +72,12 @@ class PermissionBroker:
         # 本会话内已「允许且不再询问」的操作类型
         self._remembered: set[str] = set()
 
-    async def request(
-        self, action: str, detail: dict[str, str], remember_key: str = ""
-    ) -> None:
+    async def request(self, action: str, detail: dict[str, str], remember_key: str = "") -> None:
         """申请执行权限。获批则返回，否则抛 PermissionDenied。"""
         if remember_key and remember_key in self._remembered:
             return
 
-        request = PermissionRequest(
-            request_id=str(uuid4()), action=action, detail=detail
-        )
+        request = PermissionRequest(request_id=str(uuid4()), action=action, detail=detail)
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending[request.request_id] = (future, remember_key)
         _pending_registry[request.request_id] = self
@@ -91,7 +85,7 @@ class PermissionBroker:
         try:
             await self._notify(request)
             granted = await asyncio.wait_for(future, timeout=DECISION_TIMEOUT_SEC)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.info("权限请求超时未获决策：%s", request.request_id)
             raise PermissionDenied(
                 f"用户未在 {DECISION_TIMEOUT_SEC} 秒内确认，操作已取消"
@@ -126,9 +120,7 @@ class PermissionBroker:
         self._pending.clear()
 
 
-async def require_permission(
-    action: str, detail: dict[str, str], remember_key: str = ""
-) -> None:
+async def require_permission(action: str, detail: dict[str, str], remember_key: str = "") -> None:
     """工具侧的统一入口。
 
     拿不到 broker 说明当前不在会话上下文里（例如脚本直接调工具），

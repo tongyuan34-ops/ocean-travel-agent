@@ -118,6 +118,13 @@ class Settings:
     allowed_roots: list[str]
     cors_origins: list[str]
 
+    # 可观测性
+    log_level: str
+    langsmith_tracing: bool
+    langsmith_api_key: str
+    langsmith_project: str
+    langsmith_endpoint: str
+
     # 登录态采集（plugin 组 B，默认关闭，个人自用，不随核心开源发布）
     enable_session_fetch: bool
     cookie_dir: str
@@ -155,7 +162,7 @@ def load_settings() -> Settings:
         ark_video_poll_initial_sec=float(_get_int("ARK_VIDEO_POLL_INITIAL_SEC", 3)),
         ark_video_poll_max_sec=float(_get_int("ARK_VIDEO_POLL_MAX_SEC", 10)),
         ark_video_timeout_sec=float(_get_int("ARK_VIDEO_TIMEOUT_SEC", 600)),
-        media_task_ttl_sec=_get_int("MEDIA_TASK_TTL_SEC", 3600),
+        media_task_ttl_sec=_get_int("MEDIA_TASK_TTL_SEC", 86400),
         storage_backend=_get("STORAGE_BACKEND", "memory").lower(),
         redis_url=_get("REDIS_URL", "redis://localhost:6379/0"),
         session_ttl_sec=_get_int("SESSION_TTL_SEC", 0),
@@ -170,6 +177,13 @@ def load_settings() -> Settings:
         liteapi_base_url=_get("LITEAPI_BASE_URL", "https://api.liteapi.travel/v3.0"),
         allowed_roots=_get_list("ALLOWED_ROOTS"),
         cors_origins=_get_list("CORS_ORIGINS") or ["http://localhost:3001"],
+        # 追踪开关兼容新旧两种写法（LangChain 0.3 起改名 LANGSMITH_*）
+        log_level=_get("LOG_LEVEL", "INFO"),
+        langsmith_tracing=_get_bool("LANGSMITH_TRACING", False)
+        or _get_bool("LANGCHAIN_TRACING_V2", False),
+        langsmith_api_key=_get("LANGSMITH_API_KEY") or _get("LANGCHAIN_API_KEY"),
+        langsmith_project=_get("LANGSMITH_PROJECT", "ocean-travel-agent"),
+        langsmith_endpoint=_get("LANGSMITH_ENDPOINT") or _get("LANGCHAIN_ENDPOINT"),
         enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", False),
         cookie_dir=_get("COOKIE_DIR", "cookies"),
         mediacrawler_path=_get("MEDIACRAWLER_PATH", "D:/MediaCrawler"),

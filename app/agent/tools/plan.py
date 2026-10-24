@@ -37,7 +37,9 @@ class BudgetItem(BaseModel):
 
     name: str = Field(description="项目名称，如 机票 / 酒店 / 门票")
     amount: float = Field(description="金额，单位元")
-    category: str = Field(default="其他", description="分类：交通 / 住宿 / 餐饮 / 门票 / 购物 / 其他")
+    category: str = Field(
+        default="其他", description="分类：交通 / 住宿 / 餐饮 / 门票 / 购物 / 其他"
+    )
 
 
 class EstimateBudgetInput(BaseModel):
@@ -47,9 +49,7 @@ class EstimateBudgetInput(BaseModel):
 
 
 @tool(args_schema=EstimateBudgetInput)
-async def estimate_budget(
-    items: list[BudgetItem], budget_total: float = 0, people: int = 1
-) -> str:
+async def estimate_budget(items: list[BudgetItem], budget_total: float = 0, people: int = 1) -> str:
     """汇总旅行预算：分项合计、分类小计、占总预算比例、余额或超支、人均花费。
 
     只做算术，不会替用户编造任何价格——金额必须由用户或已知信息提供。
@@ -89,8 +89,12 @@ async def estimate_budget(
 
 class OptimizeRouteInput(BaseModel):
     city: str = Field(description="所在城市，如 三亚。必须提供，否则模糊地名会解析到错误位置")
-    places: list[str] = Field(description="当天要去的地点名称，至少两个，如 [亚龙湾国家旅游度假区, 蜈支洲岛码头]")
-    mode: str = Field(default="driving", description="driving（驾车）/ walking（步行）/ bicycling（骑行）")
+    places: list[str] = Field(
+        description="当天要去的地点名称，至少两个，如 [亚龙湾国家旅游度假区, 蜈支洲岛码头]"
+    )
+    mode: str = Field(
+        default="driving", description="driving（驾车）/ walking（步行）/ bicycling（骑行）"
+    )
     start: str = Field(default="", description="当天出发点，如酒店名；留空则从地点列表第一个开始")
 
 
@@ -171,7 +175,7 @@ async def optimize_day_route(
         )
 
     lines = [
-        f"单日路线优化（{city}，{mode}，数据来源：高德开放平台）",
+        f"单日路线优化（{city}，{mode}）",
         "建议顺序：" + " → ".join(name for name, _ in ordered),
         f"总里程约 {distance_km:.1f} 公里，在途约 {duration_min:.0f} 分钟",
     ]
@@ -180,7 +184,9 @@ async def optimize_day_route(
     if unresolved:
         lines.append(f"⚠️ 未纳入排序的地点（解析失败）：{'、'.join(unresolved)}")
     if duration_min > _DAY_TRAVEL_WARN_MIN:
-        lines.append(f"⚠️ 在途时间偏长（超过 {_DAY_TRAVEL_WARN_MIN:.0f} 分钟），建议减少一个地点或拆成两天")
+        lines.append(
+            f"⚠️ 在途时间偏长（超过 {_DAY_TRAVEL_WARN_MIN:.0f} 分钟），建议减少一个地点或拆成两天"
+        )
 
     return truncate_tool_output("\n".join(lines))
 
@@ -206,10 +212,7 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = phi2 - phi1
     d_lambda = math.radians(lng2 - lng1)
-    h = (
-        math.sin(d_phi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
-    )
+    h = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
     return 2 * _EARTH_RADIUS_KM * math.asin(math.sqrt(h))
 
 

@@ -48,9 +48,7 @@ class _Stub(SourceAdapter):
             raise self._exc
         if not self._ok:
             return []
-        return [
-            mc_doc(self.name, self.platform)
-        ]
+        return [mc_doc(self.name, self.platform)]
 
 
 def mc_doc(source: str, platform: str):
@@ -203,7 +201,8 @@ def _write(tmp_path, code, name, payload, *, mtime=None):
     import json
 
     path.write_text(
-        json.dumps(payload, ensure_ascii=False) if not name.endswith(".jsonl")
+        json.dumps(payload, ensure_ascii=False)
+        if not name.endswith(".jsonl")
         else "\n".join(json.dumps(i, ensure_ascii=False) for i in payload),
         encoding="utf-8",
     )
@@ -220,11 +219,17 @@ def test_collect_docs_filters_by_mtime(tmp_path):
         {"aweme_id": "1", "title": "新", "desc": "新内容", "digg_count": 5},
     ]
     _write(tmp_path, "douyin", "search_contents_new.json", recent)
-    _write(tmp_path, "douyin", "search_contents_old.json", [{"aweme_id": "9", "title": "旧"}], mtime=0)
+    _write(
+        tmp_path, "douyin", "search_contents_old.json", [{"aweme_id": "9", "title": "旧"}], mtime=0
+    )
 
     docs = mc.collect_docs(
-        platform_key="douyin", label="抖音", code="douyin",
-        data_dir=tmp_path, since=time.time() - 5, limit=10,
+        platform_key="douyin",
+        label="抖音",
+        code="douyin",
+        data_dir=tmp_path,
+        since=time.time() - 5,
+        limit=10,
     )
     assert [d.title for d in docs] == ["新"]
 
@@ -233,8 +238,12 @@ def test_collect_docs_handles_both_directory_names(tmp_path):
     """各平台落盘目录名不统一（bili / bilibili），两个候选都要试。"""
     _write(tmp_path, "bili", "search_contents_a.json", [{"video_id": "BV1x", "title": "B站"}])
     docs = mc.collect_docs(
-        platform_key="bilibili", label="B站", code="bili",
-        data_dir=tmp_path, since=0, limit=10,
+        platform_key="bilibili",
+        label="B站",
+        code="bili",
+        data_dir=tmp_path,
+        since=0,
+        limit=10,
     )
     assert len(docs) == 1 and docs[0].title == "B站"
 
@@ -244,8 +253,12 @@ def test_collect_docs_dedupes_across_dirs(tmp_path):
     _write(tmp_path, "dy", "search_contents_x.json", payload)
     _write(tmp_path, "douyin", "search_contents_y.json", payload)
     docs = mc.collect_docs(
-        platform_key="douyin", label="抖音", code="dy",
-        data_dir=tmp_path, since=0, limit=10,
+        platform_key="douyin",
+        label="抖音",
+        code="dy",
+        data_dir=tmp_path,
+        since=0,
+        limit=10,
     )
     assert len(docs) == 1
 
@@ -263,8 +276,12 @@ def test_hot_comments_sorted_deduped_top3(tmp_path):
     _write(tmp_path, "douyin", "search_comments_a.json", comments)
 
     docs = mc.collect_docs(
-        platform_key="douyin", label="抖音", code="douyin",
-        data_dir=tmp_path, since=0, limit=10,
+        platform_key="douyin",
+        label="抖音",
+        code="douyin",
+        data_dir=tmp_path,
+        since=0,
+        limit=10,
     )
     hot = docs[0].extras["hot_comments"]
     assert [c["content"] for c in hot] == ["B", "C", "A"]
@@ -274,8 +291,12 @@ def test_hot_comments_sorted_deduped_top3(tmp_path):
 def test_bilibili_numeric_id_gets_av_prefix(tmp_path):
     _write(tmp_path, "bili", "search_contents_a.json", [{"video_id": "123456", "title": "x"}])
     docs = mc.collect_docs(
-        platform_key="bilibili", label="B站", code="bili",
-        data_dir=tmp_path, since=0, limit=10,
+        platform_key="bilibili",
+        label="B站",
+        code="bili",
+        data_dir=tmp_path,
+        since=0,
+        limit=10,
     )
     assert docs[0].url.endswith("/av123456")
 
@@ -298,9 +319,7 @@ def test_unavailable_reasons_are_specific(settings):
     assert "ENABLE_SESSION_FETCH" in reason
 
 
-def test_subprocess_env_uses_playwright_node_when_no_system_node(
-    settings, monkeypatch, tmp_path
-):
+def test_subprocess_env_uses_playwright_node_when_no_system_node(settings, monkeypatch, tmp_path):
     """系统无 node 时挂上 Playwright 自带的 node，否则 PyExecJS 会退回 JScript。"""
     adapter = mc.MediaCrawlerAdapter(settings, "douyin")
     monkeypatch.setattr(mc.shutil, "which", lambda _name: None)

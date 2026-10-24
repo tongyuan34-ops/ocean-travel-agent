@@ -27,8 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.config import Settings, load_settings  # noqa: E402
-from app.core.security import cookie_dir, cookie_path  # noqa: E402
+from app.core.config import Settings, load_settings
+from app.core.security import cookie_dir, cookie_path
 
 
 class CookieError(Exception):
@@ -223,9 +223,7 @@ def _describe(platform: Platform, cookie: str) -> str:
     pairs = parse_pairs(cookie)
     detail = f"{len(cookie)} 字符、{len(pairs)} 个字段"
     if platform.required:
-        hit = "、".join(
-            f"{key}{'✓' if key in pairs else '✗'}" for key in platform.required
-        )
+        hit = "、".join(f"{key}{'✓' if key in pairs else '✗'}" for key in platform.required)
         detail += f"；关键字段 {hit}"
     return detail
 
@@ -257,17 +255,13 @@ def run_interactive(settings: Settings, platform: Platform | None, force: bool) 
     return 0
 
 
-def run_from_file(
-    settings: Settings, path: Path, platform_name: str, force: bool
-) -> int:
+def run_from_file(settings: Settings, path: Path, platform_name: str, force: bool) -> int:
     parsed = _parse_from_file(path)
     cookie = normalize_cookie(parsed.cookie)
 
     raw_name = platform_name.strip() or parsed.platform
     if not raw_name:
-        raise CookieError(
-            "无法从文件中推断平台，请用 --platform 指定（如 --platform douyin）"
-        )
+        raise CookieError("无法从文件中推断平台，请用 --platform 指定（如 --platform douyin）")
     platform = _resolve_platform(raw_name)
     if parsed.platform and platform_name.strip() and parsed.platform != platform.name:
         print(f"注意：文件域名指向 {parsed.platform}，但你指定的是 {platform.name}，按你指定的处理")
@@ -304,20 +298,20 @@ def _pad(text: str, width: int) -> str:
 def run_status(settings: Settings) -> int:
     directory = cookie_dir(settings)
     print("=== 登录态采集环境 ===")
-    print(f"ENABLE_SESSION_FETCH = {str(settings.enable_session_fetch).lower()}"
-          "   （默认关闭；置 true 后前端才会展示社媒入口）")
-    print(f"COOKIE_DIR           = {directory}"
-          f"{'' if directory.exists() else '（不存在）'}")
-    print(f"MEDIACRAWLER_PATH    = {settings.mediacrawler_path}"
-          f"{'' if Path(settings.mediacrawler_path).exists() else '（未部署）'}")
+    print(
+        f"ENABLE_SESSION_FETCH = {str(settings.enable_session_fetch).lower()}"
+        "   （默认关闭；置 true 后前端才会展示社媒入口）"
+    )
+    print(f"COOKIE_DIR           = {directory}{'' if directory.exists() else '（不存在）'}")
+    print(
+        f"MEDIACRAWLER_PATH    = {settings.mediacrawler_path}"
+        f"{'' if Path(settings.mediacrawler_path).exists() else '（未部署）'}"
+    )
     print(f"MEDIACRAWLER_TIMEOUT = {settings.mediacrawler_timeout} 秒")
     print(f"CRAWLER_PLATFORMS    = {','.join(settings.crawler_platforms)}")
 
     print("\n=== 各平台 Cookie 状态 ===")
-    print(
-        _pad("平台", 14) + _pad("名称", 10) + _pad("代码", 8)
-        + _pad("状态", 26) + "更新时间"
-    )
+    print(_pad("平台", 14) + _pad("名称", 10) + _pad("代码", 8) + _pad("状态", 26) + "更新时间")
     ready = 0
     for platform in PLATFORMS:
         path = cookie_path(settings, platform.name)
@@ -336,8 +330,11 @@ def run_status(settings: Settings) -> int:
             state = "未保存"
             stamp = "-"
         print(
-            _pad(platform.name, 14) + _pad(platform.label, 10)
-            + _pad(code, 8) + _pad(state, 26) + stamp
+            _pad(platform.name, 14)
+            + _pad(platform.label, 10)
+            + _pad(code, 8)
+            + _pad(state, 26)
+            + stamp
         )
 
     print(f"\n可用平台：{ready}/{len(PLATFORMS)}")

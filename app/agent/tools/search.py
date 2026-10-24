@@ -68,9 +68,7 @@ async def search_web(query: str, limit: int = 5) -> str:
         reason = degraded[0].extras.get("reason") or "未知原因"
         lines.append("")
         lines.append(f"⚠️ 本次检索未获得真实结果（原因：{reason}）。")
-        lines.append(
-            "请如实告知用户本次检索失败，不要编造任何检索内容作为事实。"
-        )
+        lines.append("请如实告知用户本次检索失败，不要编造任何检索内容作为事实。")
         return truncate_tool_output("\n".join(lines), limit=_LIST_LIMIT)
 
     lines.append("")

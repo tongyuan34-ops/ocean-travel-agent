@@ -8,12 +8,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class SourceKind(str, Enum):
-    """数据源类型。沿用 SPEC 4.7 的取值。"""
+class SourceKind(StrEnum):
+    """数据源类型。沿用 SPEC 4.7 的取值。
+
+    用 StrEnum 而非 (str, Enum)：3.12+ 上 str() 直接得到值，
+    避免 f-string 里拼出 "SourceKind.GENERAL_CN" 这种意外。
+    """
 
     GENERAL_CN = "general_cn"
     GENERAL_GLOBAL = "general_global"
@@ -36,9 +40,9 @@ class Doc:
     url: str
     snippet: str = ""
     content: str = ""
-    source: str = ""          # 适配器 name，如 bing_cn
-    source_kind: str = ""     # SourceKind 的值
-    platform: str = ""        # 前端展示名，如「必应（中国）」
+    source: str = ""  # 适配器 name，如 bing_cn
+    source_kind: str = ""  # SourceKind 的值
+    platform: str = ""  # 前端展示名，如「必应（中国）」
     author: str = ""
     published_at: str = ""
     score: float = 0.0

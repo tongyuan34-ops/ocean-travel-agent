@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -24,13 +26,45 @@ from app.core.security import (
     PathNotAllowed,
     allowed_roots,
     build_write_preview,
-    create_dir as sandbox_create_dir,
-    delete_path as sandbox_delete_path,
+    ensure_allowed,
     is_windows,
-    list_dir as sandbox_list_dir,
     read_text,
     write_text,
 )
+from app.core.security import (
+    create_dir as sandbox_create_dir,
+)
+from app.core.security import (
+    delete_path as sandbox_delete_path,
+)
+from app.core.security import (
+    list_dir as sandbox_list_dir,
+)
+
+# 这些扩展名按纯文本处理，打开后可以直接把内容交给模型判断
+_TEXT_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".json",
+    ".csv",
+    ".tsv",
+    ".log",
+    ".py",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".yml",
+    ".yaml",
+    ".xml",
+    ".ini",
+    ".toml",
+    ".sql",
+    ".sh",
+    ".bat",
+    ".ps1",
+}
 
 settings_cache: Settings | None = None
 
@@ -54,7 +88,9 @@ def _failed(message: str, code: str) -> str:
 
 
 class PathInput(BaseModel):
-    path: str = Field(description="目标路径（绝对路径或含 ~ 的路径），必须在 ALLOWED_ROOTS 白名单内")
+    path: str = Field(
+        description="目标路径（绝对路径或含 ~ 的路径），必须在 ALLOWED_ROOTS 白名单内"
+    )
 
 
 @tool(args_schema=PathInput)
@@ -82,6 +118,68 @@ async def read_file(path: str) -> str:
 
     note = "\n…（文件过大已截断）" if truncated else ""
     return truncate_tool_output(f"{path} 的内容：\n{content}{note}")
+
+
+@tool(args_schema=PathInput)
+async def open_file(path: str) -> str:
+    """用系统默认程序打开白名单内文件，并读取其文本内容供判断。
+
+    打开属于有副作用的操作，执行前会请用户确认；打开后立即回读内容，
+    之后用户在外部程序里修改并保存，重新调用 read_file 即可拿到最新版本。
+    """
+    try:
+        target = ensure_allowed(path, _roots())
+    except PathNotAllowed as exc:
+        return _failed(exc.message, exc.code)
+
+    if not target.is_file():
+        return _failed(f"不是文件：{target}", "PATH_NOT_ALLOWED")
+
+    try:
+        await require_permission(
+            "open_file",
+            {
+                "path": str(target),
+                "preview": "将用系统默认程序打开该文件，并把可读文本内容返回给助手判断",
+            },
+            remember_key=f"open_file:{target}",
+        )
+    except PermissionDenied as exc:
+        return _failed(exc.message, exc.code)
+
+    try:
+        if is_windows():
+            # startfile 只在 Windows 上存在，getattr 取用可避免跨平台类型检查报错
+            os.startfile(str(target))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except OSError as exc:
+        return _failed(f"无法用系统默认程序打开：{exc}", "OPEN_FAILED")
+
+    stat = target.stat()
+    lines = [
+        f"已用系统默认程序打开：{target}",
+        f"大小 {stat.st_size} 字节｜最后修改 "
+        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime))}",
+    ]
+    if target.suffix.lower() in _TEXT_SUFFIXES:
+        try:
+            content, truncated = read_text(str(target), _roots())
+        except PathNotAllowed as exc:
+            lines.append(f"回读失败：{exc.message}")
+        else:
+            lines.append("")
+            lines.append("当前文件内容：")
+            lines.append(content + ("\n…（文件过大已截断）" if truncated else ""))
+            lines.append("说明：用户可能在外部程序里修改并保存，需要最新内容时重新调用 read_file。")
+    else:
+        lines.append(
+            "该格式不是纯文本，已在系统程序中打开，暂不做正文提取；"
+            "如需我理解内容，请提供可复制文本或告诉我文档大意。"
+        )
+    return truncate_tool_output("\n".join(lines), limit=4000)
 
 
 # ---------- 写操作（需确认） ----------
@@ -192,7 +290,7 @@ async def _apply_wallpaper(absolute_path: str) -> str:
         "$code = @'\n"
         "using System.Runtime.InteropServices;\n"
         "public class Wallpaper {\n"
-        "  [DllImport(\"user32.dll\", SetLastError=true)]\n"
+        '  [DllImport("user32.dll", SetLastError=true)]\n'
         "  public static extern bool SystemParametersInfo(int a, int b, string c, int d);\n"
         "}\n"
         "'@\n"

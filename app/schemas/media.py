@@ -16,9 +16,7 @@ class ImageRequest(BaseModel):
 class VideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000, description="生成提示词")
     duration: int = Field(default=5, ge=1, le=30, description="时长（秒）")
-    ref_image: str | None = Field(
-        default=None, description="首帧参考图 URL；传入即为图生视频"
-    )
+    ref_image: str | None = Field(default=None, description="首帧参考图 URL；传入即为图生视频")
 
 
 class TaskAccepted(BaseModel):

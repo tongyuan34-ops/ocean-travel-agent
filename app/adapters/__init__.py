@@ -26,11 +26,11 @@ from app.adapters.registry import (
 from app.adapters.web_fetch import FetchedPage, WebFetchAdapter, fetch_page
 
 __all__ = [
+    "PLATFORM_LABELS",
+    "SOCIAL_PLATFORM_KEYS",
     "BingCnAdapter",
     "FetchedPage",
     "MediaCrawlerAdapter",
-    "PLATFORM_LABELS",
-    "SOCIAL_PLATFORM_KEYS",
     "SourceAdapter",
     "WebFetchAdapter",
     "available_platforms",

@@ -19,6 +19,7 @@ class MessageItem(BaseModel):
     role: str
     content: str
     created_at: str
+    media_task_ids: list[str] = Field(default_factory=list)
 
 
 class MessageList(BaseModel):

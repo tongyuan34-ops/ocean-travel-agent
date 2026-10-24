@@ -15,10 +15,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
-from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph  # noqa: E402
-from app.core.config import load_settings  # noqa: E402
+from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph
+from app.core.config import load_settings
 
 
 def _describe(message) -> str:
@@ -27,9 +32,7 @@ def _describe(message) -> str:
     if isinstance(message, AIMessage):
         calls = getattr(message, "tool_calls", None) or []
         if calls:
-            detail = "，".join(
-                f"{call.get('name')}({call.get('args')})" for call in calls
-            )
+            detail = "，".join(f"{call.get('name')}({call.get('args')})" for call in calls)
             return f"[模型决定调用工具] {detail}"
         return f"[模型回答] {message.content}"
     if isinstance(message, HumanMessage):

@@ -69,17 +69,15 @@ async def test_native_mode_binds_tools_and_executes(monkeypatch, settings):
             AIMessage(content="完成"),
         ],
     )
-    graph, mode = graph_module.build_agent_graph(
-        settings, mode="native", tools=[echo]
-    )
+    graph, mode = graph_module.build_agent_graph(settings, mode="native", tools=[echo])
     assert mode == "native"
     assert [tool.name for tool in model.bound_tools] == ["echo"]
 
     result = await graph.ainvoke({"messages": [HumanMessage(content="调用工具")]})
     contents = [getattr(message, "content", "") for message in result["messages"]]
 
-    assert "完成" in contents          # 拿到最终回答
-    assert "echo:hi" in contents       # 工具真的被执行过
+    assert "完成" in contents  # 拿到最终回答
+    assert "echo:hi" in contents  # 工具真的被执行过
 
 
 async def test_structured_mode_decides_via_json_then_executes(monkeypatch, settings):
@@ -91,9 +89,7 @@ async def test_structured_mode_decides_via_json_then_executes(monkeypatch, setti
             AIMessage(content='{"final": "完成"}'),
         ],
     )
-    graph, mode = graph_module.build_agent_graph(
-        settings, mode="structured", tools=[echo]
-    )
+    graph, mode = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
     assert mode == "structured"
 
     result = await graph.ainvoke({"messages": [HumanMessage(content="调用工具")]})
@@ -109,9 +105,7 @@ async def test_structured_mode_decides_via_json_then_executes(monkeypatch, setti
 async def test_structured_mode_handles_unknown_tool(monkeypatch, settings):
     """模型编了个不存在的工具时，要如实说明而不是崩掉。"""
     _patch(monkeypatch, [AIMessage(content='{"tool": "no_such_tool", "args": {}}')])
-    graph, _ = graph_module.build_agent_graph(
-        settings, mode="structured", tools=[echo]
-    )
+    graph, _ = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
     result = await graph.ainvoke({"messages": [HumanMessage(content="调用工具")]})
     contents = [getattr(message, "content", "") for message in result["messages"]]
     assert any("不存在" in text for text in contents)

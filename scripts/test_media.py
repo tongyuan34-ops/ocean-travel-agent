@@ -22,21 +22,17 @@ from pathlib import Path
 # 允许从项目根目录直接运行本脚本
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.config import load_settings  # noqa: E402
-from app.media.base import MediaKind, MediaRequest  # noqa: E402
-from app.media.service import build_media_service  # noqa: E402
+from app.core.config import load_settings
+from app.media.base import MediaKind, MediaRequest
+from app.media.service import build_media_service
 
 
 async def _run_image(service, prompt: str, style: str | None) -> None:
-    task = await service.submit(
-        MediaRequest(kind=MediaKind.IMAGE, prompt=prompt, style=style)
-    )
+    task = await service.submit(MediaRequest(kind=MediaKind.IMAGE, prompt=prompt, style=style))
     await _wait_and_report(service, task.id)
 
 
-async def _run_video(
-    service, prompt: str, image_url: str | None, duration: int | None
-) -> None:
+async def _run_video(service, prompt: str, image_url: str | None, duration: int | None) -> None:
     task = await service.submit(
         MediaRequest(
             kind=MediaKind.VIDEO,
@@ -71,9 +67,7 @@ async def _wait_and_report(service, task_id: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="媒体链路冒烟测试")
-    parser.add_argument(
-        "action", choices=["caps", "image", "video"], help="要执行的动作"
-    )
+    parser.add_argument("action", choices=["caps", "image", "video"], help="要执行的动作")
     parser.add_argument("prompt", nargs="?", default="", help="生成提示词")
     parser.add_argument("--style", default=None, help="图片风格")
     parser.add_argument("--image-url", default=None, help="视频首帧参考图 URL")
@@ -99,9 +93,7 @@ def main() -> int:
     if args.action == "image":
         asyncio.run(_run_image(service, args.prompt, args.style))
     else:
-        asyncio.run(
-            _run_video(service, args.prompt, args.image_url, args.duration)
-        )
+        asyncio.run(_run_video(service, args.prompt, args.image_url, args.duration))
     return 0
 
 

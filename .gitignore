@@ -9,6 +9,13 @@ cookies/
 # 抓取产物（写 /data/ 而非 data/，避免误伤 frontend/src/ 下的同名目录）
 /data/
 
+# 生成物落盘目录（app/media 是代码，根目录 media/ 是运行产物，别搞混）
+/media/
+
+# 本地访问二维码里带着你的局域网/公网地址，不随仓库分发
+/mobile-access-qr.png
+/public-access-qr.png
+
 # 本地浏览器 profile（MediaCrawler 的真 Chrome/Edge 登录态也在这里）
 browser_data/
 
@@ -21,8 +28,19 @@ venv/
 .pytest_cache*/
 .pytest_cache - 副本/
 
+# ============ 工具缓存与产物 ============
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+
 # 打包上传用的临时产物（供外部工具读取，不随仓库分发）
 /docs/upload-source.zip
+/docs/AISTUDIO_PROMPT.md
 
 # ============ 第一天练手脚本（本地保留，不入库）============
 /01_first_call.py

@@ -115,7 +115,7 @@ async def get_weather(city: str) -> str:
         return f"暂无 {city} 的天气数据。"
 
     casts = forecasts[0].get("casts") or []
-    lines = [f"{city} 天气预报（数据来源：高德开放平台）："]
+    lines = [f"{city} 天气预报："]
     for cast in casts:
         lines.append(
             f"- {cast.get('date')} 星期{cast.get('week')}："
@@ -146,7 +146,7 @@ async def search_poi(city: str, keyword: str) -> str:
     if not pois:
         return f"未找到 {city} 与「{keyword}」相关的地点。"
 
-    lines = [f"{city}「{keyword}」检索结果（数据来源：高德开放平台）："]
+    lines = [f"{city}「{keyword}」检索结果："]
     for poi in pois[:10]:
         lines.append(
             f"- {poi.get('name')}｜{poi.get('type') or '未分类'}｜"
@@ -156,9 +156,7 @@ async def search_poi(city: str, keyword: str) -> str:
 
 
 @tool
-async def plan_route(
-    origin: str, destination: str, mode: str = "driving", city: str = ""
-) -> str:
+async def plan_route(origin: str, destination: str, mode: str = "driving", city: str = "") -> str:
     """规划两地之间的路线。
 
     origin / destination 传地名，如「亚龙湾国家旅游度假区」「蜈支洲岛码头」；
@@ -206,7 +204,7 @@ async def plan_route(
         )
 
     lines = [
-        f"{origin} → {destination}（{mode}，数据来源：高德开放平台）",
+        f"{origin} → {destination}（{mode}）",
         f"总距离约 {distance_km:.1f} 公里，预计耗时约 {duration_min:.0f} 分钟",
         "主要路段：",
     ]

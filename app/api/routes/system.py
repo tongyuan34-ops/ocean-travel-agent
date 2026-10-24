@@ -6,8 +6,9 @@ capabilities 只反映**当前真实可用**的能力，一律不得谎报——
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
 from typing import Any
+
+from fastapi import APIRouter, Request
 
 from app.adapters import available_platforms
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS

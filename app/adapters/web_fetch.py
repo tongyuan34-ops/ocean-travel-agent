@@ -151,7 +151,7 @@ def extract_readable(text: str, content_type: str) -> tuple[str, str]:
     return title, _squeeze_lines(raw)
 
 
-def _parse(text: str):  # noqa: ANN202 - lxml 元素类型难以精确标注
+def _parse(text: str):
     try:
         return lxml_html.fromstring(text)
     except (ValueError, TypeError, ParserError):

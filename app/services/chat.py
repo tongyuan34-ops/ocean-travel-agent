@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+import re
+import time
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage
@@ -21,7 +24,10 @@ from app.agent.permissions import PermissionBroker, PermissionRequest, current_b
 from app.core.config import Settings
 from app.core.context import compose_messages, make_summary, plan_fold
 from app.core.errors import ApiError
+from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
 from app.media.service import MediaService, current_media
+from app.services.profile import ProfileService
+from app.services.streams import StreamState
 from app.storage import ChatMessage, ChatSession, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -40,6 +46,7 @@ _TOOL_CATEGORY = {
     "plan_trip": "plan",
     "list_dir": "system",
     "read_file": "system",
+    "open_file": "system",
     "write_file": "system",
     "create_dir": "system",
     "delete_path": "system",
@@ -53,6 +60,10 @@ _TOOL_CATEGORY = {
     "list_image_templates": "media",
 }
 _SUMMARY_LIMIT = 200
+_TASK_ID_RE = re.compile(
+    r"task_id[：:\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
 # 工具返回文本以这些错误码开头时，tool_result 记为 error
 _ERROR_PREFIXES = (
     "TOOL_NOT_ENABLED",
@@ -79,7 +90,7 @@ def tool_category(tool_name: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class ChatService:
@@ -90,14 +101,21 @@ class ChatService:
         settings: Settings,
         store: SessionStore,
         media: MediaService | None = None,
+        profile: ProfileService | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._media = media
+        self._profile = profile
         self._graph: Any = None
         self._mode: str = ""
         self._summarizer: Any = None
         self._graph_lock = asyncio.Lock()
+        # 进行中/刚结束的 SSE 事件流，供断线续传
+        self._streams: dict[str, StreamState] = {}
+        # 后台任务的强引用。asyncio 只对 task 持弱引用，不在这里存一份，
+        # 任务可能在跑完前被 GC 回收（CPython 文档明确警告过这一点）
+        self._background: set[asyncio.Task[Any]] = set()
 
     # ---------- 会话管理 ----------
 
@@ -117,10 +135,103 @@ class ChatService:
 
     # ---------- 对话 ----------
 
+    async def start_reply(
+        self, session_id: str, text: str, user_id: str = "default"
+    ) -> StreamState:
+        """创建事件流并**在后台**开始生成。
+
+        生成任务不挂在 HTTP 请求上：客户端断开只会停止订阅，
+        回答继续跑完并落库，之后可用 Last-Event-ID 续传。
+        """
+        await self.get_session(session_id)  # 先校验，避免流开始后才报错
+        self._prune_streams()
+        state = StreamState(stream_id=uuid4().hex, session_id=session_id)
+        self._streams[state.stream_id] = state
+        state.task = asyncio.create_task(self._run_reply(state, session_id, text, user_id))
+        return state
+
     async def stream_reply(
-        self, session_id: str, text: str
+        self, session_id: str, text: str, user_id: str = "default"
     ) -> AsyncIterator[str]:
-        """把一轮问答以 SSE 帧的形式产出。"""
+        """兼容旧调用：等价于 start_reply + subscribe(0)。"""
+        state = await self.start_reply(session_id, text, user_id)
+        async for frame in self.subscribe(state.stream_id, 0):
+            yield frame
+
+    def get_stream(self, stream_id: str) -> StreamState | None:
+        return self._streams.get(stream_id)
+
+    def cancel_stream(self, stream_id: str) -> bool:
+        """用户主动停止：取消后台生成，且不保存半截回答。"""
+        state = self._streams.get(stream_id)
+        if state is None:
+            return False
+        state.cancelled = True
+        if state.task is not None and not state.task.done():
+            state.task.cancel()
+        return True
+
+    async def subscribe(self, stream_id: str, last_event_id: int = 0) -> AsyncIterator[str]:
+        """从 last_event_id 之后重放，并继续等待新事件。"""
+        state = self._streams.get(stream_id)
+        if state is None:
+            yield _sse(
+                {
+                    "type": "error",
+                    "code": "STREAM_NOT_FOUND",
+                    "message": "事件流不存在或已过期，请刷新会话重新获取。",
+                }
+            )
+            return
+        cursor = max(0, int(last_event_id or 0))
+        while True:
+            async with state.condition:
+                pending = [(seq, payload) for seq, payload in state.events if seq > cursor]
+                done = state.done
+            for seq, payload in pending:
+                cursor = seq
+                yield f"id: {seq}\n{_sse(payload)}"
+            if done and not pending:
+                return
+            if not pending:
+                timed_out = False
+                async with state.condition:
+                    try:
+                        await asyncio.wait_for(state.condition.wait(), timeout=15)
+                    except TimeoutError:
+                        timed_out = True
+                if timed_out:
+                    yield ": ping\n\n"
+
+    async def _run_reply(
+        self, state: StreamState, session_id: str, text: str, user_id: str
+    ) -> None:
+        # 一轮对话一个 trace_id：日志、SSE 事件、LangSmith trace 三处共用同一个值，
+        # 出问题时用户报一个 id 就能定位到完整链路
+        trace_id = new_trace_id()
+        token = set_trace(trace_id)
+        started = time.perf_counter()
+        try:
+            await self._generate(state, session_id, text, user_id, trace_id)
+        except asyncio.CancelledError:
+            state.cancelled = True
+            logger.info("本轮被用户中止 | session=%s", session_id)
+            raise
+        finally:
+            logger.info(
+                "本轮结束 | session=%s user=%s 耗时=%.2fs cancelled=%s",
+                session_id,
+                user_id,
+                time.perf_counter() - started,
+                state.cancelled,
+            )
+            reset_trace(token)
+            await state.finish()
+
+    async def _generate(
+        self, state: StreamState, session_id: str, text: str, user_id: str, trace_id: str = ""
+    ) -> None:
+        """把一轮问答写入事件流。"""
         session = await self.get_session(session_id)
         session.messages.append(
             ChatMessage(id=str(uuid4()), role="user", content=text, created_at=_now())
@@ -131,15 +242,27 @@ class ChatService:
         try:
             graph, mode = await self._ensure_graph()
         except Exception as exc:  # noqa: BLE001 - 配置或探测失败要如实报错
-            yield _sse({"type": "error", "code": "MODEL_UNAVAILABLE", "message": str(exc)})
+            await state.emit(
+                {
+                    "type": "error",
+                    "code": "MODEL_UNAVAILABLE",
+                    "message": str(exc),
+                    "trace_id": trace_id,
+                }
+            )
             return
 
-        await self._refresh_summary(session)
+        # 长期偏好并入 system prompt：只带确认过的条目，避免每轮都膨胀
+        system_text = SYSTEM_PROMPT
+        if self._profile is not None:
+            block = await self._profile.render_block(user_id)
+            if block:
+                system_text = f"{SYSTEM_PROMPT}\n\n{block}"
+
+        await self._refresh_summary(session, system_text)
         await self._store.save(session)
         history = [(item.role, item.content) for item in session.messages]
-        messages = compose_messages(
-            SYSTEM_PROMPT, session.summary, history, session.summarized_count
-        )
+        messages = compose_messages(system_text, session.summary, history, session.summarized_count)
 
         # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，生成器只从队列取。
         # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死。
@@ -159,7 +282,12 @@ class ChatService:
                 async for graph_event in graph.astream_events(
                     {"messages": messages},
                     version="v2",
-                    config={"recursion_limit": MAX_STEPS * 2 + 5},
+                    config={
+                        "recursion_limit": MAX_STEPS * 2 + 5,
+                        # run_name / metadata 会出现在 LangSmith 面板上，
+                        # 便于按 session_id 或 trace_id 直接筛出这一轮
+                        **trace_config(trace_id, session_id=session_id, user_id=user_id),
+                    },
                 ):
                     await queue.put(("graph", graph_event))
             except Exception as exc:  # noqa: BLE001 - 交给消费端统一映射错误码
@@ -172,13 +300,23 @@ class ChatService:
         streamed = ""
         final_state: dict | None = None
         failed: dict | None = None
+        # 本轮生图任务，随回答一起持久化，刷新后前端据此重建图片卡片
+        media_task_ids: list[str] = []
+        # 本轮工具调用次数，只用于日志里的可观测性指标
+        tool_calls = 0
 
         try:
             while True:
-                kind, payload = await queue.get()
+                try:
+                    kind, payload = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    # 采集/生图这类长工具调用期间没有 token；公网反代会把长时间
+                    # 无数据的 SSE 连接掐断，这里定期发心跳保活（前端忽略该类型）
+                    await state.emit({"type": "ping"})
+                    continue
 
                 if kind == "permission":
-                    yield _sse(payload)
+                    await state.emit(payload)
 
                 elif kind == "failed":
                     failed = _map_failure(payload)
@@ -201,10 +339,16 @@ class ChatService:
                             streamed += piece
                             # structured 模式内部会输出 JSON 决策，不能直接透给用户
                             if mode == "native":
-                                yield _sse({"type": "token", "content": piece})
+                                await state.emit({"type": "token", "content": piece})
 
                     elif name == "on_tool_start":
-                        yield _sse(
+                        tool_calls += 1
+                        logger.info(
+                            "调用工具 | tool=%s category=%s",
+                            event.get("name") or "",
+                            tool_category(event.get("name") or ""),
+                        )
+                        await state.emit(
                             {
                                 "type": "tool_call",
                                 "call_id": str(event.get("run_id") or ""),
@@ -215,11 +359,15 @@ class ChatService:
                         )
 
                     elif name == "on_tool_end":
-                        summary = _summarize(event["data"].get("output"))
-                        status = (
-                            "error" if summary.startswith(_ERROR_PREFIXES) else "ok"
-                        )
-                        yield _sse(
+                        output = event["data"].get("output")
+                        summary = _summarize(output)
+                        status = "error" if summary.startswith(_ERROR_PREFIXES) else "ok"
+                        if event.get("name") == "generate_image" and status == "ok":
+                            raw = _as_text(getattr(output, "content", output)) or str(output)
+                            match = _TASK_ID_RE.search(raw)
+                            if match and match.group(1) not in media_task_ids:
+                                media_task_ids.append(match.group(1))
+                        await state.emit(
                             {
                                 "type": "tool_result",
                                 "call_id": str(event.get("run_id") or ""),
@@ -229,7 +377,7 @@ class ChatService:
                         )
 
                     elif name == "on_tool_error":
-                        yield _sse(
+                        await state.emit(
                             {
                                 "type": "tool_result",
                                 "call_id": str(event.get("run_id") or ""),
@@ -252,35 +400,89 @@ class ChatService:
                 runner.cancel()
 
         if failed is not None:
-            yield _sse({"type": "error", **failed})
+            await state.emit({"type": "error", **failed, "trace_id": trace_id})
             return
 
         answer, finish_reason = _extract_answer(final_state, streamed)
 
         if mode != "native" and answer:
             # structured 模式无法逐字流式，整段一次性给出
-            yield _sse({"type": "token", "content": answer})
+            await state.emit({"type": "token", "content": answer})
 
         if not answer.strip():
-            yield _sse(
+            await state.emit(
                 {
                     "type": "error",
                     "code": "MODEL_EMPTY_RESPONSE",
                     "message": "模型没有返回可显示的文本。",
+                    "trace_id": trace_id,
                 }
             )
             return
 
+        if state.cancelled:
+            # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史
+            return
+
         message_id = str(uuid4())
         session.messages.append(
-            ChatMessage(id=message_id, role="assistant", content=answer, created_at=_now())
+            ChatMessage(
+                id=message_id,
+                role="assistant",
+                content=answer,
+                created_at=_now(),
+                media_task_ids=media_task_ids,
+            )
         )
         self._trim(session)
         await self._store.save(session)
 
-        yield _sse({"type": "end", "message_id": message_id, "finish_reason": finish_reason})
+        # 回答已落库，后台抽偏好；失败不影响本轮，也不阻塞 SSE
+        if self._profile is not None:
+            self._spawn(
+                self._profile.maybe_suggest(user_id, text, [*history, ("assistant", answer)])
+            )
+
+        logger.info(
+            "本轮完成 | mode=%s 回答=%d 字 finish=%s 工具调用=%d 生图任务=%d",
+            mode,
+            len(answer),
+            finish_reason,
+            tool_calls,
+            len(media_task_ids),
+        )
+
+        await state.emit(
+            {
+                "type": "end",
+                "message_id": message_id,
+                "finish_reason": finish_reason,
+                "trace_id": trace_id,
+            }
+        )
 
     # ---------- 内部 ----------
+
+    def _spawn(self, coro: Any) -> None:
+        """起一个后台任务，并持有强引用直到它结束。
+
+        fire-and-forget 的写法若不留引用，任务对象可能在中途被回收，
+        表现为「偏好抽取偶尔不生效」这类难以复现的问题。
+        """
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _prune_streams(self) -> None:
+        """结束超过 10 分钟的流不再保留；同时限制总量，避免内存增长。"""
+        now = time.time()
+        for stream_id, state in list(self._streams.items()):
+            if state.done and now - state.updated_at > 600:
+                self._streams.pop(stream_id, None)
+        if len(self._streams) > 200:
+            oldest = sorted(self._streams.values(), key=lambda s: s.updated_at)
+            for state in oldest[: len(self._streams) - 200]:
+                self._streams.pop(state.stream_id, None)
 
     async def _ensure_graph(self) -> tuple[Any, str]:
         """首次调用时构图（含 tool calling 能力探测），之后复用。"""
@@ -289,7 +491,7 @@ class ChatService:
                 self._graph, self._mode = build_agent_graph(self._settings)
             return self._graph, self._mode
 
-    async def _refresh_summary(self, session: ChatSession) -> None:
+    async def _refresh_summary(self, session: ChatSession, system_prompt: str) -> None:
         """按预算决定是否把历史折叠进摘要。
 
         摘要失败时不推进 summarized_count，那批消息会继续留在窗口里——
@@ -297,7 +499,7 @@ class ChatService:
         """
         history = [(item.role, item.content) for item in session.messages]
         plan = plan_fold(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             summary=session.summary,
             history=history,
             summarized_count=session.summarized_count,
@@ -309,9 +511,7 @@ class ChatService:
         if self._summarizer is None:
             self._summarizer = build_chat_model(self._settings)
         try:
-            session.summary = await make_summary(
-                self._summarizer, session.summary, plan.fold
-            )
+            session.summary = await make_summary(self._summarizer, session.summary, plan.fold)
         except Exception as exc:  # noqa: BLE001 - 摘要失败不能影响正常回答
             logger.warning("上下文摘要生成失败，本轮沿用原摘要：%s", exc)
             return

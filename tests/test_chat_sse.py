@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-import pytest
 from langchain_core.messages import AIMessage
 
+from app.agent.graph import SYSTEM_PROMPT
 from app.agent.permissions import find_broker
 from app.core.config import Settings
 from app.services import chat as chat_module
@@ -62,8 +65,8 @@ def _service(monkeypatch, graph: Any, mode: str = "native") -> ChatService:
 async def _frames(service: ChatService, session_id: str, text: str) -> list[dict]:
     out: list[dict] = []
     async for frame in service.stream_reply(session_id, text):
-        if frame.startswith("data: "):
-            out.append(json.loads(frame[6:]))
+        if "data: " in frame:
+            out.append(json.loads(frame.split("data: ", 1)[1]))
     return out
 
 
@@ -103,8 +106,8 @@ async def test_streams_tokens_then_end(monkeypatch):
     assert stored.messages[-1].content == "三亚攻略"
 
 
-async def test_stops_halfway_by_abort_is_not_persisted(monkeypatch):
-    """客户端中断（生成器未被消费完）时不应写入半截回答。"""
+async def test_cancel_stream_is_not_persisted(monkeypatch):
+    """用户主动停止时应取消后台生成，不写入半截回答。"""
     service = _service(
         monkeypatch,
         FakeGraph(
@@ -115,13 +118,36 @@ async def test_stops_halfway_by_abort_is_not_persisted(monkeypatch):
         ),
     )
     session = await service.create_session()
-    generator = service.stream_reply(session.id, "问题")
-    first = await generator.__anext__()
-    assert json.loads(first[6:])["type"] == "token"
-    await generator.aclose()
+    state = await service.start_reply(session.id, "问题")
+    service.cancel_stream(state.stream_id)
+    with contextlib.suppress(asyncio.CancelledError):
+        await state.task
 
     stored = await service.get_session(session.id)
     assert all(item.role != "assistant" for item in stored.messages)
+
+
+async def test_disconnect_does_not_cancel_generation(monkeypatch):
+    """订阅者断开只停止推送；后台生成继续，最终回答仍会落库。"""
+    service = _service(
+        monkeypatch,
+        FakeGraph(
+            [
+                {"event": "on_chat_model_stream", "data": {"chunk": "完整"}},
+                _final_message("完整回答"),
+            ]
+        ),
+    )
+    session = await service.create_session()
+    generator = service.stream_reply(session.id, "问题")
+    first = await generator.__anext__()
+    assert json.loads(first.split("data: ", 1)[1])["type"] == "token"
+    await generator.aclose()
+    await asyncio.sleep(0.2)
+
+    stored = await service.get_session(session.id)
+    assert stored.messages[-1].role == "assistant"
+    assert stored.messages[-1].content == "完整回答"
 
 
 async def test_tool_call_and_result_error_status(monkeypatch):
@@ -229,7 +255,9 @@ async def test_permission_request_then_granted(monkeypatch):
     frames: list[dict] = []
     saw_request = False
     async for frame in service.stream_reply(session.id, "帮我写文件"):
-        payload = json.loads(frame[6:])
+        if "data: " not in frame:
+            continue
+        payload = json.loads(frame.split("data: ", 1)[1])
         frames.append(payload)
         if payload["type"] == "permission_request":
             saw_request = True
@@ -299,7 +327,9 @@ async def test_summary_failure_keeps_history(monkeypatch):
             raise RuntimeError("摘要服务挂了")
 
     service._summarizer = BoomModel()
-    await service._refresh_summary(session)
+    # 必须传真实 system prompt：折叠预算按「system + 摘要 + 历史」估算，
+    # 传空串会让 token 总量低于阈值而直接跳过摘要，用例就测不到失败路径了
+    await service._refresh_summary(session, SYSTEM_PROMPT)
 
     # 失败时不推进 summarized_count，那批消息继续留在窗口里
     assert session.summary == ""

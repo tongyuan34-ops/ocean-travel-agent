@@ -73,10 +73,8 @@ class SourceAdapter(abc.ABC):
             return results
 
         try:
-            docs = await asyncio.wait_for(
-                self._search(query, limit), timeout=self.timeout()
-            )
-        except asyncio.TimeoutError:
+            docs = await asyncio.wait_for(self._search(query, limit), timeout=self.timeout())
+        except TimeoutError:
             detail = f"超时（>{self.timeout():.0f}s）"
             results = self._degrade(query, detail)
             self._log(started, len(results), degraded=True, detail=detail)

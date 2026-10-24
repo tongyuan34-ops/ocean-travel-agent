@@ -32,10 +32,16 @@ _ORDER_GAIN_THRESHOLD = 0.2
 
 class PlanTripInput(BaseModel):
     origin: str = Field(description="出发地，如 三亚凤凰国际机场")
-    stops: list[str] = Field(description="按顺序要去的多个目的地，如 [亚龙湾国家旅游度假区, 蜈支洲岛码头, 南山文化旅游区]")
-    city: str = Field(default="", description="所在城市，如 三亚；强烈建议填写，否则地名可能解析错位")
+    stops: list[str] = Field(
+        description="按顺序要去的多个目的地，如 [亚龙湾国家旅游度假区, 蜈支洲岛码头, 南山文化旅游区]"
+    )
+    city: str = Field(
+        default="", description="所在城市，如 三亚；强烈建议填写，否则地名可能解析错位"
+    )
     days: int = Field(default=0, description="总天数；0 表示未定，用于判断节奏")
-    mode: str = Field(default="driving", description="driving（驾车）/ walking（步行）/ bicycling（骑行）")
+    mode: str = Field(
+        default="driving", description="driving（驾车）/ walking（步行）/ bicycling（骑行）"
+    )
 
 
 @tool(args_schema=PlanTripInput)
@@ -117,7 +123,7 @@ async def plan_trip(
         current_name, current_coord = name, coord
 
     lines = [f"行程串联（{origin} 出发 · {len(points)} 个目的地 · {mode}）"]
-    header = ["数据来源：高德开放平台，里程与耗时为实际路线计算，非估算"]
+    header = ["里程与耗时为实际路线计算，非估算"]
     if unresolved:
         header.append(f"⚠️ 未纳入线路的地点（解析失败）：{'、'.join(unresolved)}")
     if truncated:
@@ -140,9 +146,7 @@ async def plan_trip(
 
     lines.append("")
     if total_km > _MAX_PLAUSIBLE_KM:
-        lines.append(
-            f"⚠️ 合计里程 {total_km:,.0f} 公里异常偏大，可能有个别地名解析错位，请核对"
-        )
+        lines.append(f"⚠️ 合计里程 {total_km:,.0f} 公里异常偏大，可能有个别地名解析错位，请核对")
     else:
         lines.append(f"合计：约 {total_km:,.0f} 公里，纯行驶约 {total_h:.1f} 小时")
 

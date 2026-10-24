@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 from urllib.parse import urlparse
 
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from app.core.config import Settings
 
@@ -66,21 +68,22 @@ def build_chat_model(settings: Settings) -> ChatOpenAI:
     elif not settings.model_api_key:
         raise ValueError("远程模型服务必须配置 MODEL_API_KEY")
 
-    extra: dict[str, object] = {}
+    # 用 dict 收集参数再展开：ChatOpenAI 的多数字段是 pydantic alias，
+    # 直接写关键字参数会让 mypy 认为参数名不存在（其实是有的）
+    kwargs: dict[str, Any] = {
+        "model": settings.model_name,
+        "api_key": SecretStr(settings.model_api_key or "not-needed"),
+        "base_url": settings.model_base_url,
+        "use_responses_api": False,
+        "timeout": 300,
+        "max_tokens": 4096,
+        "max_retries": 0,
+    }
     if _needs_thinking_disabled(_host_of(settings.model_base_url)):
         # 开发期先关闭思考模式，只练普通对话与工具调用
-        extra["extra_body"] = {"thinking": {"type": "disabled"}}
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
-    return ChatOpenAI(
-        model=settings.model_name,
-        api_key=settings.model_api_key or "not-needed",
-        base_url=settings.model_base_url,
-        use_responses_api=False,
-        timeout=300,
-        max_tokens=4096,
-        max_retries=0,
-        **extra,
-    )
+    return ChatOpenAI(**kwargs)
 
 
 def _ping(value: int) -> str:

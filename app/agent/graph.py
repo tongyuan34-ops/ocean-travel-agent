@@ -36,7 +36,8 @@ SYSTEM_PROMPT = (
     "1. 涉及天气、地点、路线、距离等事实信息时，必须先调用工具获取，"
     "严禁凭记忆编造；工具返回「TOOL_NOT_ENABLED」或失败时，如实告知用户，不要猜测。\n"
     "2. 涉及价格、班次、余票等实时信息时，说明需以官方渠道为准，不要给出具体数字。\n"
-    "3. 给出结论时标注数据来源。\n"
+    "3. 回复中不要标注「数据来源：高德开放平台」之类的来源标签；"
+    "只有 search_web 的检索结果需要附链接（见第 5 条）。\n"
     "4. 调用 plan_route 时必须传入 city 参数（出发地所在城市），"
     "否则「三亚市区」这类模糊地名可能被解析到错误位置；"
     "若工具返回「数据异常」或「无法解析」，改用更具体的地名重试，"
@@ -48,11 +49,19 @@ SYSTEM_PROMPT = (
     "这两个工具只处理用户给出的链接，不得拿它们去当关键词搜索引擎用。\n"
     "7. 检索结果标注「降级」「SEARCH_FAILED」或 parse_shared_link 失败时，"
     "必须如实告知用户本次没拿到真实资料，不要用常识补足。\n"
-    "8. search_social_session 是默认关闭的社媒采集插件，**只在用户明确要求时调用**；"
-    "它返回 TOOL_NOT_ENABLED 时照实说明需要在 .env 开启开关并配置 Cookie，"
-    "不要改用别的工具去凑内容。generate_scraper 只生成脚本草案，"
-    "绝不要说成「已经帮你采集/执行了」。\n"
-    "9. 用中文回答，条理清晰。"
+    "8. 用户明确要求抖音、B站等平台的站内内容时，直接调用 search_social_session 采集；"
+    "部分平台未配置 Cookie 时，工具会自动跳过并继续采集其余平台，"
+    "不得因此整体拒绝，也不得在调用前断言插件关闭或用 search_web 冒充平台内容；"
+    "只有工具实际返回 TOOL_NOT_ENABLED 时，才说明需要在 .env 开启开关并配置 Cookie。"
+    "generate_scraper 只生成脚本草案，绝不要说成「已经帮你采集/执行了」。\n"
+    "9. generate_image 的图片由前端自动轮询并在对话中直接展示，用户可在页面内放大与保存；"
+    "不要声称无法保存图片，也不要让用户去打开本地文件。\n"
+    "10. 用户要求查看或操作文件时，先用 list_dir 列出目录、再用 read_file 读取；"
+    "需要用户在外部程序里编辑时用 open_file 打开，用户保存后重新 read_file 取最新内容；"
+    "write_file/create_dir/delete_path/open_file 执行时会弹权限确认。"
+    "不得预先声称无法打开或操作文件；路径必须在 ALLOWED_ROOTS 白名单内，"
+    "越界时如实说明白名单范围，不要编造文件内容。\n"
+    "11. 用中文回答，条理清晰。"
 )
 
 
@@ -131,9 +140,7 @@ def _build_structured(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph
                 result = f"工具执行失败：{exc}"
 
             messages.append(reply)
-            messages.append(
-                HumanMessage(content=f"工具「{tool.name}」返回：\n{result}")
-            )
+            messages.append(HumanMessage(content=f"工具「{tool.name}」返回：\n{result}"))
 
         return {"messages": [AIMessage(content="已达到最大步数，未能给出最终答案。")]}
 

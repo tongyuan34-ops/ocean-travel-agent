@@ -16,22 +16,26 @@ class ChatMessage:
     role: str  # user | assistant
     content: str
     created_at: str
+    # 本条回答涉及的媒体任务，前端刷新后据此重建图片卡片
+    media_task_ids: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "role": self.role,
             "content": self.content,
             "created_at": self.created_at,
+            "media_task_ids": list(self.media_task_ids),
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ChatMessage":
+    def from_dict(cls, data: dict[str, Any]) -> ChatMessage:
         return cls(
             id=str(data.get("id", "")),
             role=str(data.get("role", "user")),
             content=str(data.get("content", "")),
             created_at=str(data.get("created_at", "")),
+            media_task_ids=[str(item) for item in data.get("media_task_ids") or []],
         )
 
 
@@ -54,7 +58,7 @@ class ChatSession:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ChatSession":
+    def from_dict(cls, data: dict[str, Any]) -> ChatSession:
         return cls(
             id=str(data.get("id", "")),
             created_at=str(data.get("created_at", "")),

@@ -74,7 +74,7 @@ class BingCnAdapter(SourceAdapter):
     # ---------- API 路线 ----------
 
     async def _search_api(self, query: str, limit: int) -> list[Doc]:
-        params = {
+        params: dict[str, str | int] = {
             "q": query,
             "count": limit,
             "mkt": "zh-CN",
@@ -114,9 +114,7 @@ class BingCnAdapter(SourceAdapter):
     async def _search_html(self, query: str, limit: int) -> list[Doc]:
         await _throttle()
         url = f"{_HTML_ENDPOINT}?q={quote_plus(query)}&count={_MAX_LIMIT}&mkt=zh-CN"
-        final_url, text, _ctype, _status = await fetch_text(
-            url, timeout=self.timeout()
-        )
+        final_url, text, _ctype, _status = await fetch_text(url, timeout=self.timeout())
 
         if "captcha" in final_url.lower() or _is_verify_page(text):
             raise RuntimeError(

@@ -122,24 +122,18 @@ async def test_write_file_refuses_without_confirmation(monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOWED_ROOTS", str(tmp_path))
     monkeypatch.setattr("app.agent.tools.system.settings_cache", None)
 
-    out = await write_file.ainvoke(
-        {"path": str(tmp_path / "x.txt"), "content": "hi"}
-    )
+    out = await write_file.ainvoke({"path": str(tmp_path / "x.txt"), "content": "hi"})
     assert out.startswith("PERMISSION_DENIED")
     assert not (tmp_path / "x.txt").exists()
 
 
-async def test_write_file_outside_sandbox_rejected_before_permission(
-    monkeypatch, tmp_path
-):
+async def test_write_file_outside_sandbox_rejected_before_permission(monkeypatch, tmp_path):
     """路径越界要在「要权限之前」就被拦下，不能先弹确认框再拒绝。"""
     root = tmp_path / "sandbox"
     root.mkdir()
     monkeypatch.setenv("ALLOWED_ROOTS", str(root))
     monkeypatch.setattr("app.agent.tools.system.settings_cache", None)
 
-    out = await write_file.ainvoke(
-        {"path": str(tmp_path / "outside.txt"), "content": "hi"}
-    )
+    out = await write_file.ainvoke({"path": str(tmp_path / "outside.txt"), "content": "hi"})
     assert out.startswith("PATH_NOT_ALLOWED")
     assert not (tmp_path / "outside.txt").exists()

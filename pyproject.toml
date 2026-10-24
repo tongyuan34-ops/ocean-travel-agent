@@ -1,0 +1,136 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocean-travel-agent"
+version = "0.1.0"
+description = "旅行规划 Agent：双模式 Agent 循环、可续传 SSE、默认拒绝的权限网关"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# 版本区间取「当前实测版本 ~ 下一个大版本」，避免 LangGraph / LangChain
+# 这类半年一变的库在下游装出新 API 导致 import 直接失败。
+# 精确可复现的环境见 uv.lock。
+dependencies = [
+    "fastapi>=0.161,<1.0",
+    "uvicorn>=0.54,<1.0",
+    "langchain-core>=1.6,<2.0",
+    "langchain-openai>=1.7,<2.0",
+    "langgraph>=1.2,<2.0",
+    "httpx>=0.28,<1.0",
+    "lxml>=6.1,<7.0",
+    "reportlab>=5.1,<6.0",
+    "python-dotenv>=1.2,<2.0",
+    "redis>=8.1,<9.0",
+]
+
+[project.optional-dependencies]
+# 给 pip 用户：pip install -e ".[dev]"
+# 注意与下方 [dependency-groups] 保持一致——uv 只认后者，pip 只认前者
+dev = [
+    "pytest>=9.1,<10.0",
+    "pytest-asyncio>=1.4,<2.0",
+    "pytest-cov>=7.0,<8.0",
+    "ruff>=0.15,<1.0",
+    "mypy>=1.19,<2.0",
+]
+# LangSmith 是可选依赖：不装也能跑，装了并配好 LANGSMITH_API_KEY 才有链路追踪
+tracing = [
+    "langsmith>=0.7,<1.0",
+]
+
+[dependency-groups]
+# uv 的默认开发组：`uv sync` 会自动装上，无需 --extra
+dev = [
+    "pytest>=9.1,<10.0",
+    "pytest-asyncio>=1.4,<2.0",
+    "pytest-cov>=7.0,<8.0",
+    "ruff>=0.15,<1.0",
+    "mypy>=1.19,<2.0",
+]
+
+[project.urls]
+Documentation = "https://github.com/<your-name>/ocean-travel-agent/blob/main/docs/SPEC.md"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+# ---------------- ruff ----------------
+
+[tool.ruff]
+# 代码里用到了 PEP 701（f-string 内复用外层引号），该语法自 3.12 起才合法
+target-version = "py312"
+line-length = 100
+src = ["app", "tests", "scripts"]
+# 中文注释与字符串较多，行长按 100 放宽；其余保持默认严格度
+exclude = [".venv", "data", "media", "cookies", "__pycache__", ".pytest_cache*"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "BLE", # flake8-blind-except：裸 except 会吞掉 KeyboardInterrupt
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff 自有规则
+]
+ignore = [
+    "E501",  # 行长交给 formatter
+    "B008",  # FastAPI 的 Depends() 默认值是标准写法
+    "UP031", # 百分号格式化在日志/print 里更直观，不强求 f-string
+    "RUF001", # 中文全角标点在注释与提示文案里是正常内容
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------- mypy ----------------
+
+[tool.mypy]
+python_version = "3.12"
+# 渐进式收紧：先只查「明显写错」的，避免一次性几百条报错把 CI 卡死。
+# 后续可逐步打开 disallow_untyped_defs。
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["^\\.venv/", "^data/", "^media/"]
+
+[[tool.mypy.overrides]]
+# LangChain / LangGraph 的类型标注自身仍在演进，不对其做严格检查
+module = ["langchain_core.*", "langchain_openai.*", "langgraph.*"]
+ignore_errors = true
+
+# ---------------- pytest ----------------
+
+[tool.pytest.ini_options]
+# asyncio_mode=auto：工具与适配器大量是 async，省掉每个用例加 marker
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+# ---------------- coverage ----------------
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/version.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]

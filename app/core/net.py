@@ -41,23 +41,23 @@ IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 _INTERNAL_NETWORKS = [
     ipaddress.ip_network(net)
     for net in (
-        "0.0.0.0/8",        # 本机网段（0.x 常被当作本机）
-        "10.0.0.0/8",       # 私网 A
-        "100.64.0.0/10",    # CGNAT，部分云元数据走此段
-        "127.0.0.0/8",      # 回环
-        "169.254.0.0/16",   # 链路本地，含云元数据 169.254.169.254
-        "172.16.0.0/12",    # 私网 B
-        "192.0.0.0/24",     # IETF 协议专用
-        "192.168.0.0/16",   # 私网 C
+        "0.0.0.0/8",  # 本机网段（0.x 常被当作本机）
+        "10.0.0.0/8",  # 私网 A
+        "100.64.0.0/10",  # CGNAT，部分云元数据走此段
+        "127.0.0.0/8",  # 回环
+        "169.254.0.0/16",  # 链路本地，含云元数据 169.254.169.254
+        "172.16.0.0/12",  # 私网 B
+        "192.0.0.0/24",  # IETF 协议专用
+        "192.168.0.0/16",  # 私网 C
         "198.51.100.0/24",  # 文档示例段
-        "203.0.113.0/24",   # 文档示例段
-        "224.0.0.0/4",      # 组播
-        "240.0.0.0/4",      # 保留段
-        "::/128",           # 未指定
-        "::1/128",          # IPv6 回环
-        "fc00::/7",         # IPv6 唯一本地地址
-        "fe80::/10",        # IPv6 链路本地
-        "ff00::/8",         # IPv6 组播
+        "203.0.113.0/24",  # 文档示例段
+        "224.0.0.0/4",  # 组播
+        "240.0.0.0/4",  # 保留段
+        "::/128",  # 未指定
+        "::1/128",  # IPv6 回环
+        "fc00::/7",  # IPv6 唯一本地地址
+        "fe80::/10",  # IPv6 链路本地
+        "ff00::/8",  # IPv6 组播
     )
 ]
 
@@ -93,9 +93,7 @@ async def ensure_safe_url(url: str) -> str:
 
     parsed = urlparse(raw)
     if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
-        raise UrlNotAllowed(
-            f"只允许 http/https 链接，当前协议：{parsed.scheme or '（缺失）'}"
-        )
+        raise UrlNotAllowed(f"只允许 http/https 链接，当前协议：{parsed.scheme or '（缺失）'}")
     host = parsed.hostname
     if not host:
         raise UrlNotAllowed(f"无法从链接中解析出主机名：{raw}")
@@ -113,22 +111,25 @@ async def _ensure_public_host(host: str) -> None:
         return
 
     try:
-        infos = await asyncio.to_thread(
-            socket.getaddrinfo, host, None, proto=socket.IPPROTO_TCP
-        )
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, OSError) as exc:
         raise FetchError(f"域名无法解析：{host}（{exc}）") from exc
 
-    addresses = {info[4][0] for info in infos}
+    # sockaddr 的元素类型按 family 不同（IPv4 是 2 元组、IPv6 是 4 元组），
+    # 这里只取第 0 项且要求是 str，避免把非地址字段当成主机名去解析
+    addresses: set[str] = set()
+    for info in infos:
+        sockaddr = info[4]
+        if isinstance(sockaddr, tuple) and isinstance(sockaddr[0], str):
+            addresses.add(sockaddr[0])
     if not addresses:
         raise FetchError(f"域名无法解析：{host}")
 
     for addr in addresses:
+        # IPv6 可能带 %zone 后缀（fe80::1%eth0），去掉后再判断
         ip = _parse_ip(addr.split("%")[0])
         if ip is not None and not _is_public(ip):
-            raise UrlNotAllowed(
-                f"{host} 解析到内网/本机地址（{addr}），已拒绝访问"
-            )
+            raise UrlNotAllowed(f"{host} 解析到内网/本机地址（{addr}），已拒绝访问")
 
 
 def _parse_ip(value: str) -> IpAddress | None:
@@ -169,9 +170,7 @@ async def fetch_text(
         for _ in range(MAX_REDIRECTS + 1):
             current = await ensure_safe_url(current)
             try:
-                async with client.stream(
-                    "GET", current, headers=request_headers
-                ) as resp:
+                async with client.stream("GET", current, headers=request_headers) as resp:
                     if resp.status_code in {301, 302, 303, 307, 308}:
                         location = resp.headers.get("location")
                         if not location:

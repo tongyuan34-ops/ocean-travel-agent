@@ -69,17 +69,11 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=status, content=_payload(exc.code, exc.message))
 
     @app.exception_handler(RequestValidationError)
-    async def _handle_validation_error(
-        _: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    async def _handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         detail = str(exc.errors())[:300]
-        return JSONResponse(
-            status_code=422, content=_payload("VALIDATION_ERROR", detail)
-        )
+        return JSONResponse(status_code=422, content=_payload("VALIDATION_ERROR", detail))
 
     @app.exception_handler(Exception)
     async def _handle_unhandled(_: Request, exc: Exception) -> JSONResponse:
         logger.exception("未处理异常：%s", exc)
-        return JSONResponse(
-            status_code=500, content=_payload("INTERNAL_ERROR", "服务器内部错误")
-        )
+        return JSONResponse(status_code=500, content=_payload("INTERNAL_ERROR", "服务器内部错误"))

@@ -105,7 +105,7 @@ async def recommend_stay(
             "建议放宽区域或星级要求后重试。"
         )
 
-    header = [f"酒店候选（{city}{('·' + area) if area else ''}，数据来源：高德开放平台）"]
+    header = [f"酒店候选（{city}{('·' + area) if area else ''}）"]
     condition = []
     if budget_per_night > 0:
         condition.append(f"每晚预算 {budget_per_night:,.0f} 元")

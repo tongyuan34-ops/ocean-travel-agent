@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Ocean · 旅行助手</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16263f">
+<meta name="format-detection" content="telephone=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ocean">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2316263f'/%3E%3Cpath d='M5 20c3-5.5 6-5.5 9 0s6 5.5 9 0' stroke='%23f6faff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./styles.css?v=20261023q">
+</head>
+<body>
+<div class="app" id="app">
+  <div class="wallpaper" id="wallpaper">
+    <img id="wallpaperImg" alt="" src="./assets/wallpaper-sea.jpg">
+    <div class="wallpaper-veil"></div>
+  </div>
+
+  <header class="topbar" id="topbar">
+    <div class="topbar-left">
+      <button class="icon-orb" id="closeBtn" type="button" aria-label="返回首页" title="返回首页">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+      </button>
+      <div class="brand" id="brand">
+        <svg class="brand-wave" viewBox="0 0 46 20" aria-hidden="true">
+          <path d="M2 13c4.6-7.6 9.6-7.6 14.2 0s9.6 7.6 14.2 0 9.6-7.6 13.4-1.4"/>
+          <circle cx="43.6" cy="8.4" r="1.5"/>
+        </svg>
+        <span class="brand-name">OCEAN</span>
+      </div>
+    </div>
+
+    <nav class="main-nav" id="mainNav" aria-label="主导航">
+      <button type="button" data-sheet="discover">Discover</button>
+      <button type="button" data-sheet="story">Our story</button>
+      <button type="button" data-sheet="journal">Journal</button>
+    </nav>
+
+    <div class="topbar-right">
+      <button class="icon-orb full-btn" id="fullBtn" type="button" aria-label="全屏" title="全屏（F11）">
+        <svg class="fs-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/></svg>
+        <svg class="fs-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4M20 9h-5V4M20 15h-5v5M4 15h5v5"/></svg>
+      </button>
+      <button class="pill-outline" id="exploreNow" type="button">
+        <span>Explore now</span>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 13.5L13.5 6.5M7.5 6.5h6v6"/></svg>
+      </button>
+      <button class="icon-orb mobile-only" id="menuBtn" type="button" aria-label="菜单">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="hero" id="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">FEEL THE WORLD SLOW DOWN</p>
+        <h1 class="display">Closer to<br>the ocean.</h1>
+        <p class="lede">A moment of stillness.<br>An endless sense of possibility.</p>
+        <div class="hero-actions">
+          <button class="btn-primary" id="startBtn" type="button">
+            <span>Explore the ocean</span>
+            <svg viewBox="0 0 22 12" aria-hidden="true"><path d="M1 6h18M14 1.5L19.5 6 14 10.5"/></svg>
+          </button>
+          <button class="btn-ghost" id="filmBtn" type="button">
+            <span class="play-orb"><svg viewBox="0 0 12 14" aria-hidden="true"><path d="M1.5 1l9 6-9 6z"/></svg></span>
+            <span>Watch the film</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="assistant" id="assistant">
+      <div class="rail-scrim" id="railScrim"></div>
+
+      <aside class="rail panel" id="rail">
+        <div class="rail-head">
+          <div>
+            <p class="rail-title">Journal</p>
+            <p class="rail-sub">会话记录</p>
+          </div>
+          <button class="mini-btn" id="newSessionBtn" type="button" aria-label="新建会话" title="新建会话">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <div class="rail-list" id="sessionList"></div>
+        <div class="rail-foot">
+          <div class="conn" id="conn"><span class="dot"></span><span id="connText">正在连接…</span></div>
+          <button class="mini-link" id="railSettings" type="button">设置</button>
+        </div>
+      </aside>
+
+      <section class="chat panel">
+        <header class="chat-head">
+          <div class="chat-title-wrap">
+            <p class="chat-kicker">AI TRAVEL CONCIERGE</p>
+            <h2 class="chat-title" id="chatTitle">新的旅程</h2>
+          </div>
+          <div class="chat-actions">
+            <button class="mini-btn rail-toggle" id="railToggle" type="button" aria-label="会话记录">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            </button>
+            <button class="mini-btn" id="mediaBtn" type="button" aria-label="生成旅行图片" title="生成旅行图片">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>
+            </button>
+            <button class="mini-btn" id="capBtn" type="button" aria-label="能力与数据来源" title="能力与数据来源">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.4"/></svg>
+            </button>
+            <button class="mini-btn" id="settingsBtn" type="button" aria-label="设置" title="设置">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.6a3.4 3.4 0 100 6.8 3.4 3.4 0 000-6.8z"/><path d="M19 12c0-.6-.1-1.1-.2-1.6l1.6-1.2-1.7-2.9-1.9.7c-.8-.7-1.7-1.2-2.7-1.5L13.8 3h-3.6l-.3 2.5c-1 .3-1.9.8-2.7 1.5l-1.9-.7-1.7 2.9L5.2 10.4C5.1 10.9 5 11.4 5 12s.1 1.1.2 1.6l-1.6 1.2 1.7 2.9 1.9-.7c.8.7 1.7 1.2 2.7 1.5l.3 2.5h3.6l.3-2.5c1-.3 1.9-.8 2.7-1.5l1.9.7 1.7-2.9-1.6-1.2c.1-.5.2-1 .2-1.6z"/></svg>
+            </button>
+          </div>
+          <div class="chips" id="sourceChips"></div>
+        </header>
+
+        <div class="messages" id="messages"></div>
+
+        <button class="to-bottom" id="toBottom" type="button" hidden>回到底部 ↓</button>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <button class="composer-tool" id="composerMedia" type="button" aria-label="生成旅行图片" title="生成旅行图片">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+          </button>
+          <textarea id="input" rows="1" placeholder="告诉我目的地、天数与预算…" aria-label="消息输入框"></textarea>
+          <button class="send" id="sendBtn" type="submit" aria-label="发送">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+        <p class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行 · 实时信息均来自工具返回</p>
+      </section>
+    </section>
+  </main>
+
+  <footer class="hud" id="hud">
+    <button class="hud-left" id="focusBtn" type="button" aria-label="专注模式">
+      <span class="hud-orb" id="focusOrb">
+        <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 2v10M11 2v10"/></svg>
+      </span>
+      <span>LIVE AT SEA</span>
+    </button>
+    <button class="hud-right" id="scrollCue" type="button">
+      <span>SCROLL TO EXPLORE</span>
+      <svg viewBox="0 0 12 20" aria-hidden="true"><path d="M6 1v16M1.5 12.5L6 18l4.5-5.5"/></svg>
+    </button>
+  </footer>
+
+  <button class="focus-exit" id="focusExit" type="button" hidden>退出专注模式</button>
+
+  <div class="overlay" id="sheetOverlay" hidden>
+    <div class="scrim" id="sheetScrim"></div>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <header class="sheet-head">
+        <div>
+          <p class="sheet-kicker" id="sheetKicker">OCEAN</p>
+          <h3 class="sheet-title" id="sheetTitle">旅行灵感</h3>
+        </div>
+        <button class="icon-orb small" id="sheetClose" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+      </header>
+      <div class="sheet-body" id="sheetBody"></div>
+    </section>
+  </div>
+
+  <div class="overlay" id="permOverlay" hidden>
+    <div class="scrim"></div>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="permAction">
+      <p class="modal-kicker">PERMISSION</p>
+      <h3 class="modal-title" id="permAction">写入文件</h3>
+      <p class="perm-path mono" id="permPath"></p>
+      <pre class="perm-preview" id="permPreview"></pre>
+      <p class="perm-timer"><b id="permCountdown">120</b> 秒后自动拒绝</p>
+      <div class="perm-actions">
+        <button class="btn-quiet" id="permDeny" type="button">拒绝</button>
+        <button class="btn-quiet" id="permRemember" type="button">允许，本会话不再询问</button>
+        <button class="btn-primary small" id="permAllow" type="button">允许本次</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+</div>
+<script src="./app.js?v=20261023q"></script>
+</body>
+</html>

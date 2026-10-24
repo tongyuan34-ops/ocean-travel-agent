@@ -7,9 +7,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-
 from typing import Any
+
+from fastapi import APIRouter, Request
 
 from app.agent.tools import ALL_TOOLS
 from app.core.config import load_settings
@@ -20,6 +20,7 @@ router = APIRouter(prefix="/tools", tags=["tools"])
 
 # 有副作用、必须先经用户确认的工具（契约 2.4 的动作清单）
 _PERMISSION_TOOLS = {
+    "open_file",
     "write_file",
     "create_dir",
     "delete_path",

@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
-
-import pytest
+from typing import ClassVar
 
 from app.agent.tools.media import generate_image, list_image_templates
 from app.media.base import MediaBackend, MediaKind, MediaRequest, MediaResult, TaskStatus
@@ -128,9 +127,7 @@ async def test_generate_image_applies_template():
     service = _service(backend)
     token = current_media.set(service)
     try:
-        out = await generate_image.ainvoke(
-            {"prompt": "三亚海边", "style": "poster"}
-        )
+        out = await generate_image.ainvoke({"prompt": "三亚海边", "style": "poster"})
     finally:
         current_media.reset(token)
 
@@ -250,7 +247,7 @@ def test_service_unavailable_reason_when_backend_none(settings):
 class _CaptureClient:
     """截获 httpx 请求体，不发真实网络请求。"""
 
-    captured: dict = {}
+    captured: ClassVar[dict] = {}
 
     def __init__(self, *args, **kwargs) -> None:
         pass

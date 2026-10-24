@@ -10,13 +10,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from app.core.config import Settings
+import httpx
+
+from app.core.config import PROJECT_ROOT, Settings
 from app.media.ark_video import ArkVideoBackend
 from app.media.base import (
     MediaBackend,
@@ -27,6 +30,10 @@ from app.media.base import (
     TaskStatus,
 )
 from app.media.custom_image import CustomImageBackend
+from app.media.task_store import build_media_task_store
+
+logger = logging.getLogger(__name__)
+MEDIA_DIR = PROJECT_ROOT / "media"
 
 # 任务状态变化回调，签名 (task) -> None，后续接 SSE 推送
 UpdateHook = Callable[["MediaTask"], Awaitable[None] | None]
@@ -52,6 +59,8 @@ class MediaTask:
     duration: int | None = None
     result_url: str | None = None
     error: str | None = None
+    # 任务完成时主动落盘到 media/，重启或临时链接过期后仍可展示
+    local_path: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -72,6 +81,7 @@ class MediaService:
         video_backend: MediaBackend | None,
         ttl_sec: int = 3600,
         on_update: UpdateHook | None = None,
+        store=None,
     ) -> None:
         self._backends: dict[MediaKind, MediaBackend | None] = {
             MediaKind.IMAGE: image_backend,
@@ -81,6 +91,7 @@ class MediaService:
         self._lock = asyncio.Lock()
         self._ttl = ttl_sec
         self._on_update = on_update
+        self._store = store
 
     # ---------- 对外接口 ----------
 
@@ -122,12 +133,27 @@ class MediaService:
             self._prune_locked()
             self._tasks[task.id] = task
 
+        await self._persist(task)
         asyncio.create_task(self._run(task, req, backend))
         return task
 
     async def get(self, task_id: str) -> MediaTask | None:
         async with self._lock:
-            return self._tasks.get(task_id)
+            cached = self._tasks.get(task_id)
+        if cached is not None:
+            return cached
+
+        if self._store is None:
+            return None
+        data = await self._store.get(task_id)
+        if not data:
+            return None
+        task = self._from_record(data)
+        if task is None:
+            return None
+        async with self._lock:
+            self._tasks[task_id] = task
+        return task
 
     async def aclose(self) -> None:
         """等待所有进行中的任务收尾（测试脚本用）。"""
@@ -138,8 +164,10 @@ class MediaService:
                     if t.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
                 ]
             if not pending:
-                return
+                break
             await asyncio.sleep(0.5)
+        if self._store is not None:
+            await self._store.aclose()
 
     # ---------- 内部实现 ----------
 
@@ -180,11 +208,84 @@ class MediaService:
             task.error = error
         task.updated_at = time.time()
 
+        # 成功即落盘：不能等前端第一次展示，否则重启窗口里图片就丢了
+        if status == TaskStatus.SUCCEEDED and task.result_url and not task.local_path:
+            task.local_path = await self._save_local(task)
+
         hook = self._on_update
         if hook is not None:
             outcome = hook(task)
             if asyncio.iscoroutine(outcome):
                 await outcome
+
+        await self._persist(task)
+
+    async def _save_local(self, task: MediaTask) -> str | None:
+        """把成品下载到 media/task-<id前8位>.<ext>；失败不影响任务状态。"""
+        ext = ".mp4" if task.kind == MediaKind.VIDEO else ".jpg"
+        target = MEDIA_DIR / f"task-{task.id[:8]}{ext}"
+        if target.is_file():
+            return str(target)
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                resp = await client.get(task.result_url or "")
+            if resp.status_code != 200 or not resp.content:
+                logger.warning("媒体成品下载失败：%s（HTTP %s）", task.id, resp.status_code)
+                return None
+            content_type = (resp.headers.get("content-type") or "").split(";")[0].lower()
+            if "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif "mp4" in content_type:
+                ext = ".mp4"
+            target = MEDIA_DIR / f"task-{task.id[:8]}{ext}"
+            MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(resp.content)
+            return str(target)
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("媒体成品落盘失败：%s（%s）", task.id, exc)
+            return None
+
+    def _record(self, task: MediaTask) -> dict[str, Any]:
+        return {
+            "id": task.id,
+            "kind": task.kind.value,
+            "status": task.status.value,
+            "prompt": task.prompt,
+            "style": task.style,
+            "ref_image": task.ref_image,
+            "duration": task.duration,
+            "result_url": task.result_url,
+            "error": task.error,
+            "local_path": task.local_path,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+        }
+
+    def _from_record(self, data: dict[str, Any]) -> MediaTask | None:
+        try:
+            return MediaTask(
+                id=str(data["id"]),
+                kind=MediaKind(data["kind"]),
+                status=TaskStatus(data["status"]),
+                prompt=str(data.get("prompt") or ""),
+                style=data.get("style"),
+                ref_image=data.get("ref_image"),
+                duration=data.get("duration"),
+                result_url=data.get("result_url"),
+                error=data.get("error"),
+                local_path=data.get("local_path"),
+                created_at=float(data.get("created_at") or time.time()),
+                updated_at=float(data.get("updated_at") or time.time()),
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    async def _persist(self, task: MediaTask) -> None:
+        if self._store is None:
+            return
+        await self._store.save(task.id, self._record(task))
 
     def _prune_locked(self) -> None:
         """清理过期任务，避免内存无限增长。调用前需持锁。"""
@@ -235,4 +336,5 @@ def build_media_service(
         video_backend=video_backend,
         ttl_sec=settings.media_task_ttl_sec,
         on_update=on_update,
+        store=build_media_task_store(settings),
     )

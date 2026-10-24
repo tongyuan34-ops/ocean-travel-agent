@@ -47,9 +47,7 @@ _PLATFORMS = {
 }
 
 # 「地点/地址/位置」类显式标注
-_PLACE_LABEL = re.compile(
-    r"(?:地点|地址|位置|定位)[:：]?\s*([^\s#，。；;、|｜]{2,30})"
-)
+_PLACE_LABEL = re.compile(r"(?:地点|地址|位置|定位)[:：]?\s*([^\s#，。；;、|｜]{2,30})")
 # 以行政/景点后缀结尾的疑似地名
 _PLACE_SUFFIX = re.compile(
     r"([^\s#，。；;、|｜]{2,12}(?:市|区|县|镇|景区|公园|酒店|民宿|机场|车站|海滩|湾|岛|山|湖))"
@@ -85,14 +83,12 @@ async def parse_shared_link(url: str) -> str:
         return f"{exc.code}：{exc.message}"
 
     meta = page.meta
-    title = (
-        meta.get("og:title")
-        or meta.get("twitter:title")
-        or page.title
-        or ""
-    ).strip()
+    title = (meta.get("og:title") or meta.get("twitter:title") or page.title or "").strip()
     description = (
-        meta.get("og:description") or meta.get("twitter:description") or meta.get("description") or ""
+        meta.get("og:description")
+        or meta.get("twitter:description")
+        or meta.get("description")
+        or ""
     ).strip()
     cover = (meta.get("og:image") or meta.get("twitter:image") or "").strip()
     platform = _detect_platform(page.url)

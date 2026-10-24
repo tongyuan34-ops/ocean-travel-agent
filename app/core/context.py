@@ -121,9 +121,7 @@ def plan_fold(
         index += 1
 
     if fold:
-        logger.info(
-            "触发上下文摘要：折叠 %d 条历史，保留最近 %d 条", len(fold), total - index
-        )
+        logger.info("触发上下文摘要：折叠 %d 条历史，保留最近 %d 条", len(fold), total - index)
 
     return FoldPlan(fold=fold, new_summarized_count=index)
 

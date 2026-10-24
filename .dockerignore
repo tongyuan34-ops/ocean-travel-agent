@@ -1,0 +1,29 @@
+.git
+.github
+.venv
+venv
+
+# 密钥与登录态：绝不进镜像
+.env
+.env.*
+!.env.example
+cookies/
+browser_data/
+
+# 运行产物
+data/
+media/
+__pycache__/
+*.py[cod]
+.pytest_cache*
+*.egg-info/
+
+# 本地杂项
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+docs/*.zip
+# 只排掉根目录的临时二维码图；web/assets 下的图标与壁纸是前端必需资源
+/*.png

@@ -19,6 +19,7 @@ Cookie **绝不写入日志、绝不出现在返回文本里**——它等同于
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -115,14 +116,12 @@ async def run_crawler_subprocess(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout
-        )
-    except asyncio.TimeoutError:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except TimeoutError:
         await _kill_process_tree(process.pid)
         try:
             await asyncio.wait_for(process.wait(), timeout=15)
-        except asyncio.TimeoutError:  # pragma: no cover - 极端情况
+        except TimeoutError:  # pragma: no cover - 极端情况
             logger.error("子进程 %s 清理后仍未退出", process.pid)
         return CrawlerRun(
             returncode=-1,
@@ -156,10 +155,8 @@ async def _kill_process_tree(pid: int) -> None:
         )
         await killer.wait()
         return
-    try:
+    with contextlib.suppress(OSError, ProcessLookupError):
         os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
 
 
 def _decode(raw: bytes | None) -> str:
@@ -182,9 +179,7 @@ class MediaCrawlerAdapter(SourceAdapter):
         self.platform = PLATFORM_LABELS[key]
         self.kind = SourceKind.SOCIAL_CN
         self.crawler_code = PLATFORM_CODES[key]
-        self.search_timeout = float(
-            settings.mediacrawler_timeout + MEDIACRAWLER_OVERHEAD_SEC
-        )
+        self.search_timeout = float(settings.mediacrawler_timeout + MEDIACRAWLER_OVERHEAD_SEC)
 
     # ---------- 可用性 ----------
 
@@ -223,14 +218,7 @@ class MediaCrawlerAdapter(SourceAdapter):
 
     def _node_dir(self) -> Path:
         """Playwright 自带的 node 所在目录。"""
-        return (
-            self._root()
-            / ".venv"
-            / "Lib"
-            / "site-packages"
-            / "playwright"
-            / "driver"
-        )
+        return self._root() / ".venv" / "Lib" / "site-packages" / "playwright" / "driver"
 
     def _subprocess_env(self) -> dict[str, str] | None:
         """给采集子进程准备环境变量；无需改动时返回 None（继承父进程）。
@@ -293,11 +281,10 @@ class MediaCrawlerAdapter(SourceAdapter):
             data_dir=self._data_dir(),
             since=started,
             limit=max(1, limit),
+            query=query,
         )
         if not docs and run.returncode != 0:
-            raise RuntimeError(
-                f"MediaCrawler 退出码 {run.returncode}：{run.tail() or '无输出'}"
-            )
+            raise RuntimeError(f"MediaCrawler 退出码 {run.returncode}：{run.tail() or '无输出'}")
         if not docs:
             logger.info(
                 "MediaCrawler %s 本次无新结果（关键词=%s，退出码=%s）",
@@ -363,17 +350,32 @@ def collect_docs(
     data_dir: Path,
     since: float,
     limit: int,
+    query: str = "",
 ) -> list[Doc]:
     """读取本次新落盘的结果文件，归一化为 Doc。
 
     只取 mtime 不早于本次启动的文件——MediaCrawler 是**追加/重写**同一个
     日期文件，不按 mtime 过滤就会把昨天、甚至上次未登录时的空结果混进来。
+
+    同一天跑多个关键词时，MediaCrawler 会把结果**追加**进同一个日期文件，
+    按顺序取前 limit 条会读到上一次关键词的旧内容（实测搜「稻城」却返回「大理」）。
+    因此传入 query 时优先只保留 source_keyword 匹配的条目。
     """
     contents: list[dict[str, Any]] = []
     comments: list[dict[str, Any]] = []
     for base in _candidate_result_dirs(data_dir, code, platform_key):
         contents.extend(_read_recent(base, "search_contents", since))
         comments.extend(_read_recent(base, "search_comments", since))
+
+    if query:
+        matched = [
+            item
+            for item in contents
+            if isinstance(item, dict)
+            and str(_pick(item, ("source_keyword",)) or "").strip().lower() == query.strip().lower()
+        ]
+        if matched:
+            contents = matched
 
     ids = {str(_pick(item, _ID_KEYS) or "") for item in contents if isinstance(item, dict)}
     ids.discard("")
@@ -386,9 +388,7 @@ def collect_docs(
             continue
         content_id = str(_pick(item, _ID_KEYS) or "").strip()
         # 候选目录可能都存在，同一条内容会被读到两次，按内容 id 去重（无 id 时退回链接/标题）
-        dedupe_key = content_id or str(
-            _pick(item, _URL_KEYS) or _pick(item, _TITLE_KEYS) or ""
-        )
+        dedupe_key = content_id or str(_pick(item, _URL_KEYS) or _pick(item, _TITLE_KEYS) or "")
         if dedupe_key and dedupe_key in seen:
             continue
         if dedupe_key:
@@ -406,9 +406,7 @@ def collect_docs(
     return docs
 
 
-def _candidate_result_dirs(
-    data_dir: Path, code: str, platform_key: str
-) -> list[Path]:
+def _candidate_result_dirs(data_dir: Path, code: str, platform_key: str) -> list[Path]:
     """采集结果的候选目录。
 
     MediaCrawler 各平台落盘的目录名**并不统一**：bilibili 写 `data/bili`，
@@ -496,9 +494,7 @@ def _to_doc(
     comments: list[dict[str, Any]],
 ) -> Doc:
     content_id = str(_pick(item, _ID_KEYS) or "").strip()
-    url = str(_pick(item, _URL_KEYS) or "").strip() or _template_url(
-        platform_key, content_id
-    )
+    url = str(_pick(item, _URL_KEYS) or "").strip() or _template_url(platform_key, content_id)
     title = _clip(str(_pick(item, _TITLE_KEYS) or "").strip(), 120)
     desc = str(_pick(item, _DESC_KEYS) or "")
     likes = _to_number(_pick(item, _LIKE_KEYS))
@@ -534,9 +530,7 @@ def _hot_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         text = _clip(str(_pick(comment, _COMMENT_TEXT_KEYS) or "").strip(), 200)
         if not text:
             continue
-        nickname = str(
-            comment.get("nickname") or comment.get("user_nickname") or ""
-        )
+        nickname = str(comment.get("nickname") or comment.get("user_nickname") or "")
         # MediaCrawler 会按日期文件反复追加，同一条评论可能被写进多次。
         # 不去重的话，一条热评会以"三条热评"的样子出现在证据里，等于虚增证据。
         key = (nickname, text)

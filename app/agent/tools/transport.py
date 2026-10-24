@@ -36,7 +36,9 @@ _DISTANCE_ADVICE = [
 class RecommendTransportInput(BaseModel):
     origin: str = Field(description="出发地，如 北京 / 北京南站")
     destination: str = Field(description="目的地，如 三亚 / 三亚凤凰国际机场")
-    origin_city: str = Field(default="", description="出发地所在城市，如 北京；强烈建议填写，避免同名地点解析错位")
+    origin_city: str = Field(
+        default="", description="出发地所在城市，如 北京；强烈建议填写，避免同名地点解析错位"
+    )
     destination_city: str = Field(default="", description="目的地所在城市，如 三亚")
     date: str = Field(default="", description="出发日期 YYYY-MM-DD；留空表示未定")
     budget: float = Field(default=0, description="交通预算（人民币元）；0 表示未设定")
@@ -134,8 +136,7 @@ async def recommend_transport(
         lines.append(f"- {name}：{url}")
     lines.append("")
     lines.append(
-        "⚠️ 本工具不提供任何班次时刻与票价——这类数据没有合规来源，"
-        "请以上述官方渠道的实时查询为准。"
+        "⚠️ 本工具不提供任何班次时刻与票价——这类数据没有合规来源，请以上述官方渠道的实时查询为准。"
     )
 
     return truncate_tool_output("\n".join(lines))

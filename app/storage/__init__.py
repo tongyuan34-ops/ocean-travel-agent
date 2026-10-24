@@ -30,9 +30,7 @@ def build_session_store(settings: Settings) -> SessionStore:
 
         from app.storage.redis_store import RedisSessionStore
 
-        client = from_url(
-            settings.redis_url, encoding="utf-8", decode_responses=True
-        )
+        client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
         logger.info("会话存储：Redis（%s，TTL=%ss）", settings.redis_url, settings.session_ttl_sec)
         return RedisSessionStore(client, ttl_sec=settings.session_ttl_sec)
 

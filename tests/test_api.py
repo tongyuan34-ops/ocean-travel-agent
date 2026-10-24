@@ -50,7 +50,13 @@ def test_tools_list_matches_registry(client):
         assert item["description"].strip()
 
     permitted = {item["name"] for item in items if item["requires_permission"]}
-    assert permitted == {"write_file", "create_dir", "delete_path", "set_wallpaper"}
+    assert permitted == {
+        "open_file",
+        "write_file",
+        "create_dir",
+        "delete_path",
+        "set_wallpaper",
+    }
     # 只读工具不在需确认清单里（契约 2.4）
     assert not permitted & {"list_dir", "read_file"}
 
@@ -89,9 +95,7 @@ def test_send_message_unknown_session(client):
 
 
 def test_permission_decision_unknown_request(client):
-    resp = client.post(
-        "/api/v1/permissions/not-a-real-id/decision", json={"granted": True}
-    )
+    resp = client.post("/api/v1/permissions/not-a-real-id/decision", json={"granted": True})
     assert resp.status_code == 400
     assert resp.json()["code"] == "INVALID_REQUEST"
     assert resp.json()["message"]

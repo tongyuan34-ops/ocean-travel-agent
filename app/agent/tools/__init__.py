@@ -17,6 +17,7 @@ from app.agent.tools.system import (
     create_dir,
     delete_path,
     list_dir,
+    open_file,
     read_file,
     set_wallpaper,
     write_file,
@@ -32,7 +33,15 @@ PLAN_TOOLS = [
     recommend_stay,
     recommend_transport,
 ]
-SYSTEM_TOOLS = [list_dir, read_file, write_file, create_dir, delete_path, set_wallpaper]
+SYSTEM_TOOLS = [
+    list_dir,
+    read_file,
+    open_file,
+    write_file,
+    create_dir,
+    delete_path,
+    set_wallpaper,
+]
 SEARCH_TOOLS = [search_web, fetch_url]
 PLUGIN_TOOLS = [parse_shared_link, search_social_session, generate_scraper]
 MEDIA_TOOLS = [generate_image, list_image_templates]
@@ -63,6 +72,7 @@ __all__ = [
     "get_weather",
     "list_dir",
     "list_image_templates",
+    "open_file",
     "optimize_day_route",
     "parse_shared_link",
     "plan_route",

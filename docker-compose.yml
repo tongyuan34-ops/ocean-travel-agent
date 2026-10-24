@@ -1,0 +1,59 @@
+# 一键起全栈：api + web + redis
+#   docker compose up --build
+# 前置：cp .env.example .env 并至少填 MODEL_API_KEY
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: ocean-travel-agent:latest
+    env_file:
+      - .env
+    environment:
+      # 容器内 redis 主机名与本地 .env 的 localhost 不同，必须覆盖
+      STORAGE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      # 前端经同源反代访问，这里放开本地端口便于直连调试
+      CORS_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
+      # 容器内文件工具默认无白名单 = 全部禁用；需要时挂卷再打开
+      ALLOWED_ROOTS: ""
+    ports:
+      - "8000:8000"
+    volumes:
+      - media-data:/app/media
+      - app-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: .
+    image: ocean-travel-agent:latest
+    command: ["python", "web/serve.py", "--backend", "http://api:8000"]
+    environment:
+      # 留空表示不启用访问密码；对外暴露时务必在 .env 设 WEB_AUTH_USER / WEB_AUTH_PASS
+      WEB_AUTH_USER: ${WEB_AUTH_USER:-}
+      WEB_AUTH_PASS: ${WEB_AUTH_PASS:-}
+    ports:
+      - "3001:3001"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  media-data:
+  app-data:

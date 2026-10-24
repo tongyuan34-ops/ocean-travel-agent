@@ -34,8 +34,7 @@ class GenerateImageInput(BaseModel):
     style: str = Field(
         default="",
         description=(
-            f"风格模板 key（{'/'.join(TEMPLATE_KEYS)}），或直接写自由风格描述；"
-            "留空表示不加风格约束"
+            f"风格模板 key（{'/'.join(TEMPLATE_KEYS)}），或直接写自由风格描述；留空表示不加风格约束"
         ),
     )
     ref_image: str = Field(default="", description="参考图 URL（可选，用于图生图/风格参考）")
@@ -53,10 +52,7 @@ async def generate_image(prompt: str, style: str = "", ref_image: str = "") -> s
 
     service = current_media.get()
     if service is None:
-        return (
-            "TOOL_NOT_ENABLED：生图工具只能在会话中使用"
-            "（当前没有可用的媒体服务上下文）"
-        )
+        return "TOOL_NOT_ENABLED：生图工具只能在会话中使用（当前没有可用的媒体服务上下文）"
 
     caps = service.capabilities()
     if not caps.get("image_gen"):
@@ -99,9 +95,7 @@ async def generate_image(prompt: str, style: str = "", ref_image: str = "") -> s
     lines.append(f"实际提示词：{final_prompt}")
     lines.append("")
     lines.append("请告知用户：图片生成中，前端会自动轮询任务状态并在完成后展示结果。")
-    lines.append(
-        "注意：返回的图片是 24 小时内失效的临时链接，需要长期保存的要及时另存。"
-    )
+    lines.append("注意：返回的图片是 24 小时内失效的临时链接，需要长期保存的要及时另存。")
     return truncate_tool_output("\n".join(lines), limit=_LIST_LIMIT)
 
 

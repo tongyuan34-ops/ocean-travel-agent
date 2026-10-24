@@ -3,10 +3,10 @@
 > 一个可落地的旅行规划智能体后端：22 个工具、双模式 Agent 循环、可续传的 SSE 流、默认拒绝的权限网关。
 > 目标不是演示 Demo，而是把 Agent 从「能跑」推到「敢让它碰文件和钱包」的那一步。
 
-[![CI](https://github.com/<your-name>/ocean-travel-agent/actions/workflows/ci.yml/badge.svg)](../../actions)
-[![Python](https://img.shields.io/badge/python-3.13-blue)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)](https://fastapi.tiangolo.com/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-0.2-1c3d5a)](https://langchain-ai.github.io/langgraph/)
+[![CI](https://github.com/tongyuan34-ops/ocean-travel-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tongyuan34-ops/ocean-travel-agent/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.161-009688)](https://fastapi.tiangolo.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1c3d5a)](https://langchain-ai.github.io/langgraph/)
 
 ---
 
@@ -158,7 +158,7 @@ structured : START → agent(内部 JSON 决策循环) → END
 ### 方式一：Docker（推荐）
 
 ```bash
-git clone <repo> && cd ocean-travel-agent
+git clone https://github.com/tongyuan34-ops/ocean-travel-agent.git && cd ocean-travel-agent
 cp .env.example .env
 # 至少填 MODEL_API_KEY；其余可留空，未配置的工具会返回 TOOL_NOT_ENABLED
 docker compose up --build
@@ -170,7 +170,7 @@ docker compose up --build
 ### 方式二：本地（uv，推荐）
 
 ```bash
-git clone <repo> && cd ocean-travel-agent
+git clone https://github.com/tongyuan34-ops/ocean-travel-agent.git && cd ocean-travel-agent
 cp .env.example .env
 # 至少填 MODEL_API_KEY；其余可留空，未配置的工具会返回 TOOL_NOT_ENABLED
 

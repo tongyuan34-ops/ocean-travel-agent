@@ -51,7 +51,7 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/<your-name>/ocean-travel-agent/blob/main/docs/SPEC.md"
+Documentation = "https://github.com/tongyuan34-ops/ocean-travel-agent/blob/main/docs/SPEC.md"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

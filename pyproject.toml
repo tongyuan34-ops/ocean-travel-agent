@@ -99,6 +99,9 @@ indent-style = "space"
 
 [tool.mypy]
 python_version = "3.12"
+# 部署目标是 Linux 容器，本地也按 linux 平台检查，否则 Windows 上能过、
+# CI 上挂掉的平台差异（如 os.startfile、signal 常量）要等推送后才发现
+platform = "linux"
 # 渐进式收紧：先只查「明显写错」的，避免一次性几百条报错把 CI 卡死。
 # 后续可逐步打开 disallow_untyped_defs。
 warn_unused_configs = true

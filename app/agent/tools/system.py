@@ -149,8 +149,13 @@ async def open_file(path: str) -> str:
 
     try:
         if is_windows():
-            # startfile 只在 Windows 上存在，getattr 取用可避免跨平台类型检查报错
-            os.startfile(str(target))
+            # os.startfile 只在 Windows 存在，Linux 的类型桩里没有这个属性。
+            # 必须用**带默认值**的 getattr：写成 getattr(os, "startfile") 会被
+            # ruff 的 B009 自动改回属性访问，mypy 在 Linux 上就会报 attr-defined。
+            opener = getattr(os, "startfile", None)
+            if opener is None:  # pragma: no cover - is_windows() 为真时一定存在
+                return _failed("当前系统不支持用默认程序打开文件", "OPEN_FAILED")
+            opener(str(target))
         elif sys.platform == "darwin":
             subprocess.Popen(["open", str(target)])
         else:

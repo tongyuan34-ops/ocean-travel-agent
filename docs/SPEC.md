@@ -100,10 +100,14 @@
 ```json
 { "items": [ { "id": "uuid", "role": "user|assistant",
                "content": "string", "created_at": "ISO8601",
-               "media_task_ids": ["uuid"], "usage": { "total_tokens": 368 } } ] }
+               "media_task_ids": ["uuid"],
+               "usage": { "total_tokens": 368 },
+               "latency_ms": 16976 } ] }
 ```
 
-`usage` 只有 assistant 消息才有，形状见 2.8。
+`usage` 与 `latency_ms` 只有 assistant 消息才有值，形状见 2.8；用户消息固定为 `{}` 和 `0`。
+`latency_ms` 是这一轮的端到端耗时（含工具调用），前端据此在回答下方显示「思考时间」，
+刷新页面后仍能还原。
 
 #### GET /api/v1/chat/sessions/{session_id}/usage
 
@@ -138,6 +142,7 @@
     data: {"type": "end", "message_id": "uuid",
            "finish_reason": "stop|length", "trace_id": "16hex",
            "usage": {"turn": {...}, "session": {...}},
+           "latency_ms": 16976,
            "tool_retries": {"retries": 0, "exhausted": 0,
                             "recovered": 0, "by_tool": {}},
            "tool_budget": {"used": 3, "blocked": 0, "per_tool": 4,
@@ -350,6 +355,13 @@ HTTP 状态码与错误码映射：
 | `estimated` | `true` 表示模型没返回 usage，数值是启发式估算，不能当账单 |
 
 `end` 事件里的 `usage.turn` 是本轮用量，`usage.session` 是会话累计（含 `turns`）。
+
+耗时单独放在 `end` 事件的 `latency_ms`，不进 `usage`：它不是「用量」而是「延迟」，
+和 token 混在一个对象里会让人误以为成本包含时间。口径是从收到用户消息到回答生成完毕，
+**包含工具调用**——这正是用户实际等待的时间，也和后端日志里的「耗时=」一致。
+
+前端在每条 assistant 消息下方渲染成一行小字（耗时 · token · 成本），
+中止和长度截断的回答也显示，因为那部分 token 已经花掉了。
 
 硬闸：`MAX_TOKENS_PER_SESSION` 大于 0 时，会话累计 token 达到上限后拒绝新一轮对话，
 返回 `BUDGET_EXCEEDED`，且**不把这条用户消息写入历史**——否则历史里会留下一句永远得不到回答的话。

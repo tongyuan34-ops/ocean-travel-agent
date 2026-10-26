@@ -224,7 +224,7 @@ class ChatService:
         token = set_trace(trace_id)
         started = time.perf_counter()
         try:
-            await self._generate(state, session_id, text, user_id, trace_id)
+            await self._generate(state, session_id, text, user_id, trace_id, started)
         except asyncio.CancelledError:
             state.cancelled = True
             logger.info("本轮被用户中止 | session=%s", session_id)
@@ -241,9 +241,20 @@ class ChatService:
             await state.finish()
 
     async def _generate(
-        self, state: StreamState, session_id: str, text: str, user_id: str, trace_id: str = ""
+        self,
+        state: StreamState,
+        session_id: str,
+        text: str,
+        user_id: str,
+        trace_id: str = "",
+        started: float = 0.0,
     ) -> None:
-        """把一轮问答写入事件流。"""
+        """把一轮问答写入事件流。
+
+        ``started`` 是 ``stream()`` 里的 ``perf_counter()`` 起点。传进来而不是
+        在这里重新计时，是为了让前端显示的耗时和日志里的「耗时=」对得上——
+        两个数字不一致时，人第一反应是怀疑统计口径，而不是去查真正的慢在哪。
+        """
         session = await self.get_session(session_id)
 
         # 预算闸放在最前面：超限的请求连用户消息都不落库，
@@ -490,6 +501,9 @@ class ChatService:
         session.usage["turns"] = turns
 
         message_id = str(uuid4())
+        # 耗时在这里结算：回答已生成完，end 事件还没发，
+        # 前端拿到的数字 = 用户从点发送到看见完整回答的等待时间
+        latency_ms = int((time.perf_counter() - started) * 1000) if started else 0
         session.messages.append(
             ChatMessage(
                 id=message_id,
@@ -498,6 +512,7 @@ class ChatService:
                 created_at=_now(),
                 media_task_ids=media_task_ids,
                 usage=turn_usage_dict,
+                latency_ms=latency_ms,
             )
         )
         self._trim(session)
@@ -531,6 +546,7 @@ class ChatService:
                 "finish_reason": finish_reason,
                 "trace_id": trace_id,
                 "usage": {"turn": turn_usage_dict, "session": dict(session.usage)},
+                "latency_ms": latency_ms,
                 "tool_retries": retry_stats.to_dict(),
                 "tool_budget": tool_budget.to_dict(),
             }

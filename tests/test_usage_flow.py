@@ -140,6 +140,49 @@ async def test_message_persists_turn_usage(monkeypatch):
     assert assistant[0].usage["total_tokens"] == 66
 
 
+async def test_end_event_carries_latency(monkeypatch):
+    """耗时要在 end 事件里给一次，前端据此在回答下方显示「思考时间」。
+
+    这里只断言「有值且不为负」，不去卡具体毫秒——那会让测试随机器快慢抖动。
+    """
+    graph = _Graph([_model_end(60, 6), _final("回答")])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "问题")
+    end = next(item for item in frames if item.get("type") == "end")
+    assert isinstance(end["latency_ms"], int)
+    assert end["latency_ms"] >= 0
+
+
+async def test_message_persists_latency(monkeypatch):
+    """刷新页面后用量还在，否则「只有刚聊完那条有数字」会被当成 bug。"""
+    graph = _Graph([_model_end(60, 6), _final("回答")])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "问题")
+    end = next(item for item in frames if item.get("type") == "end")
+
+    stored = await service.get_session(session.id)
+    assistant = [item for item in stored.messages if item.role == "assistant"]
+    assert assistant[0].latency_ms == end["latency_ms"]
+
+
+async def test_user_message_has_no_usage(monkeypatch):
+    """用户消息不该带用量，否则前端会在他自己那句话下面画一行 0 tokens。"""
+    graph = _Graph([_model_end(60, 6), _final("回答")])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    await _frames(service, session.id, "问题")
+
+    stored = await service.get_session(session.id)
+    user = [item for item in stored.messages if item.role == "user"]
+    assert user[0].usage == {}
+    assert user[0].latency_ms == 0
+
+
 async def test_budget_gate_rejects_and_keeps_history_clean(monkeypatch):
     """超预算时连用户消息都不能落库，否则历史里会留下永远没有回答的一句话。"""
     graph = _Graph([_model_end(100, 10), _final("回答")])

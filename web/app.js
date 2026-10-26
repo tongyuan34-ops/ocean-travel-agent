@@ -602,7 +602,61 @@
     return { root: root, tools: tools, md: md, text: '' };
   }
 
-  function appendAssistantText(text, taskIds) {
+  /* 千分位，避免 12345 看成 1234 或 123456 */
+  function formatTokens(n) {
+    var v = Number(n);
+    if (!isFinite(v) || v <= 0) return '';
+    return v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /* 耗时：1 秒以下给毫秒，以上给一位小数秒 */
+  function formatLatency(ms) {
+    var v = Number(ms);
+    if (!isFinite(v) || v <= 0) return '';
+    if (v < 1000) return Math.round(v) + 'ms';
+    if (v < 60000) return (v / 1000).toFixed(1) + 's';
+    var m = Math.floor(v / 60000);
+    var s = Math.round((v % 60000) / 1000);
+    return m + 'm' + (s ? s + 's' : '');
+  }
+
+  /* 回答下方的一行小字：耗时 · token · 成本。
+     三个都有才好看，缺哪个就跳过哪个；全缺就不渲染，不留空行。 */
+  function appendUsageMeta(root, latencyMs, usage) {
+    if (!root || !usage) return;
+    var parts = [];
+
+    var took = formatLatency(latencyMs);
+    if (took) parts.push(took);
+
+    var total = formatTokens(usage.total_tokens);
+    if (total) {
+      var detail = [];
+      var pin = formatTokens(usage.input_tokens);
+      var pout = formatTokens(usage.output_tokens);
+      if (pin) detail.push('入 ' + pin);
+      if (pout) detail.push('出 ' + pout);
+      parts.push(total + ' tokens' + (detail.length ? '（' + detail.join(' / ') + '）' : ''));
+    }
+
+    /* cost 为 null 表示价目表里没有这个模型，不是免费——这种情况不显示，别误导 */
+    if (typeof usage.cost === 'number' && usage.cost > 0) {
+      parts.push('¥' + usage.cost.toFixed(4));
+    }
+
+    if (!parts.length) return;
+
+    var meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    var text = parts.join(' · ');
+    /* 估算值必须标出来：本地模型不返回 usage 时是猜的，不能冒充精确数字 */
+    if (usage.estimated) text += ' · 估算';
+    meta.textContent = text;
+    if (usage.estimated) meta.title = '该模型未返回精确用量，此处为按字数估算';
+    root.appendChild(meta);
+  }
+
+  function appendAssistantText(text, taskIds, usage, latencyMs) {
     var root = document.createElement('div');
     root.className = 'msg msg-ai';
     var md = document.createElement('div');
@@ -624,6 +678,8 @@
       root.appendChild(holder);
       startInlineTask(holder, ids[k]);
     }
+    /* 刷新后用量也得在，否则「只有刚聊完那几条有数字」会让人以为是 bug */
+    appendUsageMeta(root, latencyMs, usage);
     stickIfNeeded();
   }
 
@@ -677,7 +733,13 @@
       if (!items.length) { renderEmpty(); return; }
       for (var i = 0; i < items.length; i++) {
         if (items[i].role === 'user') appendUser(items[i].content || '');
-        else appendAssistantText(items[i].content || '', items[i].media_task_ids || []);
+        else
+          appendAssistantText(
+            items[i].content || '',
+            items[i].media_task_ids || [],
+            items[i].usage || null,
+            items[i].latency_ms || 0
+          );
       }
       stickNow();
     });
@@ -1289,6 +1351,9 @@
     var finishReason = '';
     var cards = {};
     var watch = null;
+    /* 本轮用量与耗时：end 事件带回，回答结束后显示在正文下方 */
+    var turnUsage = null;
+    var latencyMs = 0;
     /* 断线续传状态：stream id、最后收到的事件序号、重试次数 */
     var streamId = '';
     var lastEventId = 0;
@@ -1355,6 +1420,9 @@
         showPermission(ev);
       } else if (ev.type === 'end') {
         finishReason = ev.finish_reason || 'stop';
+        /* 用量与耗时只在 end 事件里给一次，先存着，等 finish() 统一渲染 */
+        turnUsage = (ev.usage && ev.usage.turn) || null;
+        latencyMs = typeof ev.latency_ms === 'number' ? ev.latency_ms : 0;
       } else if (ev.type === 'error') {
         errored = normalizeError(ev, 0);
       }
@@ -1414,6 +1482,10 @@
 
       if (!errored && finishReason === 'length') {
         appendNotice('回答已达长度上限，可能被截断');
+      }
+      /* 中止和截断也照样花钱，只要吐过字就显示用量 */
+      if (!errored && gotText) {
+        appendUsageMeta(shell.root, latencyMs, turnUsage);
       }
       if (!errored && gotText && finishReason !== 'length') {
         var meta = null;

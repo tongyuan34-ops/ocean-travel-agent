@@ -20,6 +20,8 @@ class ChatMessage:
     media_task_ids: list[str] = field(default_factory=list)
     # 本条回答的 token 与成本，形状见 app.core.usage.TokenUsage.to_dict
     usage: dict[str, Any] = field(default_factory=dict)
+    # 本条回答的端到端耗时（毫秒），含工具调用。0 表示历史数据没记
+    latency_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -29,6 +31,7 @@ class ChatMessage:
             "created_at": self.created_at,
             "media_task_ids": list(self.media_task_ids),
             "usage": dict(self.usage),
+            "latency_ms": self.latency_ms,
         }
 
     @classmethod
@@ -40,6 +43,7 @@ class ChatMessage:
             created_at=str(data.get("created_at", "")),
             media_task_ids=[str(item) for item in data.get("media_task_ids") or []],
             usage=dict(data.get("usage") or {}),
+            latency_ms=int(data.get("latency_ms") or 0),
         )
 
 

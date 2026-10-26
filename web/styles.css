@@ -442,7 +442,13 @@ img{display:block;max-width:100%}
 }
 .msg-ai{font-size:15px;line-height:1.78;color:var(--ink);word-break:break-word}
 .msg-ai.is-plain{white-space:pre-wrap}
-.msg-meta{margin-top:8px;font-size:10.5px;color:var(--ink-40);letter-spacing:.04em}
+.msg-meta{
+  margin-top:8px;font-size:11px;line-height:1.5;
+  color:var(--ink-40);letter-spacing:.04em;
+  /* 等宽数字：多条回答的数字位对齐，扫一眼就能比较 */
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .error-card{
   margin:12px 0;padding:12px 14px;
   border-radius:14px;

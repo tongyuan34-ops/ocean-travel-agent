@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -20,6 +22,9 @@ class MessageItem(BaseModel):
     content: str
     created_at: str
     media_task_ids: list[str] = Field(default_factory=list)
+    # 本条回答的用量与耗时，用于在消息下方展示；用户消息为空 / 0
+    usage: dict[str, Any] = Field(default_factory=dict)
+    latency_ms: int = 0
 
 
 class MessageList(BaseModel):

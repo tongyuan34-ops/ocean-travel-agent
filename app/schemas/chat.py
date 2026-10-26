@@ -29,6 +29,31 @@ class MessageItem(BaseModel):
 
 class MessageList(BaseModel):
     items: list[MessageItem]
+    # 本会话当前的对话风格。前端刷新页面后靠它恢复选中项——
+    # 只存在浏览器本地的话，换设备或清缓存后就和后端对不上了
+    persona: str = "concierge"
+
+
+class PersonaItem(BaseModel):
+    """一种对话风格。不暴露 prompt 正文，那是内部实现。"""
+
+    key: str
+    name: str
+    latin: str
+    tagline: str
+
+
+class PersonaList(BaseModel):
+    items: list[PersonaItem]
+    default: str
+
+
+class PersonaUpdate(BaseModel):
+    persona: str = Field(min_length=1, max_length=32, description="风格 key")
+
+
+class PersonaOut(BaseModel):
+    persona: str
 
 
 class UsageOut(BaseModel):

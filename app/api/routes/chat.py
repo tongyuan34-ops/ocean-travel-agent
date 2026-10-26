@@ -5,11 +5,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from app.agent.prompts import DEFAULT_PERSONA, persona_list
 from app.core.identity import resolve_user_id
 from app.schemas.chat import (
     MessageItem,
     MessageList,
     MessageRequest,
+    PersonaItem,
+    PersonaList,
+    PersonaOut,
+    PersonaUpdate,
     SessionCreated,
     UsageOut,
 )
@@ -20,6 +25,19 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 def _service(request: Request) -> ChatService:
     return request.app.state.chat
+
+
+@router.get("/personas", response_model=PersonaList)
+async def list_personas() -> PersonaList:
+    """可选对话风格。
+
+    由后端提供而不是前端写死：新增一种风格时只改一处，
+    前端不需要发版。列表里不含 prompt 正文——那是内部实现。
+    """
+    return PersonaList(
+        items=[PersonaItem(**item) for item in persona_list()],
+        default=DEFAULT_PERSONA,
+    )
 
 
 @router.post("/sessions", response_model=SessionCreated)
@@ -39,7 +57,21 @@ async def delete_session(session_id: str, request: Request) -> None:
 async def list_messages(session_id: str, request: Request) -> MessageList:
     """拉取会话历史，用于刷新后恢复。"""
     session = await _service(request).get_session(session_id)
-    return MessageList(items=[MessageItem(**item.to_dict()) for item in session.messages])
+    return MessageList(
+        items=[MessageItem(**item.to_dict()) for item in session.messages],
+        persona=session.persona,
+    )
+
+
+@router.patch("/sessions/{session_id}/persona", response_model=PersonaOut)
+async def set_persona(session_id: str, payload: PersonaUpdate, request: Request) -> PersonaOut:
+    """切换本会话的对话风格。
+
+    只影响后续轮次，不改历史消息——已经聊过的内容按当时的风格生成，
+    这是事实，不该被追溯修改。
+    """
+    resolved = await _service(request).set_persona(session_id, payload.persona)
+    return PersonaOut(persona=resolved)
 
 
 @router.get("/sessions/{session_id}/usage", response_model=UsageOut)

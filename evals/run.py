@@ -79,7 +79,9 @@ async def _run_one(
     outcome = RunOutcome()
     error = ""
     try:
-        outcome = await run_graph(graph, str(case["input"]), timeout, budget)
+        outcome = await run_graph(
+            graph, str(case["input"]), timeout, budget, persona=case.get("persona")
+        )
     except TimeoutError:
         error = f"用例超时（>{timeout:.0f}s）"
     except Exception as exc:  # noqa: BLE001 - 单条用例失败不能中断整轮

@@ -99,3 +99,50 @@ def test_permission_decision_unknown_request(client):
     assert resp.status_code == 400
     assert resp.json()["code"] == "INVALID_REQUEST"
     assert resp.json()["message"]
+
+
+# ---------- 对话风格 ----------
+
+
+def test_personas_endpoint_lists_four_styles(client):
+    data = client.get("/api/v1/chat/personas").json()
+    assert data["default"] == "concierge"
+    keys = [item["key"] for item in data["items"]]
+    assert keys == ["concierge", "companion", "guide", "confidant"]
+    # 只给展示字段，不暴露 prompt 正文
+    assert set(data["items"][0]) == {"key", "name", "latin", "tagline"}
+
+
+def test_persona_defaults_on_new_session(client):
+    session_id = client.post("/api/v1/chat/sessions").json()["session_id"]
+    data = client.get(f"/api/v1/chat/sessions/{session_id}/messages").json()
+    assert data["persona"] == "concierge"
+
+
+def test_persona_switch_persists(client):
+    session_id = client.post("/api/v1/chat/sessions").json()["session_id"]
+    resp = client.patch(
+        f"/api/v1/chat/sessions/{session_id}/persona", json={"persona": "confidant"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["persona"] == "confidant"
+
+    data = client.get(f"/api/v1/chat/sessions/{session_id}/messages").json()
+    assert data["persona"] == "confidant"
+
+
+def test_persona_unknown_falls_back_instead_of_failing(client):
+    """未知 key 回落默认而不是 4xx：前端选项来自 /personas，
+    真传错了让整轮对话失败也没好处。"""
+    session_id = client.post("/api/v1/chat/sessions").json()["session_id"]
+    resp = client.patch(f"/api/v1/chat/sessions/{session_id}/persona", json={"persona": "nope"})
+    assert resp.status_code == 200
+    assert resp.json()["persona"] == "concierge"
+
+
+def test_persona_switch_on_missing_session_is_404(client):
+    resp = client.patch(
+        "/api/v1/chat/sessions/does-not-exist/persona", json={"persona": "confidant"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "SESSION_NOT_FOUND"

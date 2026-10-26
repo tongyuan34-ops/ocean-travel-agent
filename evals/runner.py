@@ -23,7 +23,9 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.guard import TaintState, current_taint
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.prompts import build_system_prompt
 from app.agent.resilience import ToolBudget, current_tool_budget, is_blocked_result
+from app.core.context import compose_messages
 from app.core.usage import TokenUsage, usage_from_output
 
 logger = logging.getLogger(__name__)
@@ -237,7 +239,11 @@ def tool_outcomes(final_state: dict[str, Any] | None) -> tuple[list[str], list[s
 
 
 async def run_graph(
-    graph: Any, text: str, timeout: float, budget: ToolBudget | None = None
+    graph: Any,
+    text: str,
+    timeout: float,
+    budget: ToolBudget | None = None,
+    persona: str | None = None,
 ) -> RunOutcome:
     """跑一次图，返回工具序列、回答、用量、最终状态与污点状态。
 
@@ -247,6 +253,10 @@ async def run_graph(
     污点上下文也必须在这里装上，理由和预算一样：**评测要和线上走同一套闸门**。
     少装这一层，注入用例就会「全绿」——因为闸门根本没生效，
     而不是因为模型没被诱导。这种假绿比没有用例更危险。
+
+    ``persona`` 同样要和线上对齐：系统提示词由这里按风格组装并塞进消息列表。
+    早先的版本只发了 ``[("user", text)]``——**一条 system 消息都没有**，
+    等于在测「一个没有任何规则的裸模型」，跟线上跑的完全是两回事。
     """
 
     async def _deny(permission: PermissionRequest) -> None:
@@ -263,11 +273,12 @@ async def run_graph(
     streamed = ""
     usage = TokenUsage()
     final_state: dict[str, Any] | None = None
+    messages = compose_messages(build_system_prompt(persona), "", [("user", text)], 0)
 
     try:
         async with asyncio.timeout(timeout):
             async for event in graph.astream_events(
-                {"messages": [("user", text)]},
+                {"messages": messages},
                 version="v2",
                 config={"recursion_limit": 40},
             ):

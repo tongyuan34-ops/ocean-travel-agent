@@ -57,6 +57,9 @@ class ChatSession:
     summarized_count: int = 0
     # 会话累计用量（跨轮累加），形状同上
     usage: dict[str, Any] = field(default_factory=dict)
+    # 对话风格（app/agent/prompts.py）。存在会话上而不是每轮传：
+    # 用户选一次就该一直生效，否则每轮都要重新说一遍
+    persona: str = "concierge"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +68,7 @@ class ChatSession:
             "summary": self.summary,
             "summarized_count": self.summarized_count,
             "usage": dict(self.usage),
+            "persona": self.persona,
             "messages": [item.to_dict() for item in self.messages],
         }
 
@@ -76,5 +80,7 @@ class ChatSession:
             summary=str(data.get("summary", "")),
             summarized_count=int(data.get("summarized_count", 0)),
             usage=dict(data.get("usage") or {}),
+            # 老会话没有这个字段，回落默认风格，不要报错
+            persona=str(data.get("persona") or "concierge"),
             messages=[ChatMessage.from_dict(item) for item in data.get("messages") or []],
         )

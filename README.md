@@ -125,7 +125,7 @@ flowchart TB
 
 ---
 
-## 七个核心设计
+## 八个核心设计
 
 ### 1. 双模式 Agent 循环，兼容无 function-call 能力的模型
 
@@ -255,6 +255,42 @@ Agent 的成本是**多轮工具往返**堆出来的：一轮对话可能调用�
 所以评测里多了 `forbid_executed` 和 `max_guard_blocks`（阴性对照，防检测器滥杀）。
 另有一条变异测试：把闸门摘掉，注入用例必须转红——不这么测一遍，
 就分不清「用例通过了」和「用例根本没在检查」。
+
+### 8. 对话风格：人格是会话属性，不是一句「请温柔一点」
+
+`app/agent/prompts.py`
+
+同一个产品里，用户想要的东西不一样：做攻略时要密度和可执行性，心里闷的时候要有人接着话头。
+前者的规则（必须调工具、必须给参数、必须标来源）在后一种场合全是伤害。
+
+直觉做法是在提示词里加一句「闲聊时别推行程」。实测不行——同一份提示词连跑两次，
+一次 2/2 通过、一次 0/2（模型改用「三亚」「想去的地方」绕过了关键词黑名单）。
+
+改成**提示词分三层，按会话组装**：
+
+| 层 | 内容 | 谁拿到 |
+|---|---|---|
+| `CORE_RULES` | 不许编造、标来源、工具预算、`<untrusted>` 注入防护 | 所有风格 |
+| `TRAVEL_RULES` | 天气/路线必须查工具、`plan_route` 必带 city、站内内容走社媒检索 | 只有旅行类风格 |
+| `style` | 说话方式：句子长短、要不要分点、给不给方案 | 每种风格各自一份 |
+
+关键在第二层的**「不给」**：闲聊型人格根本拿不到领域规则，模型就没有可迁移的出口。
+加规则是概率改善，拿掉整块规则是结构性的。
+
+四种风格由后端下发（`GET /chat/personas`），前端不写死：`礼宾`（问清信息给方案）、
+`旅伴`（一起商量先给倾向）、`向导`（讲清来龙去脉）、`知心`（只陪聊，不推行程）。
+`PATCH /chat/sessions/{id}/persona` 切换，只影响后续轮次——已经聊过的内容按当时的风格生成，
+那是事实，不该被追溯修改。
+
+还有两个刻意的选择：
+
+- **入口在聊天页标题下，不在首页**。首页是门面，加一个「风格」控件等于让用户先做一次配置；
+  进到对话里再出现，它才是「这段对话怎么聊」的元信息。
+- **空状态跟着换**。选了「知心」还满屏「告诉我目的地、天数与预算」，切换就像只换了个皮肤。
+
+诚实标注边界：`confidant` 只做到「拿不到领域规则」，**没有**能力边界的强保证
+（模型仍可能在第三轮开始给建议）。这靠 `evals/cases.yaml` 的 `persona` 分类持续跑，
+而不是靠再写一句更严厉的规则。
 
 ---
 
@@ -388,6 +424,9 @@ LANGSMITH_PROJECT=ocean-travel-agent
 | `GET` | `/api/v1/system/capabilities` | 当前真实可用能力 |
 | `POST` | `/api/v1/chat/sessions` | 建会话 |
 | `POST` | `/api/v1/chat/sessions/{id}/messages` | 发消息，返回 SSE 流 |
+| `GET` | `/api/v1/chat/sessions/{id}/messages` | 拉历史（含当前 `persona`） |
+| `PATCH` | `/api/v1/chat/sessions/{id}/persona` | 切换对话风格（只影响后续轮次） |
+| `GET` | `/api/v1/chat/personas` | 可选风格列表（不含提示词正文） |
 | `GET` | `/api/v1/chat/sessions/{id}/usage` | 会话累计 token 与成本 |
 | `GET` | `/api/v1/chat/streams/{id}` | 断线续传（`Last-Event-ID`） |
 | `POST` | `/api/v1/chat/streams/{id}/cancel` | 中止生成 |
@@ -417,7 +456,7 @@ uv run python -m evals.run --out evals/report.md --json evals/report.json
 uv run python -m evals.run --fail-under 0.8
 ```
 
-用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 39 条，每条断言三到四件事，再由 LLM-as-judge 打分：
+用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 40 条，每条断言三到四件事，再由 LLM-as-judge 打分：
 
 | 断言 | 抓什么 |
 |---|---|
@@ -441,7 +480,7 @@ P50/P95 延迟、总 token 与成本。
 P95 延迟 68.6 秒。三轮对比（改用例 → 加工具预算）里，被瞄准的指标都动了：
 召回率 +9.1pp、P95 −6.8 秒、模型调用 68 → 62。
 
-> 这个基线是在 31 条用例上跑的，之后新增的 6 条 injection 用例**还没有真模型基线**。
+> 这个基线是在 31 条用例上跑的，之后新增的 6 条 injection 用例和 3 条人格用例**还没有真模型基线**。
 > 拿它和 37 条的结果直接比是错的——分母变了。真模型重跑一次即可补齐，
 > 命令见 [`evals/BASELINE.md`](evals/BASELINE.md)。离线自测（13 条带剧本用例）当前 13/13。
 
@@ -490,7 +529,7 @@ P95 延迟 68.6 秒。三轮对比（改用例 → 加工具预算）里，被�
 ## 测试
 
 ```bash
-uv run pytest                        # 314 passed, 1 skipped
+uv run pytest                        # 331 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -515,6 +554,8 @@ uv run mypy app evals
 app/
 ├── agent/           # Agent 循环、状态、22 个工具、权限
 │   ├── graph.py     # 双模式图构建
+│   ├── prompts.py   # 提示词三层组装（核心规则 / 领域规则 / 说话方式）
+│   ├── guard.py     # 间接提示注入防护（标记 / 检测 / 污点传播）
 │   ├── permissions.py
 │   └── tools/       # info / plan / system / search / plugin / media
 ├── adapters/        # 检索源适配器（bing_cn / web_fetch / mediacrawler）
@@ -525,8 +566,8 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 314 个离线测试（不联网、不调模型）
-evals/               # 39 条评测用例 + 判分框架（验模型表现，与 tests 分工）
+tests/               # 331 个离线测试（不联网、不调模型）
+evals/               # 40 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本
 .github/workflows/   # CI：lint + 类型检查 + 双版本测试 + 镜像冒烟

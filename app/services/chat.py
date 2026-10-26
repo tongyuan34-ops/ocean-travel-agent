@@ -18,10 +18,11 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage
 
-from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph
+from app.agent.graph import MAX_STEPS, build_agent_graph
 from app.agent.guard import TaintState, current_taint
 from app.agent.model import build_chat_model
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.prompts import build_system_prompt, get_persona
 from app.agent.resilience import (
     RetryStats,
     ToolBudget,
@@ -145,6 +146,21 @@ class ChatService:
         """会话累计用量。前端用来展示「本会话花了多少」。"""
         session = await self.get_session(session_id)
         return dict(session.usage)
+
+    async def set_persona(self, session_id: str, persona: str) -> str:
+        """切换对话风格，返回实际生效的 key。
+
+        未知 key 不报错而是回落默认（见 ``get_persona``）：前端选项来自
+        ``GET /personas``，正常不会传错；真传错了，让整轮对话 500 也没好处。
+
+        切换只影响**后续轮次**的 system prompt，不改历史消息——
+        已经聊过的内容按当时的风格生成，这是事实，不该被追溯修改。
+        """
+        session = await self.get_session(session_id)
+        resolved = get_persona(persona)
+        session.persona = resolved.key
+        await self._store.save(session)
+        return resolved.key
 
     # ---------- 对话 ----------
 
@@ -294,11 +310,14 @@ class ChatService:
             return
 
         # 长期偏好并入 system prompt：只带确认过的条目，避免每轮都膨胀
-        system_text = SYSTEM_PROMPT
+        # 提示词按本会话选定的风格组装：核心规则 + 领域规则（旅行类才有）+ 说话方式。
+        # 「闲聊时别推行程」不能靠加一句规则——实测那只是概率改善，
+        # 得让闲聊型人格根本拿不到旅行规则，见 app/agent/prompts.py 的说明。
+        system_text = build_system_prompt(session.persona)
         if self._profile is not None:
             block = await self._profile.render_block(user_id)
             if block:
-                system_text = f"{SYSTEM_PROMPT}\n\n{block}"
+                system_text = f"{system_text}\n\n{block}"
 
         await self._refresh_summary(session, system_text)
         await self._store.save(session)

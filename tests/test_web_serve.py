@@ -16,7 +16,7 @@ from pathlib import Path
 # web/ 不是包，按脚本所在目录导入
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "web"))
 
-from serve import pick_lan_ip
+from serve import FrontendHandler, pick_lan_ip
 
 
 def test_prefers_private_network():
@@ -54,3 +54,23 @@ def test_ignores_garbage():
 
 def test_empty_candidates():
     assert pick_lan_ip([]) == "127.0.0.1"
+
+
+def test_proxy_claims_every_method_the_api_uses():
+    """代理层必须认领后端用到的每个写方法。
+
+    这里真翻过车：新增 ``PATCH /chat/sessions/{id}/persona`` 之后忘了加
+    ``do_PATCH``，浏览器发 PATCH 拿到 501，页面表现是「点了切换风格没反应」，
+    而后端日志一条都没有——请求根本没进到后端。这类漏写不会在启动时暴露，
+    只在用到那个接口的那一步炸，所以把两边的动词表对起来。
+    """
+    from app.main import app
+
+    used: set[str] = set()
+    for route in app.routes:
+        used.update(getattr(route, "methods", None) or set())
+    # 由浏览器 / BaseHTTPRequestHandler 自己处理，不需要业务分发
+    used -= {"HEAD", "OPTIONS"}
+
+    missing = sorted(method for method in used if not hasattr(FrontendHandler, f"do_{method}"))
+    assert not missing, f"web/serve.py 没有处理这些方法：{missing}"

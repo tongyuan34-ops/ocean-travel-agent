@@ -13,7 +13,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2316263f'/%3E%3Cpath d='M5 20c3-5.5 6-5.5 9 0s6 5.5 9 0' stroke='%23f6faff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="./styles.css?v=20261023q">
+<link rel="stylesheet" href="./styles.css?v=20261026b">
 </head>
 <body>
 <div class="app" id="app">
@@ -99,8 +99,13 @@
       <section class="chat panel">
         <header class="chat-head">
           <div class="chat-title-wrap">
-            <p class="chat-kicker">AI TRAVEL CONCIERGE</p>
+            <p class="chat-kicker" id="chatKicker">AI TRAVEL CONCIERGE</p>
             <h2 class="chat-title" id="chatTitle">新的旅程</h2>
+            <button class="persona-switch" id="personaBtn" type="button" aria-haspopup="dialog" aria-label="切换对话风格" hidden>
+              <span class="persona-dot" aria-hidden="true"></span>
+              <span id="personaName">礼宾</span>
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.6 4.6L6 8l3.4-3.4"/></svg>
+            </button>
           </div>
           <div class="chat-actions">
             <button class="mini-btn rail-toggle" id="railToggle" type="button" aria-label="会话记录">
@@ -186,6 +191,6 @@
 
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="./app.js?v=20261023q"></script>
+<script src="./app.js?v=20261026b"></script>
 </body>
 </html>

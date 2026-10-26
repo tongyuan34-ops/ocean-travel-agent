@@ -92,6 +92,36 @@
     '生成一张三亚海边旅行打卡照'
   ];
 
+  /* 每种风格的空状态与输入框文案。
+     换了风格却还满屏「告诉我目的地、天数与预算」，切换就像只换了个皮肤；
+     文案跟 key 走，后端新增风格时这里没有对应项就回落到默认那套。 */
+  var PERSONA_EMPTY = {
+    concierge: {
+      title: 'Where to<br>next?',
+      sub: '告诉我目的地、天数、预算或想住的区域。天气、地点、路线、住宿与图片都会来自真实工具调用。',
+      placeholder: '告诉我目的地、天数与预算…',
+      sugg: SUGGESTIONS
+    },
+    companion: {
+      title: '边聊<br>边定',
+      sub: '还没想好去哪儿也没关系。说说有几天、大概什么时候、想清静还是想热闹，我先把我的倾向给你。',
+      placeholder: '先说说你大概想怎么玩…',
+      sugg: ['三天，不想太赶，你更推荐哪儿', '带爸妈出门，五天左右', '一个人去海边待几天']
+    },
+    guide: {
+      title: '这地方<br>为什么这样',
+      sub: '想听哪座城市、哪段历史的来龙去脉？季节、地形、本地人的习惯都可以问。',
+      placeholder: '想了解哪个地方…',
+      sugg: ['泉州为什么被叫做世界宗教博物馆', '平潭的蓝眼泪什么时候能看到', '杭州的梅雨季具体是几月']
+    },
+    confidant: {
+      title: '今天<br>怎么样',
+      sub: '想说什么都行，不用组织语言。我不给方案，也不劝你出门。',
+      placeholder: '慢慢说…',
+      sugg: ['今天有点闷', '有件事我一直没想通', '就想随便聊聊']
+    }
+  };
+
   /* ================= 状态 ================= */
 
   var state = {
@@ -108,7 +138,12 @@
     media: null,
     sheet: '',
     stick: true,
-    capReady: false
+    capReady: false,
+    // 对话风格：personas 是后端给的选项，persona 是当前选中项。
+    // 存在会话上而不是浏览器里——换设备、清缓存后不该丢
+    personas: [],
+    persona: '',
+    personaDefault: ''
   };
 
   var STATUS = { timer: null };
@@ -198,14 +233,17 @@
 
   function autoBase() {
     if (location.protocol === 'file:') return 'http://localhost:8000/api/v1';
-    /* HTTPS（含公网隧道）必须走同源相对路径：调用 http://host:8000 会被浏览器
-       当成混合内容直接拦掉，页面就会显示「未连接」 */
-    if (location.protocol === 'https:') return '/api/v1';
+    /* 手工填过接口地址就以它为准——这是唯一的显式配置，不该被自动推断覆盖 */
     var override = lsGet(STORE.api, '');
     if (override) return String(override).replace(/\/+$/, '');
-    /* 由 serve.py 在 3001 端口做同源代理时走相对路径，手机访问也不会跨域 */
-    if (location.port === '3001') return '/api/v1';
-    return location.protocol + '//' + location.hostname + ':8000/api/v1';
+    /* 页面由 http/https 打开时一律走同源相对路径：
+       - serve.py 在**任意端口**都把 /api/** 反代到后端，换端口不用改前端；
+       - 直连 http://host:8000 在 https 页面里会被当成混合内容拦掉；
+       - 跨端口还要后端把来源加进 CORS_ORIGINS，漏一个就显示「未连接」。
+       早先这里写死了「3001 端口才走相对路径」，换端口验证时整个页面都连不上，
+       而且报错长得像后端没启动。只有用别的静态服务器打开（同源没有 /api）时，
+       才需要在「设置 → 后端接口地址」里手填。 */
+    return '/api/v1';
   }
 
   var API_BASE = autoBase();
@@ -484,6 +522,87 @@
     renderSessions();
   }
 
+  /* ================= 对话风格 ================= */
+
+  function personaOf(key) {
+    for (var i = 0; i < state.personas.length; i++) {
+      if (state.personas[i].key === key) return state.personas[i];
+    }
+    return null;
+  }
+
+  function personaEmpty() {
+    return PERSONA_EMPTY[state.persona] || PERSONA_EMPTY.concierge;
+  }
+
+  function loadPersonas(cb) {
+    request('GET', '/chat/personas', null, function (err, data) {
+      if (err || !data || !data.items || !data.items.length) {
+        // 取不到就把入口藏起来。宁可不显示，也不要给一个点了没反应的按钮
+        if (DOM.personaBtn) DOM.personaBtn.hidden = true;
+        if (cb) cb();
+        return;
+      }
+      state.personas = data.items;
+      state.personaDefault = data.default || data.items[0].key;
+      applyPersona(state.persona || state.personaDefault);
+      if (cb) cb();
+    });
+  }
+
+  function applyPersona(key) {
+    var item = personaOf(key);
+    var resolved = item ? item.key : (state.personaDefault || 'concierge');
+    state.persona = resolved;
+    if (DOM.personaName) DOM.personaName.textContent = (item || {}).name || '礼宾';
+    // kicker 跟着风格走：同一条「AI TRAVEL CONCIERGE」在陪聊模式下是不准确的
+    if (DOM.chatKicker) DOM.chatKicker.textContent = (item || {}).latin || 'AI TRAVEL CONCIERGE';
+    if (DOM.personaBtn) DOM.personaBtn.hidden = !state.personas.length;
+    // 只换占位文案，不整体走 refreshComposer：那会把发送键状态和图片按钮一起重算，
+    // 生成中切换风格时会把「停止」按钮改回「发送」
+    if (DOM.input && !state.streaming) {
+      DOM.input.setAttribute('placeholder', personaEmpty().placeholder);
+    }
+    // 空状态正显示着就跟着换一套文案；已经有对话则保持原样
+    if (DOM.messages && DOM.messages.querySelector('.empty')) renderEmpty();
+  }
+
+  function switchPersona(key) {
+    if (key === state.persona) return;
+    applyPersona(key);
+    if (!state.sessionId) {
+      // 还没有会话：先记住选择，等 ensureSession 建完会话再写进后端
+      toast('风格已选好，发出第一条消息后生效');
+      return;
+    }
+    syncPersona(key, function () {
+      var item = personaOf(key);
+      toast('已切换到「' + ((item || {}).name || key) + '」');
+    });
+  }
+
+  function syncPersona(key, done) {
+    // 一律写后端，不拿「是不是默认风格」当短路条件：
+    // 从知心切回礼宾时，后端还停在知心，跳过这一步就永远切不回去了
+    if (!state.sessionId || !key) {
+      if (done) done();
+      return;
+    }
+    request(
+      'PATCH',
+      '/chat/sessions/' + encodeURIComponent(state.sessionId) + '/persona',
+      { persona: key },
+      function (err, data) {
+        if (err) {
+          toast(err.message || '切换风格失败');
+          return;
+        }
+        applyPersona((data && data.persona) || key);
+        if (done) done();
+      }
+    );
+  }
+
   function useSession(id) {
     if (!id) return;
     state.sessionId = id;
@@ -503,6 +622,8 @@
     state.sessionId = '';
     lsDel(STORE.active);
     setChatTitle('新的旅程');
+    // 新会话回到默认风格：风格是会话属性，不是全局设置
+    if (state.personaDefault) applyPersona(state.personaDefault);
     clearMessages();
     renderEmpty();
     renderSessions();
@@ -519,6 +640,12 @@
       state.sessionId = data.session_id;
       lsSet(STORE.active, data.session_id);
       upsertSession(data.session_id, '新的旅程', new Date(data.created_at || Date.now()).getTime());
+      // 用户可能在建会话之前就选好了风格，这时候才写进后端；
+      // 不这么做，第一条消息会用默认风格回答，选了个寂寞
+      if (state.persona && state.persona !== state.personaDefault) {
+        syncPersona(state.persona, function () { cb(null, state.sessionId); });
+        return;
+      }
       cb(null, data.session_id);
     });
   }
@@ -568,14 +695,15 @@
   function renderEmpty() {
     var box = DOM.messages;
     if (!box) return;
+    var copy = personaEmpty();
     var sugg = [];
-    for (var i = 0; i < SUGGESTIONS.length; i++) {
-      sugg.push('<button type="button" data-prompt="' + esc(SUGGESTIONS[i]) + '">' + esc(SUGGESTIONS[i]) + '</button>');
+    for (var i = 0; i < copy.sugg.length; i++) {
+      sugg.push('<button type="button" data-prompt="' + esc(copy.sugg[i]) + '">' + esc(copy.sugg[i]) + '</button>');
     }
     box.innerHTML =
       '<div class="empty">' +
-        '<p class="empty-title">Where to<br>next?</p>' +
-        '<p class="empty-sub">告诉我目的地、天数、预算或想住的区域。天气、地点、路线、住宿与图片都会来自真实工具调用。</p>' +
+        '<p class="empty-title">' + copy.title + '</p>' +
+        '<p class="empty-sub">' + esc(copy.sub) + '</p>' +
         '<div class="sugg">' + sugg.join('') + '</div>' +
       '</div>';
   }
@@ -729,6 +857,8 @@
         return;
       }
       box.innerHTML = '';
+      // 风格跟着会话走：刷新页面后靠它恢复，不用重选
+      applyPersona((data && data.persona) || state.personaDefault);
       var items = (data && data.items) || [];
       if (!items.length) { renderEmpty(); return; }
       for (var i = 0; i < items.length; i++) {
@@ -1306,7 +1436,7 @@
       btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>';
       btn.setAttribute('aria-label', '发送');
       input.removeAttribute('readonly');
-      input.setAttribute('placeholder', '告诉我目的地、天数与预算…');
+      input.setAttribute('placeholder', personaEmpty().placeholder);
       var has = !!(state.caps && state.caps.image_gen);
       if (DOM.composerMedia) DOM.composerMedia.hidden = !has;
     }
@@ -2281,7 +2411,7 @@
         '<button type="button" class="btn-quiet" id="apiSave">保存并重连</button>' +
         '<button type="button" class="btn-quiet" id="apiReset">恢复默认</button>' +
       '</div>' +
-      '<p class="sheet-note" style="margin-top:10px">当前生效：' + esc(API_BASE) + '。用手机访问时请用 serve.py 在 3001 端口做同源代理。</p>' +
+      '<p class="sheet-note" style="margin-top:10px">当前生效：' + esc(API_BASE) + '。用 serve.py 打开页面时走同源代理，换端口也不用改这里；只有用别的静态服务器打开才需要手填后端地址。</p>' +
     '</div>');
 
     html.push('<div class="field"><span class="field-label">我的偏好</span>' +
@@ -2377,6 +2507,47 @@
     render: renderSettings
   };
 
+  SHEETS.persona = {
+    kicker: 'CONVERSATION STYLE',
+    title: '对话风格',
+    render: function (body) {
+      if (!state.personas.length) {
+        body.innerHTML = '<p class="sheet-note">暂时取不到风格列表，请检查后端连接。</p>';
+        return;
+      }
+      var html = [
+        '<p class="sheet-note">风格决定助手怎么跟你说话。切换只影响之后的回答，已经聊过的内容不会变。</p>',
+        '<div class="persona-list">'
+      ];
+      for (var i = 0; i < state.personas.length; i++) {
+        var item = state.personas[i];
+        html.push(
+          '<button type="button" class="persona-item' + (item.key === state.persona ? ' is-active' : '') +
+            '" data-persona="' + esc(item.key) + '">' +
+            '<span class="persona-item-main">' +
+              '<span class="persona-item-name">' + esc(item.name) + '</span>' +
+              '<span class="persona-item-latin">' + esc(item.latin) + '</span>' +
+              '<span class="persona-item-text">' + esc(item.tagline) + '</span>' +
+            '</span>' +
+            '<span class="persona-item-mark"><svg viewBox="0 0 12 12" aria-hidden="true">' +
+              '<path d="M2 6.4l2.6 2.6L10 3.4"/></svg></span>' +
+          '</button>'
+        );
+      }
+      html.push('</div>');
+      body.innerHTML = html.join('');
+      body.onclick = function (e) {
+        var target = e.target;
+        while (target && target !== body && !target.getAttribute('data-persona')) {
+          target = target.parentNode;
+        }
+        if (!target || target === body) return;
+        closeSheet();
+        switchPersona(target.getAttribute('data-persona'));
+      };
+    }
+  };
+
   SHEETS.media = {
     kicker: 'IMAGE STUDIO',
     title: '生成旅行图片',
@@ -2461,6 +2632,7 @@
     DOM.capBtn.onclick = function () { openSheet('capabilities'); };
     DOM.mediaBtn.onclick = function () { openSheet('media'); };
     DOM.composerMedia.onclick = function () { openSheet('media'); };
+    DOM.personaBtn.onclick = function () { openSheet('persona'); };
     DOM.railToggle.onclick = openRail;
     DOM.railScrim.onclick = closeRail;
     DOM.conn.onclick = function () {
@@ -2576,6 +2748,9 @@
     DOM.conn = $('#conn');
     DOM.connText = $('#connText');
     DOM.chatTitle = $('#chatTitle');
+    DOM.chatKicker = $('#chatKicker');
+    DOM.personaBtn = $('#personaBtn');
+    DOM.personaName = $('#personaName');
     DOM.sourceChips = $('#sourceChips');
     DOM.mediaBtn = $('#mediaBtn');
     DOM.capBtn = $('#capBtn');
@@ -2618,6 +2793,8 @@
 
     loadCapabilities(function () { applyCapabilities(); });
     loadTools();
+    // 风格列表由后端提供：新增一种风格时只改后端，前端不用发版
+    loadPersonas();
 
     var active = lsGet(STORE.active, '');
     if (active) {

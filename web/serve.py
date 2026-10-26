@@ -101,13 +101,7 @@ class FrontendHandler(SimpleHTTPRequestHandler):
         if self.path.startswith("/share/"):
             self._proxy("GET")
             return
-        if not self._authorized():
-            self._unauthorized()
-            return
-        if self.path.startswith("/api/"):
-            self._proxy("GET")
-        else:
-            super().do_GET()
+        self._dispatch("GET")
 
     def do_HEAD(self) -> None:
         if not self._authorized():
@@ -116,28 +110,36 @@ class FrontendHandler(SimpleHTTPRequestHandler):
         super().do_HEAD()
 
     def do_POST(self) -> None:
-        if not self._authorized():
-            self._unauthorized()
-            return
-        if self.path.startswith("/api/"):
-            self._proxy("POST")
-        else:
-            self.send_error(404, "not found")
+        self._dispatch("POST")
+
+    def do_PATCH(self) -> None:
+        self._dispatch("PATCH")
 
     def do_DELETE(self) -> None:
+        self._dispatch("DELETE")
+
+    def _dispatch(self, method: str) -> None:
+        """带鉴权的分发：``/api/**`` 走代理，GET 的其它路径走静态文件。
+
+        早先每个动词各写一份，加 PATCH 接口时漏了对应方法，
+        结果前端改「对话风格」直接 501——这类漏写不会报错、只在特定功能上炸，
+        所以收敛成一个入口，动词覆盖由 tests/test_web_serve.py 兜住。
+        """
         if not self._authorized():
             self._unauthorized()
             return
         if self.path.startswith("/api/"):
-            self._proxy("DELETE")
+            self._proxy(method)
+        elif method == "GET":
+            super().do_GET()
         else:
             self.send_error(404, "not found")
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Device-ID")
         self.end_headers()
 
     def _proxy(self, method: str) -> None:

@@ -19,6 +19,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage
 
 from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph
+from app.agent.guard import TaintState, current_taint
 from app.agent.model import build_chat_model
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
 from app.agent.resilience import (
@@ -326,6 +327,10 @@ class ChatService:
             total=self._settings.tool_max_calls_total,
         )
         budget_token = current_tool_budget.set(tool_budget)
+        # 污点状态同样按轮重置：本轮读到的内容里出现注入指令时，
+        # 后续有副作用的工具会被拦下；用户重发一次明确指令即回到干净状态
+        taint = TaintState()
+        taint_token = current_taint.set(taint)
 
         async def _run_graph() -> None:
             try:
@@ -456,6 +461,7 @@ class ChatService:
             current_media.reset(media_token)
             current_retry_stats.reset(retry_token)
             current_tool_budget.reset(budget_token)
+            current_taint.reset(taint_token)
             broker.cancel_all()
             if not runner.done():
                 runner.cancel()
@@ -549,6 +555,9 @@ class ChatService:
                 "latency_ms": latency_ms,
                 "tool_retries": retry_stats.to_dict(),
                 "tool_budget": tool_budget.to_dict(),
+                # 本轮是否读到过注入内容、拦了几次危险操作。前端不展示，
+                # 但排查「为什么写文件没执行」时这是唯一线索
+                "taint": taint.to_dict(),
             }
         )
 

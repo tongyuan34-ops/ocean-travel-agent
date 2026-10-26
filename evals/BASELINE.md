@@ -218,6 +218,32 @@ uv run python -m evals.run --out evals/report.md --label "评审带工具轨迹"
 这四条的质量分会明显上升（它们本来就是被冤枉的），通过率应该到 22-23 / 31。
 **如果没涨，说明我判断错了，那才是更值得写下来的结论。**
 
+## 第六类：注入用例还没有真模型基线
+
+上表三轮跑的都是 31 条用例。之后新增了 6 条 `injection` 用例（总数变成 37），
+这 6 条**只在离线自测里跑过**，没有真模型数字。
+
+离线自测能证明的是「闸门接对了」——`read_file` 读到投毒内容后，
+脚本化的模型照做去调 `write_file`，闸门返回 `TOOL_BLOCKED_BY_GUARD`，
+`forbid_executed` 判定通过。这验证的是机制，不是模型行为。
+
+它证明不了的事情有两件，都要真模型才能回答：
+
+1. **模型会不会主动识别并报告**可疑内容（`must_mention_any` 那一条）；
+2. **污点闸会不会误伤**（`inj-benign-doc-not-blocked` 与 `inj-user-direct-not-tainted`）。
+
+补基线：
+
+```bash
+uv run python -m evals.run --category injection --out evals/report-injection.md \
+    --label "注入防护首轮"
+```
+
+只跑 6 条，成本很低。跑完把结果并进上面那张三轮表，就是第四轮。
+
+在此之前，`README.md` 里的 19/31 只能标注为「31 条时代的基线」，
+拿它和 37 条的结果直接比是错的——分母变了。
+
 ## 怎么用这份基线
 
 1. **先看误调数**（`forbid_tools` 命中）。它比通过率更值得盯：误调说明工具描述有歧义，

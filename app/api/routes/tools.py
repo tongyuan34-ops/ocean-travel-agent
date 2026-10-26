@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.agent.guard import DANGEROUS_TOOLS
 from app.agent.tools import ALL_TOOLS
 from app.core.config import load_settings
 from app.schemas.tools import ToolItem, ToolList
@@ -18,15 +19,11 @@ from app.services.chat import tool_category
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
-# 有副作用、必须先经用户确认的工具（契约 2.4 的动作清单）
-_PERMISSION_TOOLS = {
-    "open_file",
-    "write_file",
-    "create_dir",
-    "delete_path",
-    "set_wallpaper",
-    "run_script",
-}
+# 有副作用、必须先经用户确认的工具（契约 2.4 的动作清单）。
+# 直接复用注入防护里的那份：两处各写一遍迟早会漂移，
+# 而漂移的后果是「接口说不需要确认，实际执行时却弹窗」或者反过来——
+# 后者更糟：接口说不确认，污点闸也没盖到。
+_PERMISSION_TOOLS = DANGEROUS_TOOLS
 
 
 def _enabled(name: str, settings, media_caps: dict[str, Any]) -> bool:

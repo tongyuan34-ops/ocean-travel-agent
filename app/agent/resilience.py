@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 from langchain_core.tools import BaseTool
 
+from app.agent.guard import check_dangerous, guard_output
 from app.agent.permissions import PermissionDenied
 from app.core.security import PathNotAllowed
 from app.media.base import MediaError
@@ -167,6 +168,21 @@ class ToolBudget:
 
 current_tool_budget: ContextVar[ToolBudget | None] = ContextVar("current_tool_budget", default=None)
 
+# 被代码层拦下时回给模型的结果前缀。
+#
+# 为什么要把它们做成常量：评测和日志必须能区分「模型没调」和「模型调了但被拦」。
+# 这两件事的改进方向完全相反——前者要改 prompt，后者要查闸门是不是太紧。
+# 只看「工具名出现在事件流里」会把「闸门成功拦截」误判成「模型违规调用」，
+# 那等于惩罚了唯一正确的行为。
+BUDGET_BLOCKED_PREFIX = "TOOL_BUDGET_EXCEEDED"
+GUARD_BLOCKED_PREFIX = "TOOL_BLOCKED_BY_GUARD"
+BLOCKED_RESULT_PREFIXES = (BUDGET_BLOCKED_PREFIX, GUARD_BLOCKED_PREFIX)
+
+
+def is_blocked_result(text: str) -> bool:
+    """工具返回是否来自「被拦下」而不是「真的执行了」。"""
+    return text.lstrip().startswith(BLOCKED_RESULT_PREFIXES)
+
 
 def is_retryable(exc: BaseException) -> bool:
     """判断异常是否值得重试。
@@ -278,15 +294,27 @@ def make_resilient(tool: BaseTool, policy: RetryPolicy | None = None) -> BaseToo
             if reason:
                 logger.warning("工具调用被预算拦截 | tool=%s 原因=%s", tool.name, reason)
                 return (
-                    f"TOOL_BUDGET_EXCEEDED：{reason}。"
+                    f"{BUDGET_BLOCKED_PREFIX}：{reason}。"
                     "请基于已经拿到的信息作答；若信息不足，如实告知用户还缺什么。"
                 )
-        return await call_with_retry(
+
+        # 污点闸在预算之后、执行之前：本轮读到的内容里出现过注入指令时，
+        # 有副作用的工具一律不执行。这是权限网关之外的第二道闸——
+        # 网关管「用户有没有确认」，这里管「这个操作该不该出现」。
+        blocked = check_dangerous(tool.name)
+        if blocked:
+            return f"{GUARD_BLOCKED_PREFIX}：{blocked}"
+
+        result = await call_with_retry(
             lambda: original(*args, **kwargs),
             policy=resolved,
             label=tool.name,
             stats=current_retry_stats.get(),
         )
+        # 内容型工具的返回统一加来源标记，检测到注入则降级为带警告的数据
+        if isinstance(result, str):
+            return guard_output(tool.name, result)
+        return result
 
     patched = tool.model_copy(update={"coroutine": _call})
     # pydantic 模型不接受未知字段赋值，这里直接写 __dict__ 打标记
@@ -299,12 +327,16 @@ def make_all_resilient(tools: list[BaseTool], policy: RetryPolicy | None = None)
 
 
 __all__ = [
+    "BLOCKED_RESULT_PREFIXES",
+    "BUDGET_BLOCKED_PREFIX",
+    "GUARD_BLOCKED_PREFIX",
     "RetryPolicy",
     "RetryStats",
     "ToolBudget",
     "call_with_retry",
     "current_retry_stats",
     "current_tool_budget",
+    "is_blocked_result",
     "is_retryable",
     "make_all_resilient",
     "make_resilient",

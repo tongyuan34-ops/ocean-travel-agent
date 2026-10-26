@@ -34,11 +34,13 @@ from evals.runner import (
     DEFAULT_TIMEOUT_SEC,
     PASS_JUDGE_SCORE,
     CaseResult,
+    RunOutcome,
     judge_answer,
     load_cases,
     render_markdown,
     run_graph,
     score_case,
+    score_execution,
     summarize,
     tool_trace,
 )
@@ -73,20 +75,25 @@ async def _run_one(
         per_tool=settings.tool_max_calls_per_tool,
         total=settings.tool_max_calls_total,
     )
+    outcome = RunOutcome()
+    error = ""
     try:
-        tools, answer, usage, final_state = await run_graph(
-            graph, str(case["input"]), timeout, budget
-        )
-        error = ""
+        outcome = await run_graph(graph, str(case["input"]), timeout, budget)
     except TimeoutError:
-        tools, answer, usage, final_state = [], "", None, None
         error = f"用例超时（>{timeout:.0f}s）"
     except Exception as exc:  # noqa: BLE001 - 单条用例失败不能中断整轮
-        tools, answer, usage, final_state = [], "", None, None
         error = f"{type(exc).__name__}: {exc}"
+
+    tools, executed, answer = outcome.tools, outcome.executed, outcome.answer
+    usage, final_state, taint = outcome.usage, outcome.final_state, outcome.taint
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     missing, forbidden_called, missing_mentions = score_case(case, answer, tools)
+    forbidden_executed = score_execution(case, executed)
+    # 阴性对照用：正常文档不该触发污点闸。只断言「拦到了」会让检测器
+    # 越激进分越高，必须同时有用例反过来约束它别乱拦。
+    max_guard = case.get("max_guard_blocks")
+    guard_within_limit = max_guard is None or taint.blocked <= int(max_guard)
 
     judge_score: int | None = None
     judge_reason = ""
@@ -100,7 +107,9 @@ async def _run_one(
         not error
         and not missing
         and not forbidden_called
+        and not forbidden_executed
         and not missing_mentions
+        and guard_within_limit
         and (judge_score is None or judge_score >= PASS_JUDGE_SCORE)
     )
 
@@ -110,16 +119,21 @@ async def _run_one(
         passed=passed,
         answer=answer,
         tools=tools,
+        executed_tools=executed,
         expected_tools=[str(item) for item in case.get("expect_tools") or []],
         forbidden_tools=[str(item) for item in case.get("forbid_tools") or []],
+        forbidden_executed_tools=[str(item) for item in case.get("forbid_executed") or []],
         missing_tools=missing,
         forbidden_called=forbidden_called,
+        forbidden_executed=forbidden_executed,
         missing_mentions=missing_mentions,
         judge_score=judge_score,
         judge_reason=judge_reason,
         latency_ms=latency_ms,
         model_calls=usage.calls if usage is not None else 0,
         budget_blocked=budget.blocked,
+        guard_blocked=taint.blocked,
+        taint=taint.to_dict(),
         usage=usage.to_dict(settings.model_name, settings.model_price) if usage else {},
         error=error,
     )
@@ -176,11 +190,15 @@ async def run(args: argparse.Namespace) -> int:
         )
         results.append(result)
         mark = "PASS" if result.passed else "FAIL"
+        notes = ""
+        if result.budget_blocked:
+            notes += f"  budget_blocked={result.budget_blocked}"
+        if result.guard_blocked:
+            notes += f"  guard_blocked={result.guard_blocked}"
         print(
             f"[{index:>2}/{len(cases)}] {mark} {result.case_id}"
             f"  tools={'->'.join(result.tools) or '-'}"
-            f"  {result.latency_ms}ms"
-            + (f"  blocked={result.budget_blocked}" if result.budget_blocked else ""),
+            f"  {result.latency_ms}ms" + notes,
             file=sys.stderr,
         )
 

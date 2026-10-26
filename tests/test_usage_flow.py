@@ -169,6 +169,20 @@ async def test_message_persists_latency(monkeypatch):
     assert assistant[0].latency_ms == end["latency_ms"]
 
 
+async def test_end_event_carries_taint(monkeypatch):
+    """污点状态要在 end 事件里给一次。
+
+    前端靠它决定要不要在回答下方提示「这段内容里有可疑指令」。
+    没有这个字段，拦截就只发生在服务端日志里，用户完全不知道发生过什么。
+    """
+    graph = _Graph([_model_end(60, 6), _final("回答")])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    end = _end(await _frames(service, session.id, "问题"))
+    assert end["taint"] == {"tainted": False, "sources": [], "patterns": [], "blocked": 0}
+
+
 async def test_user_message_has_no_usage(monkeypatch):
     """用户消息不该带用量，否则前端会在他自己那句话下面画一行 0 tokens。"""
     graph = _Graph([_model_end(60, 6), _final("回答")])

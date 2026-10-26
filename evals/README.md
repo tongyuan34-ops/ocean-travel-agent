@@ -24,7 +24,8 @@ uv run python -m evals.run --fail-under 0.8
 #   --timeout 120      单条用例超时
 ```
 
-报告会写到 `evals/report.md`（人看）和 `evals/report.json`（机器看，便于做趋势对比）。
+报告会写到 `evals/report.md`（人看，入库）和 `evals/report.json`（机器看，不入库）。
+最近一次基线的逐条拆解见 [`BASELINE.md`](BASELINE.md)——包括哪些失败是用例自己写错了。
 
 ## 用例怎么写
 

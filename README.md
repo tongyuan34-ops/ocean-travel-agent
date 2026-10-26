@@ -344,7 +344,11 @@ uv run python -m evals.run --fail-under 0.8
 
 覆盖六类：工具选择、多工具串联（含顺序）、不该调工具、工具路由、权限拒绝、工具失败不编造。
 
-产出指标：通过率、工具召回率、误调数、平均质量分、P50/P95 延迟、总 token 与成本。详见 [`evals/README.md`](evals/README.md)。
+产出指标：通过率、工具召回率、误调数、平均质量分、P50/P95 延迟、总 token 与成本。
+
+基线（`deepseek-v4-flash`，31 条）：通过 20、工具召回率 73.9%、误调 0、平均质量分 3.81。
+失败的 11 条里既有真实缺陷（工具抖动、超时、工具失败时编造），也有用例自身的问题，
+逐条拆解见 [`evals/BASELINE.md`](evals/BASELINE.md)；用例写法见 [`evals/README.md`](evals/README.md)。
 
 ---
 

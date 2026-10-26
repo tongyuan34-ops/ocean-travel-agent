@@ -10,6 +10,34 @@
 
 ---
 
+## 先跑起来
+
+三步，不需要自己准备数据库，也不需要 Redis：
+
+```bash
+git clone https://github.com/tongyuan34-ops/ocean-travel-agent.git
+cd ocean-travel-agent && cp .env.example .env
+docker compose up --build
+```
+
+打开 **http://localhost:3001** 就是界面（后端文档在 http://localhost:8000/docs）。
+不想用 Docker 的话，`uv` 和 `pip` 两种本地起法见 [快速开始](#快速开始)。
+
+**要真正对话，得在 `.env` 里填 `MODEL_API_KEY`。** 用 [DeepSeek 开放平台](https://platform.deepseek.com/)
+注册即可，这个项目单轮对话约 4000 token，充 10 块钱能跑很久。
+
+没填也能进界面，点发送会收到一条明确提示，而不是白屏或静默失败：
+
+```
+MODEL_UNAVAILABLE：MODEL_NAME / MODEL_BASE_URL 未配置，请在 .env 中填写
+```
+
+同理，没配 Key 的工具（天气、必应检索）会返回 `TOOL_NOT_ENABLED` 并说明去补哪个变量，
+而不是编一个假结果糊弄过去——`GET /api/v1/system/capabilities` 会如实汇报哪些能力真的可用，
+前端据此隐藏入口。
+
+---
+
 ## 它解决什么问题
 
 通用对话模型做旅行规划有三个硬伤：**事实会编、行程不可执行、结果没法协作**。这个项目针对性地做了三件事：
@@ -211,6 +239,18 @@ docker compose up --build
 
 - 后端 http://localhost:8000 · 接口文档 http://localhost:8000/docs
 - 前端 http://localhost:3001
+
+> Docker 模式下文件工具默认**全禁用**：`docker-compose.yml` 里 `ALLOWED_ROOTS` 被显式置空，
+> 因为容器内的 `C:\` 或 `/` 指的是容器自己的文件系统，放 agent 进去读写没有意义。
+> 想试文件功能就挂一个卷，再把 `ALLOWED_ROOTS` 指到挂载点：
+
+```yaml
+  api:
+    volumes:
+      - ./sandbox:/sandbox          # 只在容器里暴露这一个目录
+    environment:
+      ALLOWED_ROOTS: /sandbox
+```
 
 ### 方式二：本地（uv，推荐）
 

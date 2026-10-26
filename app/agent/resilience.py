@@ -176,7 +176,12 @@ current_tool_budget: ContextVar[ToolBudget | None] = ContextVar("current_tool_bu
 # 那等于惩罚了唯一正确的行为。
 BUDGET_BLOCKED_PREFIX = "TOOL_BUDGET_EXCEEDED"
 GUARD_BLOCKED_PREFIX = "TOOL_BLOCKED_BY_GUARD"
-BLOCKED_RESULT_PREFIXES = (BUDGET_BLOCKED_PREFIX, GUARD_BLOCKED_PREFIX)
+# 用户拒绝（或 120 秒未决策）也属于「被拦下」，而且是最常发生的一种。
+# 早先没把它列进来，后果是：评测里模型调 write_file 被闸门拒绝，
+# `tool_outcomes` 却把它记成「真的执行了」——指标「禁用工具真的执行」因此失真，
+# 注入用例可能因为一个假阳性而失败。这类错账比没有指标更危险。
+DENIED_PREFIX = "TOOL_DENIED"
+BLOCKED_RESULT_PREFIXES = (BUDGET_BLOCKED_PREFIX, GUARD_BLOCKED_PREFIX, DENIED_PREFIX)
 
 
 def is_blocked_result(text: str) -> bool:

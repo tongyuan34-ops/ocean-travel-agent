@@ -126,3 +126,24 @@ def test_image_text_is_treated_as_data_not_instructions():
         prompt = build_system_prompt(key)
         assert "图片同理" in prompt
         assert "图片内容" in prompt
+
+
+def test_no_domain_persona_asks_before_looking_things_up():
+    """「先追问」是一次真实回归，用测试钉住。
+
+    默认人格原本写着「先确认关键信息（目的地、天数、预算、同行人），信息够了就给方案」。
+    模型把它读成了「先问、别查」：40 条评测里 5 条 multi_tool 用例
+    一个工具都没调就反问用户（`trip-chongqing-2d` / `trip-hangzhou-3d` /
+    `trip-budget-xiamen` / `plan-then-optimize`），质量分掉到 2–4。
+
+    断言分两层：
+    - 否定层：那句措辞不能再出现在任何带领域规则的人格里；
+    - 肯定层：默认人格必须显式写「先查再问」——它是绝大多数会话在用的那一个。
+
+    闲聊型人格不查东西，不参与这条约束。
+    """
+    for key in ("concierge", "companion", "guide"):
+        assert "先确认关键信息" not in get_persona(key).style, (
+            f"{key} 又写回了「先确认关键信息」，模型会拿它当「先问别查」的理由"
+        )
+    assert "不要用追问代替查询" in get_persona(DEFAULT_PERSONA).style

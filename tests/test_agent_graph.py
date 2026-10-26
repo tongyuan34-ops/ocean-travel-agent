@@ -156,6 +156,46 @@ def test_handle_tool_error_keeps_invocation_message():
     assert "set_wallpaper" in error.message
 
 
+def test_permission_denied_is_not_a_crash():
+    """用户点「拒绝」是预期结果，不是工具崩溃。
+
+    早先它落进 TOOL_CRASHED 分支，后果有两个：每次拒绝都打一条带 traceback 的
+    ERROR 日志（真正的崩溃会被淹掉）；评测的 `tool_outcomes` 把它记成
+    「工具真的执行了」，于是「禁用工具真的执行」这个指标失真。
+    """
+    from app.agent.graph import _handle_tool_error
+    from app.agent.permissions import PermissionDenied
+
+    result = _handle_tool_error(PermissionDenied("用户拒绝了该操作"))
+    assert result.startswith("TOOL_DENIED")
+    assert "用户拒绝了该操作" in result
+    assert "TOOL_CRASHED" not in result
+    assert "PermissionDenied" not in result
+
+
+def test_denied_result_counts_as_blocked_in_evals():
+    """评测口径：被拒绝 = 被拦下，不能算「真的执行了」。"""
+    from evals.runner import tool_outcomes
+    from langchain_core.messages import ToolMessage
+
+    from app.agent.resilience import is_blocked_result
+
+    denied = ToolMessage(
+        content="TOOL_DENIED：用户拒绝了该操作", tool_call_id="c1", name="write_file"
+    )
+    assert is_blocked_result(denied.content)
+
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[{"name": "write_file", "args": {}, "id": "c1"}]),
+            denied,
+        ]
+    }
+    executed, blocked = tool_outcomes(state)
+    assert executed == []
+    assert blocked == ["write_file"]
+
+
 async def test_tool_crash_does_not_kill_the_turn(monkeypatch, settings):
     """工具抛异常后，模型仍应拿到结果并给出最终回答。"""
     _patch(

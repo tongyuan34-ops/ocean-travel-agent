@@ -22,6 +22,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt.tool_node import ToolInvocationError
 
 from app.agent.model import build_chat_model, detect_tool_calling
+from app.agent.permissions import PermissionDenied
 from app.agent.prompts import build_system_prompt
 from app.agent.resilience import RetryPolicy, make_all_resilient
 from app.agent.state import AgentState
@@ -56,10 +57,21 @@ def _handle_tool_error(exc: Exception) -> str:
 
     返回的 ``TOOL_CRASHED`` 前缀和 ``TOOL_FAILED`` 一样被「工具返回错误码」那条规则覆盖：
     模型看到它就必须承认「这次没拿到数据」，不许编造。
+
+    唯一例外是 ``PermissionDenied``：那是**用户做的选择**，不是缺陷，
+    所以既不该打 traceback，也不该说成「崩溃」（见下方分支）。
     """
     if isinstance(exc, ToolInvocationError):
         # 参数校验失败是模型的问题，原文回给它最有信息量
         return exc.message
+    if isinstance(exc, PermissionDenied):
+        # 拒绝是**预期结果**，不是崩溃。早先它落进下面的 TOOL_CRASHED 分支，
+        # 后果有两个：每次用户点「拒绝」都留一条带 traceback 的 ERROR 日志
+        # （真正的崩溃会被淹掉）；评测也把它算成「工具真的执行了」，
+        # 于是「禁用工具真的执行」这个指标失真。
+        # 单独给一个 TOOL_DENIED 前缀，日志降为 info，评测据此归到「被拦下」。
+        logger.info("工具调用被拒绝 | %s", exc.message)
+        return f"TOOL_DENIED：{exc.message}"
     logger.exception("工具执行抛出未预期异常 | 类型=%s", type(exc).__name__)
     return f"TOOL_CRASHED：{type(exc).__name__}: {exc}"
 

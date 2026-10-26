@@ -323,7 +323,7 @@ app/
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
 tests/               # 118 个离线测试
-docs/                # SPEC（接口契约）、SETUP（部署手册）
+docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本
 .github/workflows/   # CI：lint + 类型检查 + 双版本测试 + 镜像冒烟
 ```

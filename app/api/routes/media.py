@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Request, Response
 
 from app.core.config import PROJECT_ROOT
 from app.core.errors import ApiError
+from app.core.identity import resolve_user_id
 from app.media.base import MediaKind, MediaRequest
 from app.media.service import MediaService
 from app.media.templates import TEMPLATES
+from app.media.uploads import ALLOWED_MIME, MAX_UPLOAD_BYTES, UploadStore
 from app.schemas.media import (
     ImageRequest,
     ImageTemplateItem,
     ImageTemplateList,
     TaskAccepted,
     TaskStatusResponse,
+    UploadOut,
     VideoRequest,
 )
 
@@ -170,3 +174,103 @@ def _media_type_of(path: Path) -> str:
         ".png": "image/png",
         ".webp": "image/webp",
     }.get(ext, "application/octet-stream")
+
+
+# ---------- 用户上传的图片（多模态输入） ----------
+
+
+def _uploads(request: Request) -> UploadStore:
+    return request.app.state.uploads
+
+
+@router.post("/uploads", response_model=UploadOut)
+async def create_upload(request: Request) -> UploadOut:
+    """接收一张图片，规范化后落盘。
+
+    直读请求体而不是 multipart：一次只传一张，省一个依赖和一个解析器。
+    前端用 ``xhr.send(file)`` 发，``Content-Type`` 就是文件本身的类型。
+    """
+    declared = int(request.headers.get("content-length") or 0)
+    if declared > MAX_UPLOAD_BYTES:
+        # 先看 Content-Length 再读体：几十 MB 的请求不该先进内存再被拒
+        raise ApiError(
+            "UPLOAD_TOO_LARGE",
+            f"图片超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限",
+        )
+
+    raw = await request.body()
+    if not raw:
+        raise ApiError("INVALID_REQUEST", "请求体为空")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ApiError(
+            "UPLOAD_TOO_LARGE",
+            f"图片超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限",
+        )
+
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    filename = _filename_of(request)
+    # 手机相册偶尔给 application/octet-stream，此时按扩展名兜底
+    unknown_but_named = content_type == "application/octet-stream" and _looks_like_image(filename)
+    if content_type and content_type not in ALLOWED_MIME and not unknown_but_named:
+        raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", f"不支持的图片类型：{content_type}")
+
+    try:
+        item = _uploads(request).save_image(raw, resolve_user_id(request), filename)
+    except ValueError as exc:
+        # Pillow 解析失败或超限，都归到「这个文件当图片用不了」
+        raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", str(exc)) from None
+
+    return UploadOut(
+        upload_id=item.id,
+        url=f"/api/v1/media/uploads/{item.id}",
+        width=item.width,
+        height=item.height,
+        bytes=item.bytes,
+        format=item.ext.lstrip("."),
+    )
+
+
+@router.get("/uploads/{upload_id}")
+async def get_upload(upload_id: str, request: Request) -> Response:
+    """取回原图（已规范化）。前端缩略图与气泡里的预览都走这里。
+
+    **不校验设备 ID**，这是刻意的：``<img src>`` 带不了自定义请求头，
+    校验了就等于让页面里的图全都 403。32 位十六进制随机 id 本身就是凭证，
+    和 S3 预签名链接一个思路——拿到链接就能看，拿不到就猜不着。
+    写操作（DELETE）仍然校验归属，因为那是 XHR，能带头。
+    """
+    item = _uploads(request).get(upload_id)
+    if item is None:
+        raise ApiError("UPLOAD_NOT_FOUND", "图片不存在或已过期")
+    path = _uploads(request).path_of(item)
+    if not path.is_file():
+        raise ApiError("UPLOAD_NOT_FOUND", "图片文件已丢失")
+    return Response(
+        content=path.read_bytes(),
+        media_type="image/png" if item.ext == ".png" else "image/jpeg",
+        headers={
+            # 内容按 id 固化，可以放心让浏览器缓存，省掉每次刷新的重复下载
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": 'inline; filename="upload-%s%s"' % (item.id[:8], item.ext),
+        },
+    )
+
+
+@router.delete("/uploads/{upload_id}", status_code=204)
+async def delete_upload(upload_id: str, request: Request) -> Response:
+    """用户把附件从输入框里删掉时调用，避免落一堆没人用的图。"""
+    if not _uploads(request).delete(upload_id, resolve_user_id(request)):
+        raise ApiError("UPLOAD_NOT_FOUND", "图片不存在或已过期")
+    return Response(status_code=204)
+
+
+def _filename_of(request: Request) -> str:
+    # HTTP 头只能是 latin-1，中文文件名必须由前端 encodeURIComponent 之后再发，
+    # 这里 unquote 回来。不做这一步的话，浏览器发「海边.png」会直接被 XHR 拒掉。
+    raw = unquote(request.headers.get("x-file-name") or "")
+    # 只保留文件名本身，防止 ../ 之类的东西混进来
+    return Path(raw.replace("\\", "/")).name[:120]
+
+
+def _looks_like_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}

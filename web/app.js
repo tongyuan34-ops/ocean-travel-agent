@@ -38,6 +38,10 @@
     SESSION_EXPIRED: '会话已过期，请新建会话',
     VALIDATION_ERROR: '输入不合法',
     INVALID_REQUEST: '请求无效',
+    UPLOAD_TOO_LARGE: '图片太大，换一张小一点的',
+    UPLOAD_TYPE_NOT_ALLOWED: '这个文件不是能识别的图片',
+    UPLOAD_NOT_FOUND: '图片已失效，请重新选择',
+    VISION_NOT_ENABLED: '当前未启用图片输入',
     NETWORK: '无法连接后端服务，请确认后端已启动',
     NETWORK_TIMEOUT: '请求超时，请稍后重试',
     INTERNAL_ERROR: '处理失败，请稍后重试'
@@ -130,6 +134,9 @@
     toolList: [],
     sessionId: '',
     sessions: [],
+    /* 待发送的附件。每个元素代表用户选中的一个文件：
+       视频会展开成多张帧，所以 ids 是数组，预览只显示一张 */
+    attachments: [],
     streaming: false,
     stream: null,
     perm: null,
@@ -339,6 +346,9 @@
     var showImage = !!caps.image_gen;
     if (DOM.mediaBtn) DOM.mediaBtn.hidden = !showImage;
     if (DOM.composerMedia) DOM.composerMedia.hidden = !showImage;
+    /* 图片输入：上传链路就绪才放按钮。放一个点了必然失败的入口，
+       比没有入口更糟——用户会以为是自己的图有问题 */
+    if (DOM.composerAttach) DOM.composerAttach.hidden = !caps.vision;
     /* 生视频不在产品范围内，界面永远不展示入口 */
   }
 
@@ -363,6 +373,286 @@
       chips.push('<span class="chip">检查后端后重试</span>');
     }
     DOM.sourceChips.innerHTML = chips.join('');
+  }
+
+  /* ================= 附件：图片与视频 ================= */
+
+  var MAX_ATTACHMENTS = 6;
+  var MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+  /* 视频抽几帧。4 帧足够回答「这是哪儿」「大概什么样」，
+     再多只是在替同一段画面重复付 token */
+  var VIDEO_FRAMES = 4;
+  var attachSeq = 0;
+
+  function visionReady() {
+    return !!(state.caps && state.caps.vision);
+  }
+
+  function uploadUrl(id) {
+    return API_BASE + '/media/uploads/' + encodeURIComponent(id);
+  }
+
+  function pendingIds() {
+    var ids = [];
+    for (var i = 0; i < state.attachments.length; i++) {
+      var list = state.attachments[i].ids || [];
+      for (var j = 0; j < list.length; j++) ids.push(list[j]);
+    }
+    return ids;
+  }
+
+  function attachmentsBusy() {
+    for (var i = 0; i < state.attachments.length; i++) {
+      if (state.attachments[i].busy) return true;
+    }
+    return false;
+  }
+
+  function slotCount() {
+    var used = 0;
+    for (var i = 0; i < state.attachments.length; i++) {
+      /* 还在上传的按 1 张算，否则一边传一边加会突破上限 */
+      used += Math.max(1, (state.attachments[i].ids || []).length);
+    }
+    return used;
+  }
+
+  function pickAttachments() {
+    if (!DOM.attachFile) return;
+    /* 清空 value：否则连续两次选同一个文件不会触发 change */
+    DOM.attachFile.value = '';
+    DOM.attachFile.click();
+  }
+
+  function onFilesPicked() {
+    var files = DOM.attachFile && DOM.attachFile.files;
+    if (!files || !files.length) return;
+    var room = MAX_ATTACHMENTS - slotCount();
+    if (room <= 0) {
+      toast('一条消息最多 ' + MAX_ATTACHMENTS + ' 张图');
+      return;
+    }
+    if (files.length > room) {
+      toast('只取了前 ' + room + ' 个，一条消息最多 ' + MAX_ATTACHMENTS + ' 张图');
+    }
+    var batch = [];
+    for (var i = 0; i < files.length && batch.length < room; i++) batch.push(files[i]);
+    for (var j = 0; j < batch.length; j++) addAttachment(batch[j]);
+  }
+
+  function addAttachment(file) {
+    var name = file.name || '';
+    var isVideo = /^video\//.test(file.type || '') || /\.(mp4|mov|m4v|webm|3gp)$/i.test(name);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      toast('「' + name + '」超过 12MB，换小一点的');
+      return;
+    }
+    if (!isVideo && !/^image\//.test(file.type || '')) {
+      toast('只支持图片和视频');
+      return;
+    }
+    attachSeq += 1;
+    var entry = { key: 'a' + attachSeq, kind: isVideo ? 'video' : 'image', ids: [], preview: '', busy: true };
+    state.attachments.push(entry);
+    renderAttachStrip();
+    if (isVideo) uploadVideo(entry, file);
+    else uploadImage(entry, file);
+  }
+
+  function uploadImage(entry, file) {
+    /* 先本地预览再上传：手机上传几百 KB 也要一秒，等完再显示像卡住了 */
+    entry.preview = URL.createObjectURL(file);
+    renderAttachStrip();
+    uploadBlob(file, file.name, function (err, data) {
+      finishAttachment(entry, err, data ? [data] : []);
+    });
+  }
+
+  /* 视频不往服务端传：浏览器本来就会解码，服务端再装一个 ffmpeg 只为抽 4 帧不划算。
+     抽帧在本地做，传上去的是 4 张几十 KB 的 JPEG，而不是一段几十 MB 的 MOV——
+     手机流量下这个差别就是「发得出去」和「发不出去」。 */
+  function uploadVideo(entry, file) {
+    toast('正在从视频里抽帧…');
+    extractVideoFrames(file, function (err, frames) {
+      if (err) { failAttachment(entry, err.message); return; }
+      if (!frames.length) { failAttachment(entry, '这段视频抽不出画面'); return; }
+      entry.preview = URL.createObjectURL(frames[0]);
+      renderAttachStrip();
+      uploadFrames(entry, frames, 0, []);
+    });
+  }
+
+  function uploadFrames(entry, frames, index, done) {
+    if (index >= frames.length) { finishAttachment(entry, null, done); return; }
+    uploadBlob(frames[index], 'frame-' + (index + 1) + '.jpg', function (err, data) {
+      if (err) { failAttachment(entry, err.message); return; }
+      done.push(data);
+      uploadFrames(entry, frames, index + 1, done);
+    });
+  }
+
+  function finishAttachment(entry, err, items) {
+    if (err) { failAttachment(entry, err.message); return; }
+    var ids = [];
+    for (var i = 0; i < items.length; i++) ids.push(items[i].upload_id);
+    entry.ids = ids;
+    entry.busy = false;
+    renderAttachStrip();
+    checkSendable();
+  }
+
+  function failAttachment(entry, message) {
+    toast(message || '上传失败');
+    removeAttachment(entry.key, true);
+  }
+
+  function removeAttachment(key, keepQuiet) {
+    for (var i = 0; i < state.attachments.length; i++) {
+      if (state.attachments[i].key !== key) continue;
+      var entry = state.attachments[i];
+      state.attachments.splice(i, 1);
+      if (entry.preview) URL.revokeObjectURL(entry.preview);
+      /* 已经传上去的顺手删掉，别在服务器上堆没人用的图 */
+      for (var j = 0; j < entry.ids.length; j++) {
+        request('DELETE', '/media/uploads/' + encodeURIComponent(entry.ids[j]), null, function () {});
+      }
+      renderAttachStrip();
+      checkSendable();
+      if (!keepQuiet) return;
+      return;
+    }
+  }
+
+  function clearAttachments() {
+    for (var i = 0; i < state.attachments.length; i++) {
+      if (state.attachments[i].preview) URL.revokeObjectURL(state.attachments[i].preview);
+    }
+    state.attachments = [];
+    renderAttachStrip();
+    checkSendable();
+  }
+
+  function renderAttachStrip() {
+    var strip = DOM.attachStrip;
+    if (!strip) return;
+    if (!state.attachments.length) {
+      strip.hidden = true;
+      strip.innerHTML = '';
+      if (DOM.composer) DOM.composer.className = 'composer';
+      return;
+    }
+    strip.hidden = false;
+    if (DOM.composer) DOM.composer.className = 'composer has-attach';
+    var html = [];
+    for (var i = 0; i < state.attachments.length; i++) {
+      var a = state.attachments[i];
+      html.push(
+        '<div class="attach-chip' + (a.busy ? ' is-busy' : '') + '" data-key="' + a.key + '">' +
+          (a.preview ? '<img src="' + esc(a.preview) + '" alt="">' : '') +
+          (a.kind === 'video' ? '<span class="attach-tag">' + (a.ids.length || VIDEO_FRAMES) + ' 帧</span>' : '') +
+          '<button type="button" class="attach-del" data-key="' + a.key + '" aria-label="移除">' +
+            '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>' +
+          '</button>' +
+        '</div>'
+      );
+    }
+    strip.innerHTML = html.join('');
+  }
+
+  function onAttachStripClick(event) {
+    var node = event.target;
+    while (node && node !== DOM.attachStrip) {
+      if (node.getAttribute && node.getAttribute('data-key')) {
+        removeAttachment(node.getAttribute('data-key'));
+        return;
+      }
+      node = node.parentNode;
+    }
+  }
+
+  function uploadBlob(blob, name, cb) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', API_BASE + '/media/uploads', true);
+    xhr.timeout = 60000;
+    xhr.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
+    /* HTTP 头只能放 latin-1：中文文件名不 encodeURIComponent 的话，
+       setRequestHeader 会直接抛异常，用户看到的是「上传失败」但控制台没线索 */
+    xhr.setRequestHeader('X-File-Name', encodeURIComponent(name || ''));
+    xhr.setRequestHeader('X-Device-ID', deviceId());
+    xhr.onload = function () {
+      var data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.upload_id) cb(null, data);
+      else cb(normalizeError(data, xhr.status), null);
+    };
+    xhr.onerror = function () { cb(normalizeError(null, 0), null); };
+    xhr.ontimeout = function () { cb(normalizeError({ code: 'NETWORK_TIMEOUT' }, 0), null); };
+    try { xhr.send(blob); } catch (e) { cb(normalizeError(null, 0), null); }
+  }
+
+  function toJpegBlob(canvas, cb) {
+    if (canvas.toBlob) { canvas.toBlob(cb, 'image/jpeg', 0.82); return; }
+    /* 老内核没有 toBlob：退回 dataURL 再转，慢一点但能用 */
+    var dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    var binary = atob(dataUrl.split(',')[1] || '');
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    cb(new Blob([bytes], { type: 'image/jpeg' }));
+  }
+
+  function extractVideoFrames(file, cb) {
+    var url = URL.createObjectURL(file);
+    var video = document.createElement('video');
+    var canvas = document.createElement('canvas');
+    var shots = [];
+    var index = 0;
+    var duration = 0;
+    var finished = false;
+
+    function finish(err, frames) {
+      if (finished) return;
+      finished = true;
+      URL.revokeObjectURL(url);
+      cb(err, frames || []);
+    }
+
+    video.preload = 'auto';
+    video.muted = true;
+    video.setAttribute('playsinline', '');
+    video.onerror = function () { finish(new Error('浏览器打不开这段视频，换一段试试')); };
+
+    video.onloadedmetadata = function () {
+      duration = isFinite(video.duration) ? video.duration : 0;
+      if (!duration) { finish(new Error('读不到视频时长')); return; }
+      grab();
+    };
+
+    video.onseeked = function () {
+      var width = video.videoWidth || 0;
+      var height = video.videoHeight || 0;
+      if (!width || !height) { finish(new Error('读不到视频画面')); return; }
+      /* 长边压到 960：模型看的是构图和内容，不是像素 */
+      var scale = Math.min(1, 960 / Math.max(width, height));
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      toJpegBlob(canvas, function (blob) {
+        if (blob) shots.push(blob);
+        index += 1;
+        grab();
+      });
+    };
+
+    function grab() {
+      if (index >= VIDEO_FRAMES) { finish(null, shots); return; }
+      /* 均匀取帧，避开首尾各 5%：开头常是黑场，结尾常是水印 */
+      var ratio = VIDEO_FRAMES === 1 ? 0.5 : 0.05 + 0.9 * (index / (VIDEO_FRAMES - 1));
+      var target = duration * ratio;
+      if (target > duration - 0.05) target = Math.max(0, duration - 0.05);
+      video.currentTime = target;
+    }
+
+    video.src = url;
   }
 
   /* ================= 视图切换 ================= */
@@ -708,10 +998,21 @@
       '</div>';
   }
 
-  function appendUser(text) {
+  function appendUser(text, attachments) {
     var node = document.createElement('div');
-    node.className = 'msg msg-user';
-    node.innerHTML = esc(text);
+    var hasMedia = !!(attachments && attachments.length);
+    node.className = hasMedia ? 'msg msg-user has-media' : 'msg msg-user';
+    var html = '';
+    if (attachments && attachments.length) {
+      html += '<div class="msg-thumbs">';
+      for (var i = 0; i < attachments.length; i++) {
+        /* 用服务端地址而不是本地 objectURL：刷新后还能显示，也不用管生命周期 */
+        html += '<img src="' + esc(uploadUrl(attachments[i])) + '" alt="" loading="lazy">';
+      }
+      html += '</div>';
+    }
+    if (text) html += '<div class="msg-text">' + esc(text) + '</div>';
+    node.innerHTML = html;
     DOM.messages.appendChild(node);
     stickIfNeeded();
   }
@@ -862,7 +1163,7 @@
       var items = (data && data.items) || [];
       if (!items.length) { renderEmpty(); return; }
       for (var i = 0; i < items.length; i++) {
-        if (items[i].role === 'user') appendUser(items[i].content || '');
+        if (items[i].role === 'user') appendUser(items[i].content || '', items[i].attachments || []);
         else
           appendAssistantText(
             items[i].content || '',
@@ -1439,38 +1740,42 @@
       input.setAttribute('placeholder', personaEmpty().placeholder);
       var has = !!(state.caps && state.caps.image_gen);
       if (DOM.composerMedia) DOM.composerMedia.hidden = !has;
+      if (DOM.composerAttach) DOM.composerAttach.hidden = !visionReady();
     }
     checkSendable();
   }
 
   function sendMessage(text) {
     text = trim(text);
-    if (!text || state.streaming) return;
+    var ids = pendingIds();
+    if ((!text && !ids.length) || state.streaming) return;
+    if (attachmentsBusy()) { toast('图片还在上传，稍等一下'); return; }
     ensureSession(function (err, id) {
       if (err) { toast(err.message); return; }
       if (DOM.messages && DOM.messages.querySelector('.empty')) DOM.messages.innerHTML = '';
-      appendUser(text);
+      appendUser(text, ids);
       stickNow();
       var meta = null;
       for (var i = 0; i < state.sessions.length; i++) {
         if (state.sessions[i].id === id) { meta = state.sessions[i]; break; }
       }
+      var label = text || (ids.length > 1 ? '[' + ids.length + ' 张图]' : '[图片]');
       if (meta && (meta.title === '新的旅程' || !meta.title)) {
-        var title = text.length > 20 ? text.slice(0, 20) + '…' : text;
+        var title = label.length > 20 ? label.slice(0, 20) + '…' : label;
         meta.title = title;
         setChatTitle(title);
       } else if (!meta) {
-        var t2 = text.length > 20 ? text.slice(0, 20) + '…' : text;
-        setChatTitle(t2);
+        setChatTitle(label.length > 20 ? label.slice(0, 20) + '…' : label);
       }
-      upsertSession(id, meta ? meta.title : (text.length > 20 ? text.slice(0, 20) + '…' : text), '');
-      startStream(id, text);
+      upsertSession(id, meta ? meta.title : (label.length > 20 ? label.slice(0, 20) + '…' : label), '');
+      startStream(id, text, ids);
       DOM.input.value = '';
+      clearAttachments();
       resizeInput();
     });
   }
 
-  function startStream(sessionId, text) {
+  function startStream(sessionId, text, attachments) {
     var shell = createAssistantShell();
     var buffer = '';
     var consumed = 0;
@@ -1731,7 +2036,7 @@
     bindStream();
 
     try {
-      xhr.send(JSON.stringify({ message: text }));
+      xhr.send(JSON.stringify({ message: text, attachments: attachments || [] }));
     } catch (e) {
       errored = normalizeError(null, 0);
       finish('error');
@@ -2632,6 +2937,9 @@
     DOM.capBtn.onclick = function () { openSheet('capabilities'); };
     DOM.mediaBtn.onclick = function () { openSheet('media'); };
     DOM.composerMedia.onclick = function () { openSheet('media'); };
+    if (DOM.composerAttach) DOM.composerAttach.onclick = pickAttachments;
+    if (DOM.attachFile) DOM.attachFile.onchange = onFilesPicked;
+    if (DOM.attachStrip) DOM.attachStrip.onclick = onAttachStripClick;
     DOM.personaBtn.onclick = function () { openSheet('persona'); };
     DOM.railToggle.onclick = openRail;
     DOM.railScrim.onclick = closeRail;
@@ -2717,7 +3025,9 @@
 
   function checkSendable() {
     if (!DOM.sendBtn) return;
-    DOM.sendBtn.disabled = state.streaming ? false : !trim(DOM.input.value);
+    if (state.streaming) { DOM.sendBtn.disabled = false; return; }
+    /* 只发图不写字是合法的：「这张图里是什么」本来就不用打字 */
+    DOM.sendBtn.disabled = !trim(DOM.input.value) && !pendingIds().length;
   }
 
   /* ================= 启动 ================= */
@@ -2759,6 +3069,9 @@
     DOM.toBottom = $('#toBottom');
     DOM.composer = $('#composer');
     DOM.composerMedia = $('#composerMedia');
+    DOM.composerAttach = $('#composerAttach');
+    DOM.attachFile = $('#attachFile');
+    DOM.attachStrip = $('#attachStrip');
     DOM.input = $('#input');
     DOM.sendBtn = $('#sendBtn');
     DOM.sheetOverlay = $('#sheetOverlay');

@@ -49,3 +49,19 @@ class ImageTemplateItem(BaseModel):
 
 class ImageTemplateList(BaseModel):
     items: list[ImageTemplateItem]
+
+
+class UploadOut(BaseModel):
+    """一张已接收的图片。
+
+    ``url`` 由服务端给出而不是前端拼：路径里带设备维度以后，
+    前端不该知道 URL 长什么样。
+    """
+
+    upload_id: str
+    url: str
+    width: int
+    height: int
+    bytes: int
+    # 服务端重新编码后的实际格式，可能和上传时不同（PNG 太大被压成 JPEG）
+    format: str = Field(description="jpg 或 png")

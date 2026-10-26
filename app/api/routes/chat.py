@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from app.agent.prompts import DEFAULT_PERSONA, persona_list
+from app.core.errors import ApiError
 from app.core.identity import resolve_user_id
 from app.schemas.chat import (
     MessageItem,
@@ -98,8 +99,17 @@ async def send_message(
     生成在后台任务里跑，连接断开不会中断回答；/streams/{id} 可续传。
     """
     service = _service(request)
+    # 只发图不写字是合法的（「这张图里是什么」），但两者不能都空——
+    # 空消息进去只会让模型对着空气回答，还白占一条历史
+    if not payload.message.strip() and not payload.attachments:
+        raise ApiError("INVALID_REQUEST", "消息内容不能为空")
     # 先校验会话存在：一旦开始流式返回，HTTP 状态码就无法再改了
-    state = await service.start_reply(session_id, payload.message, resolve_user_id(request))
+    state = await service.start_reply(
+        session_id,
+        payload.message,
+        resolve_user_id(request),
+        attachments=payload.attachments,
+    )
     headers = dict(_SSE_HEADERS)
     headers["X-Stream-ID"] = state.stream_id
     return StreamingResponse(

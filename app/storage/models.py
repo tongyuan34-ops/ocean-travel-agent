@@ -22,6 +22,9 @@ class ChatMessage:
     usage: dict[str, Any] = field(default_factory=dict)
     # 本条回答的端到端耗时（毫秒），含工具调用。0 表示历史数据没记
     latency_ms: int = 0
+    # 用户消息附带的图片 upload_id。存 id 不存字节：
+    # 图片落在 data/uploads/，历史消息只记引用，刷新后照样能显示
+    attachments: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -32,6 +35,7 @@ class ChatMessage:
             "media_task_ids": list(self.media_task_ids),
             "usage": dict(self.usage),
             "latency_ms": self.latency_ms,
+            "attachments": list(self.attachments),
         }
 
     @classmethod
@@ -44,6 +48,7 @@ class ChatMessage:
             media_task_ids=[str(item) for item in data.get("media_task_ids") or []],
             usage=dict(data.get("usage") or {}),
             latency_ms=int(data.get("latency_ms") or 0),
+            attachments=[str(item) for item in data.get("attachments") or []],
         )
 
 

@@ -13,11 +13,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import chat, media, memory, permissions, share, system, tools, trips
-from app.core.config import load_settings
+from app.core.config import PROJECT_ROOT, load_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.tracing import configure_tracing
 from app.media.service import build_media_service
+from app.media.uploads import UploadStore
 from app.services.chat import ChatService
 from app.services.profile import build_profile_service
 from app.storage import build_session_store
@@ -38,10 +39,16 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.settings = settings
         app.state.media = build_media_service(settings)
+        # 用户上传的图片：跟 data/ 一起落盘，不进 git（见 .gitignore）
+        app.state.uploads = UploadStore(PROJECT_ROOT / "data" / "uploads")
         app.state.session_store = build_session_store(settings)
         app.state.profile = build_profile_service(settings)
         app.state.chat = ChatService(
-            settings, app.state.session_store, app.state.media, app.state.profile
+            settings,
+            app.state.session_store,
+            app.state.media,
+            app.state.profile,
+            uploads=app.state.uploads,
         )
 
         # 启动时把不可用原因打出来，避免"配了但没生效"这类静默问题

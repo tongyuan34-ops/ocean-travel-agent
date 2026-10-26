@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.graph import MAX_STEPS, build_agent_graph
 from app.agent.guard import TaintState, current_taint
@@ -35,6 +35,7 @@ from app.core.errors import ApiError
 from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
 from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media
+from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
 from app.services.profile import ProfileService
 from app.services.streams import StreamState
 from app.storage import ChatMessage, ChatSession, SessionStore
@@ -111,11 +112,13 @@ class ChatService:
         store: SessionStore,
         media: MediaService | None = None,
         profile: ProfileService | None = None,
+        uploads: UploadStore | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._media = media
         self._profile = profile
+        self._uploads = uploads
         self._graph: Any = None
         self._mode: str = ""
         self._summarizer: Any = None
@@ -162,10 +165,35 @@ class ChatService:
         await self._store.save(session)
         return resolved.key
 
+    def _image_blocks(self, attachments: list[str]) -> list[dict[str, Any]]:
+        """把 upload_id 变成多模态内容块。取不到的附件跳过并记日志。
+
+        跳过而不是报错：一张图在传输过程中被删掉（用户点了移除、或者磁盘被清理），
+        不该让整轮对话失败——其余几张还能用，模型也会照常回答。
+        """
+        if not attachments or self._uploads is None:
+            return []
+        blocks: list[dict[str, Any]] = []
+        for upload_id in attachments[:MAX_ATTACHMENTS]:
+            item = self._uploads.get(upload_id)
+            if item is None:
+                logger.warning("附件不存在，已跳过 | id=%s", upload_id)
+                continue
+            path = self._uploads.path_of(item)
+            if not path.is_file():
+                logger.warning("附件文件已丢失，已跳过 | id=%s", upload_id)
+                continue
+            blocks.append(image_block(path, mime_of(item)))
+        return blocks
+
     # ---------- 对话 ----------
 
     async def start_reply(
-        self, session_id: str, text: str, user_id: str = "default"
+        self,
+        session_id: str,
+        text: str,
+        user_id: str = "default",
+        attachments: list[str] | None = None,
     ) -> StreamState:
         """创建事件流并**在后台**开始生成。
 
@@ -176,7 +204,9 @@ class ChatService:
         self._prune_streams()
         state = StreamState(stream_id=uuid4().hex, session_id=session_id)
         self._streams[state.stream_id] = state
-        state.task = asyncio.create_task(self._run_reply(state, session_id, text, user_id))
+        state.task = asyncio.create_task(
+            self._run_reply(state, session_id, text, user_id, attachments or [])
+        )
         return state
 
     async def stream_reply(
@@ -233,7 +263,12 @@ class ChatService:
                     yield ": ping\n\n"
 
     async def _run_reply(
-        self, state: StreamState, session_id: str, text: str, user_id: str
+        self,
+        state: StreamState,
+        session_id: str,
+        text: str,
+        user_id: str,
+        attachments: list[str] | None = None,
     ) -> None:
         # 一轮对话一个 trace_id：日志、SSE 事件、LangSmith trace 三处共用同一个值，
         # 出问题时用户报一个 id 就能定位到完整链路
@@ -241,7 +276,9 @@ class ChatService:
         token = set_trace(trace_id)
         started = time.perf_counter()
         try:
-            await self._generate(state, session_id, text, user_id, trace_id, started)
+            await self._generate(
+                state, session_id, text, user_id, trace_id, started, attachments or []
+            )
         except asyncio.CancelledError:
             state.cancelled = True
             logger.info("本轮被用户中止 | session=%s", session_id)
@@ -265,6 +302,7 @@ class ChatService:
         user_id: str,
         trace_id: str = "",
         started: float = 0.0,
+        attachments: list[str] | None = None,
     ) -> None:
         """把一轮问答写入事件流。
 
@@ -290,8 +328,26 @@ class ChatService:
             )
             return
 
+        if attachments and self._uploads is None:
+            # 宁可整轮拒绝，也不要把图悄悄丢掉然后假装回答了一个看图问题
+            await state.emit(
+                {
+                    "type": "error",
+                    "code": "VISION_NOT_ENABLED",
+                    "message": "当前未启用图片输入，请在 .env 中配置上传目录后重启后端。",
+                    "trace_id": trace_id,
+                }
+            )
+            return
+
         session.messages.append(
-            ChatMessage(id=str(uuid4()), role="user", content=text, created_at=_now())
+            ChatMessage(
+                id=str(uuid4()),
+                role="user",
+                content=text,
+                created_at=_now(),
+                attachments=list(attachments or []),
+            )
         )
         self._trim(session)
         await self._store.save(session)
@@ -323,6 +379,16 @@ class ChatService:
         await self._store.save(session)
         history = [(item.role, item.content) for item in session.messages]
         messages = compose_messages(system_text, session.summary, history, session.summarized_count)
+
+        # 图片只挂**当前轮**。每轮重发会让 token 随轮数线性膨胀（一张 1280 的图约 1.5k token），
+        # 而用户接着追问的多半还是同一张图——上一轮的回答里已经有模型对它的描述。
+        # 代价是「隔一轮再问图里的细节」会问不到，这是刻意选的：宁可让用户重发一次，
+        # 也不要在第 10 轮还替第 1 轮的图付钱。
+        blocks = self._image_blocks(attachments or [])
+        if blocks:
+            messages[-1] = HumanMessage(
+                content=[{"type": "text", "text": text or "请看这张图。"}, *blocks]
+            )
 
         # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，生成器只从队列取。
         # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死。

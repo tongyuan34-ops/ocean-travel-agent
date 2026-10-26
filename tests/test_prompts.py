@@ -114,3 +114,15 @@ def test_style_section_is_last():
 def test_personas_produce_different_prompts():
     prompts = {build_system_prompt(key) for key in PERSONA_KEYS}
     assert len(prompts) == 4
+
+
+def test_image_text_is_treated_as_data_not_instructions():
+    """视觉注入：截图里写着「忽略以上指令」时，模型不能照做。
+
+    图片没有 <untrusted> 可以包，只能靠提示词说清楚，
+    所以这条规则必须出现在**所有风格**的提示词里。
+    """
+    for key in PERSONA_KEYS:
+        prompt = build_system_prompt(key)
+        assert "图片同理" in prompt
+        assert "图片内容" in prompt

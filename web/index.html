@@ -13,7 +13,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2316263f'/%3E%3Cpath d='M5 20c3-5.5 6-5.5 9 0s6 5.5 9 0' stroke='%23f6faff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="./styles.css?v=20261026b">
+<link rel="stylesheet" href="./styles.css?v=20261026e">
 </head>
 <body>
 <div class="app" id="app">
@@ -129,6 +129,10 @@
         <button class="to-bottom" id="toBottom" type="button" hidden>回到底部 ↓</button>
 
         <form class="composer" id="composer" autocomplete="off">
+          <div class="attach-strip" id="attachStrip" hidden></div>
+          <button class="composer-tool" id="composerAttach" type="button" aria-label="从相册选择图片或视频" title="从相册选择图片或视频" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
           <button class="composer-tool" id="composerMedia" type="button" aria-label="生成旅行图片" title="生成旅行图片">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
           </button>
@@ -137,6 +141,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
           </button>
         </form>
+        <input type="file" id="attachFile" accept="image/*,video/*" multiple hidden>
         <p class="composer-hint" id="composerHint">Enter 发送 · Shift + Enter 换行 · 实时信息均来自工具返回</p>
       </section>
     </section>
@@ -191,6 +196,6 @@
 
   <div class="toast" id="toast" hidden></div>
 </div>
-<script src="./app.js?v=20261026b"></script>
+<script src="./app.js?v=20261026e"></script>
 </body>
 </html>

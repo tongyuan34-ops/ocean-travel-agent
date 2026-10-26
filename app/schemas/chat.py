@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field
 
 
 class MessageRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=4000, description="用户输入")
+    message: str = Field(default="", max_length=4000, description="用户输入")
+    # 附图。允许只发图不写字（「这张图里是什么」），所以 message 不是必填，
+    # 但两者不能都空——校验放在路由里做，错误码统一走 INVALID_REQUEST
+    attachments: list[str] = Field(
+        default_factory=list, max_length=6, description="图片 upload_id 列表"
+    )
 
 
 class SessionCreated(BaseModel):
@@ -25,6 +30,8 @@ class MessageItem(BaseModel):
     # 本条回答的用量与耗时，用于在消息下方展示；用户消息为空 / 0
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int = 0
+    # 用户消息附带的图片。刷新后据此重建气泡里的缩略图
+    attachments: list[str] = Field(default_factory=list)
 
 
 class MessageList(BaseModel):

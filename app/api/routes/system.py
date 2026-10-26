@@ -57,6 +57,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
         # 否则前端会放出一个必然失败的入口
         "search_social": bool(social_ready),
         "session_fetch": settings.enable_session_fetch,
+        # 图片输入：上传目录就绪即视为可用。
+        # 模型是否真的看得懂由服务商决定，这里只报「链路通不通」——
+        # 报一个假的 true 会让用户传完图才发现模型是纯文本的，那才是更糟的体验
+        "vision": request.app.state.uploads is not None,
         # 前端据此渲染来源筛选器，不得硬编码平台清单
         "platforms": platforms,
     }

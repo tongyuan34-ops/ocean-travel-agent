@@ -662,6 +662,79 @@ img{display:block;max-width:100%}
   -webkit-backdrop-filter:blur(16px);
   backdrop-filter:blur(16px);
 }
+/* ---------- 附件（图片 / 视频抽帧） ---------- */
+/* 预览条整行铺在输入框上方：输入区保持一行，附件多了横向滚，不把输入框挤窄 */
+.composer.has-attach{flex-wrap:wrap}
+.attach-strip{
+  flex:1 0 100%;
+  display:flex;
+  gap:8px;
+  padding:2px 4px 8px;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+}
+.attach-strip::-webkit-scrollbar{display:none}
+.attach-chip{
+  position:relative;
+  flex:0 0 auto;
+  width:60px;height:60px;
+  border-radius:12px;
+  overflow:hidden;
+  background:rgba(20,36,60,.06);
+  border:1px solid rgba(20,36,60,.12);
+}
+.attach-chip img{display:block;width:100%;height:100%;object-fit:cover}
+.attach-chip.is-busy img{opacity:.4}
+.attach-chip.is-busy:after{
+  content:'';
+  position:absolute;left:50%;top:50%;
+  width:16px;height:16px;margin:-8px 0 0 -8px;
+  border-radius:50%;
+  border:2px solid rgba(255,255,255,.35);
+  border-top-color:#fff;
+  animation:attachSpin .8s linear infinite;
+}
+@keyframes attachSpin{to{transform:rotate(360deg)}}
+.attach-chip .attach-del{
+  position:absolute;top:2px;right:2px;
+  width:18px;height:18px;
+  display:-ms-inline-flexbox;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:50%;
+  background:rgba(10,20,34,.7);
+  color:#fff;
+  font-size:11px;line-height:1;
+}
+.attach-chip .attach-del svg{width:9px;height:9px;stroke:currentColor;stroke-width:2;fill:none}
+.attach-chip .attach-tag{
+  position:absolute;left:4px;bottom:4px;
+  padding:1px 4px;
+  border-radius:4px;
+  background:rgba(10,20,34,.62);
+  color:#fff;
+  font-size:8.5px;
+  letter-spacing:.04em;
+}
+/* 用户气泡里的图：和文字一起右对齐，圆角跟气泡一致 */
+.msg-user .msg-thumbs{
+  display:flex;flex-wrap:wrap;gap:6px;
+  margin:0 0 8px;
+  justify-content:flex-end;
+}
+/* 带图的气泡收窄到内容宽度：整条 680px 的深色块里飘着一张小图很难看。
+   fit-content 不被支持时退回满宽，不影响功能 */
+.msg-user.has-media{
+  width:-webkit-fit-content;width:-moz-fit-content;width:fit-content;
+  margin-left:auto;
+}
+.msg-user .msg-thumbs img{
+  display:block;
+  width:148px;height:148px;
+  object-fit:cover;
+  border-radius:12px;
+  background:rgba(255,255,255,.12);
+}
+
 .composer-tool{
   width:34px;height:38px;flex:0 0 auto;
   display:-ms-inline-flexbox;display:inline-flex;align-items:center;justify-content:center;

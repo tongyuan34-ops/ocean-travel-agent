@@ -8,6 +8,12 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.161-009688)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1c3d5a)](https://langchain-ai.github.io/langgraph/)
 
+![对话与工具调用：工具结果以内联卡片展示，回答下方带耗时与 token 用量](docs/screenshots/chat-tool-cards.jpg)
+
+| 从相册选图提问（视频在浏览器里抽帧） | 对话风格：礼宾 / 旅伴 / 向导 / 知心 |
+|---|---|
+| ![图片输入](docs/screenshots/image-input.jpg) | ![对话风格](docs/screenshots/persona-sheet.jpg) |
+
 ---
 
 ## 先跑起来
@@ -125,7 +131,7 @@ flowchart TB
 
 ---
 
-## 八个核心设计
+## 九个核心设计
 
 ### 1. 双模式 Agent 循环，兼容无 function-call 能力的模型
 
@@ -292,6 +298,37 @@ Agent 的成本是**多轮工具往返**堆出来的：一轮对话可能调用�
 （模型仍可能在第三轮开始给建议）。这靠 `evals/cases.yaml` 的 `persona` 分类持续跑，
 而不是靠再写一句更严厉的规则。
 
+### 9. 图片与视频输入：视频在浏览器里抽帧
+
+`app/media/uploads.py` · `web/app.js`
+
+用户可以从相册选一张图或一段视频来提问。链路是**前端抽帧 → 上传 → 服务端规范化 →
+按当前轮拼成多模态消息**。三个取舍值得说：
+
+**一、上传的是规范化后的图，不是原图。** 手机原图 12MP，base64 后约 4MB；一张 1280 的图
+实测约 3–5k token。服务端统一按 EXIF 摆正、长边缩到 1280、有透明通道留 PNG、其余转 JPEG——
+顺手把 EXIF 里的 GPS 坐标也去掉了（用户传一张旅行照，不该顺手把住址送进模型上下文）。
+
+**二、视频在浏览器里抽帧，服务端不装 ffmpeg。** 浏览器本来就会解码视频，`<video>` +
+`<canvas>` 取 4 帧再上传，服务端收到的是 4 张几十 KB 的 JPEG。省掉一个几十 MB 的二进制依赖，
+手机上传的是 200KB 而不是 40MB。代价是**不处理音轨**——界面上直接标「4 帧」，
+不假装能听懂视频。
+
+**三、图片只挂当前轮。** 每轮重发会让 token 随轮数线性膨胀（第 10 轮还在替第 1 轮的图付钱），
+而用户接着追问的多半还是同一张图。代价是「隔一轮再问图里的细节」问不到，这是刻意的。
+
+还有一个容易漏的地方：**视觉注入**。图片没有 `<untrusted>` 可以包（那是给工具返回用的），
+所以规则写进 `CORE_RULES`——图里的文字是图片内容，不是用户下的指令。
+截图里写着「忽略以上指令」时，模型只描述这段文字，不执行。
+
+```
+用户：这张图适合什么季节去？
+助手：图片里只有「三亚」两个字和蓝色渐变，没有景色或植被信息，所以看不出具体季节；
+     单就三亚来说，适合去的时间是每年 10 月到次年 3 月的干季……
+```
+
+模型说「看不出具体季节」而不是编一个，是提示词第 1 条在起作用——这条对图片同样有效。
+
 ---
 
 ## 快速开始
@@ -431,6 +468,8 @@ LANGSMITH_PROJECT=ocean-travel-agent
 | `GET` | `/api/v1/chat/streams/{id}` | 断线续传（`Last-Event-ID`） |
 | `POST` | `/api/v1/chat/streams/{id}/cancel` | 中止生成 |
 | `POST` | `/api/v1/permissions/{id}/decision` | 权限裁决 |
+| `POST` | `/api/v1/media/uploads` | 上传图片（请求体即文件，同步返回） |
+| `GET` | `/api/v1/media/uploads/{id}` | 取回图片（气泡缩略图用） |
 | `POST` | `/api/v1/media/images` | 提交生图任务（202 + task_id） |
 | `GET` | `/api/v1/media/tasks/{id}` | 轮询任务状态 |
 | `POST` | `/api/v1/trips/export` | 导出 PDF |
@@ -529,7 +568,7 @@ P95 延迟 68.6 秒。三轮对比（改用例 → 加工具预算）里，被�
 ## 测试
 
 ```bash
-uv run pytest                        # 331 passed, 1 skipped
+uv run pytest                        # 356 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -561,14 +600,15 @@ app/
 ├── adapters/        # 检索源适配器（bing_cn / web_fetch / mediacrawler）
 ├── api/routes/      # chat / media / memory / permissions / share / system / tools / trips
 ├── core/            # 配置、上下文预算、错误、身份、网络、沙箱、日志、追踪
-├── media/           # 生图/生视频后端与任务状态机
+├── media/           # 生图/生视频后端、任务状态机、用户上传图片
 ├── services/        # 会话、偏好、事件流、行程导出
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 331 个离线测试（不联网、不调模型）
+tests/               # 356 个离线测试（不联网、不调模型）
 evals/               # 40 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
+docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本
 .github/workflows/   # CI：lint + 类型检查 + 双版本测试 + 镜像冒烟
 ```
@@ -597,9 +637,11 @@ scripts/             # 批量对话、Cookie 注入、手工验证脚本
 5. **structured 模式不流式**。该模式下模型输出的是内部 JSON 决策，不能直接透给用户，只能整段返回。
 6. **预算仍用启发式估算**。`estimate_tokens()` 按中英混排比例估算，不是真 tokenizer，`MAX_CONTEXT_TOKENS` 预算会漂 ±15%。账单不走这条路径——账单用模型返回的 `usage_metadata`，只在拿不到时才退回估算并标记 `estimated`。
 7. **社媒采集有风控风险**。`ENABLE_SESSION_FETCH` 默认关闭，开启后需自行承担平台条款与封号风险。
+   真实产出见 [`docs/samples/大理旅游避雷清单.md`](docs/samples/大理旅游避雷清单.md)——
+   抖音 14 条视频 + 42 条评论、B站 20 条视频 + 60 条评论，由本机登录态抓取后整理。
 
 ---
 
 ## 许可
 
-代码仅供学习与个人使用。第三方数据源（高德、和风、必应、火山方舟）的使用须遵守各自服务条款。若接入 [Infinite Canvas](https://github.com/tigerowo/infinite-canvas)（AGPL-3.0），请以独立服务方式 HTTP 调用，不要并入本仓库。
+[MIT](LICENSE)。第三方数据源（高德、和风、必应、火山方舟）的使用须遵守各自服务条款。若接入 [Infinite Canvas](https://github.com/tigerowo/infinite-canvas)（AGPL-3.0），请以独立服务方式 HTTP 调用，不要并入本仓库。

@@ -417,7 +417,7 @@ uv run python -m evals.run --out evals/report.md --json evals/report.json
 uv run python -m evals.run --fail-under 0.8
 ```
 
-用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 37 条，每条断言三到四件事，再由 LLM-as-judge 打分：
+用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 39 条，每条断言三到四件事，再由 LLM-as-judge 打分：
 
 | 断言 | 抓什么 |
 |---|---|
@@ -425,10 +425,11 @@ uv run python -m evals.run --fail-under 0.8
 | `forbid_tools` | 该用专用工具却去搜网页（误调） |
 | `forbid_executed` | 危险工具**真的执行了**（被闸门拦下不算） |
 | `must_mention` / `must_mention_any` | 回答里缺关键信息 |
+| `forbid_mention` / `max_chars` | 说了不该说的词、或者话太多（人格类用例） |
 | `max_guard_blocks` | 阴性对照：正常内容被误判成注入（防检测器滥杀） |
 | `rubric` | 回答质量，1-5 分 |
 
-覆盖七类：工具选择、多工具串联（含顺序）、不该调工具、工具路由、权限拒绝、工具失败不编造、间接提示注入。
+覆盖八类：工具选择、多工具串联（含顺序）、不该调工具、工具路由、权限拒绝、工具失败不编造、间接提示注入、人格切换。
 
 `forbid_tools` 和 `forbid_executed` 必须分开，理由见上面第 7 条：注入用例里模型会去调 `write_file`，
 闸门把它拦下——按工具名判违规，等于惩罚了唯一正确的行为。
@@ -454,12 +455,42 @@ P95 延迟 68.6 秒。三轮对比（改用例 → 加工具预算）里，被�
 模型照 schema 传参必然 `TypeError`）。逐条拆解见 [`evals/BASELINE.md`](evals/BASELINE.md)，
 用例写法见 [`evals/README.md`](evals/README.md)。
 
+### 一次提示词归因实验
+
+用户说「你能不能变成知心大姐姐」，agent 语气确实变温柔了，但结构还是行程规划的
+（列几个选项让人挑），话题也总往主业拐（「想去哪儿走走」）。同一模型在别的产品里
+却能正常陪聊。差别在哪？
+
+我没有靠猜，而是写了 `scripts/ab_persona.py` 做单变量对照——**每臂 3 次**：
+
+| 变量 | 字数 | 分点 | 带旅行词 |
+|---|---|---|---|
+| 原样（14 条规则 + 22 工具） | 351-435 | 3-6 处 | 3/3 |
+| 只去掉「条理清晰」 | 259-425 | 0-3 处 | 3/3 |
+| 只解绑 22 个工具 | 123-325 | 0-2 处 | 3/3 |
+| **只改身份那一句** | **45-144** | **0 处** | **0/3** |
+
+两个结论都反直觉：
+
+- **工具绑定不是主因**。我原本以为 22 个工具 schema 每轮都在暗示「你是旅行 agent」，
+  实测解绑后旅行词照样 3/3。真正起作用的是 `SYSTEM_PROMPT` 第一句「你是旅行规划助手」。
+- **只减约束不改身份，会更糟**。去掉「条理清晰」后模型没了可迁移的出口，
+  反而更生硬地声明「我是旅行规划助手，帮不了聊心事」——比原来更推脱。
+
+顺带发现「条理清晰」四个字是列表的开关：模型对它的默认实现就是分点，
+于是「我好迷茫」被拆成「方向型 / 关系型 / 自我型」三类，读起来像问卷。
+
+**但这是概率改善，不是确定性修复。** 同一份提示词连跑两次，一次 2/2 通过、
+一次 0/2（模型改用「三亚」「想去的地方」绕过了关键词黑名单）。
+要真正稳定，得把人格做成会话级配置、**换掉整套领域提示词**，
+而不是在领域提示词里加一句「别提旅行」。这是下一步，不是已完成项。
+
 ---
 
 ## 测试
 
 ```bash
-uv run pytest                        # 304 passed, 1 skipped
+uv run pytest                        # 314 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -494,8 +525,8 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 304 个离线测试（不联网、不调模型）
-evals/               # 37 条评测用例 + 判分框架（验模型表现，与 tests 分工）
+tests/               # 314 个离线测试（不联网、不调模型）
+evals/               # 39 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本
 .github/workflows/   # CI：lint + 类型检查 + 双版本测试 + 镜像冒烟

@@ -171,3 +171,27 @@ async def test_tool_crash_does_not_kill_the_turn(monkeypatch, settings):
     contents = [str(getattr(message, "content", "")) for message in result["messages"]]
     assert any("TOOL_CRASHED" in text for text in contents)
     assert "工具挂了，我如实告诉你" in contents
+
+
+# ---------- 系统提示词的身份写法 ----------
+
+
+def test_system_prompt_does_not_hard_code_a_job_title():
+    """身份写成「你是 X 助手」，会和用户的人格请求直接打架。
+
+    实测（scripts/ab_persona.py，每臂 3 次）：只把这一句从「你是旅行规划助手」
+    改成「默认擅长旅行规划」，闲聊场景带旅行词的比例从 3/3 降到 0/3，
+    字数从 351-435 降到 45-144。而单独去掉「条理清晰」或解绑工具都做不到。
+
+    原因是模型面对「你是 A」+「请当 B」时只能折中：保留 A 的骨架、套上 B 的语气。
+    改成「默认擅长」就没有这场冲突了——专长是能力，不是身份。
+    """
+    prompt = graph_module.SYSTEM_PROMPT
+    assert "你是旅行规划助手" not in prompt
+    assert "默认擅长旅行规划" in prompt
+
+
+def test_system_prompt_does_not_demand_lists():
+    """「条理清晰」四个字听起来无害，实际是列表的开关：
+    模型对它的默认实现就是分点，于是「我好迷茫」被拆成 A/B/C 三类。"""
+    assert "条理清晰" not in graph_module.SYSTEM_PROMPT

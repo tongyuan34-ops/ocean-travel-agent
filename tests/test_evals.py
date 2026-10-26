@@ -18,6 +18,7 @@ from evals.runner import (
     render_markdown,
     score_case,
     score_execution,
+    score_text,
     summarize,
     tool_outcomes,
     tool_trace,
@@ -174,6 +175,36 @@ def test_tool_outcomes_separates_blocked_from_executed():
 def test_tool_outcomes_empty_state():
     assert tool_outcomes(None) == ([], [])
     assert tool_outcomes(_state()) == ([], [])
+
+
+# ---------- 文本层面的禁止项（人格用例用） ----------
+
+
+def test_score_text_flags_forbidden_words():
+    case = _case(input="我今天有点闷", forbid_mention=["行程", "景点"])
+    problems = score_text(case, "要不要帮你排个行程？")
+    assert problems and "行程" in problems[0]
+
+
+def test_score_text_ignores_words_the_user_already_said():
+    """用户说「先别给我排行程」，模型回「好，不聊行程」是正确行为。
+
+    断言要抓的是模型**主动引入**的词，不是复述用户的话——
+    这条不做，人格用例会把最正确的那句回答判成失败。
+    """
+    case = _case(input="先别给我排行程，就想聊聊天", forbid_mention=["行程"])
+    assert score_text(case, "好，不聊行程，那我们就随便聊聊。") == []
+
+
+def test_score_text_flags_too_long():
+    case = _case(max_chars=50)
+    assert score_text(case, "嗯" * 60)
+    assert score_text(case, "嗯" * 40) == []
+
+
+def test_score_text_allows_missing_limits():
+    """没写 forbid_mention / max_chars 的用例不能被这两条误伤。"""
+    assert score_text(_case(), "随便多长都行" * 100) == []
 
 
 # ---------- 评审输出解析 ----------

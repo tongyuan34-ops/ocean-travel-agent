@@ -50,6 +50,8 @@ class CaseResult:
     forbidden_called: list[str] = field(default_factory=list)
     forbidden_executed: list[str] = field(default_factory=list)
     missing_mentions: list[str] = field(default_factory=list)
+    # 文本层面的禁止项：说了不该说的词、或者话太多
+    text_violations: list[str] = field(default_factory=list)
     judge_score: int | None = None
     judge_reason: str = ""
     latency_ms: int = 0
@@ -78,6 +80,7 @@ class CaseResult:
             "forbidden_called": list(self.forbidden_called),
             "forbidden_executed": list(self.forbidden_executed),
             "missing_mentions": list(self.missing_mentions),
+            "text_violations": list(self.text_violations),
             "judge_score": self.judge_score,
             "judge_reason": self.judge_reason,
             "latency_ms": self.latency_ms,
@@ -347,6 +350,34 @@ def score_execution(case: dict[str, Any], executed: list[str]) -> list[str]:
     return [name for name in forbidden if name in ran]
 
 
+def score_text(case: dict[str, Any], answer: str) -> list[str]:
+    """回答文本层面的禁止项：不许出现的词、不许超过的长度。
+
+    和 ``must_mention`` 方向相反：那个要求「必须说到」，这个要求「不许说到」。
+    人格类用例靠它断言「换了人格后不该再往主业上引」——这种问题
+    没法用「必须出现某词」表达，因为要说的是「别说那些词」。
+
+    长度上限同理：废话多本身就是人格失败的一种形态。
+    一条 400 字、分三点的「知心姐姐」回复，读起来像客服工单。
+
+    ``forbid_mention`` 会自动放过**用户自己说过的词**：用户说「先别给我排行程」，
+    模型回「好，不聊行程」是正确行为，不该判违规。
+    断言要抓的是「模型主动引入」的词，不是复述。
+    """
+    problems: list[str] = []
+
+    asked = str(case.get("input") or "")
+    forbidden = [str(item) for item in case.get("forbid_mention") or []]
+    hit = [word for word in forbidden if word in answer and word not in asked]
+    if hit:
+        problems.append(f"出现了不该出现的词 {', '.join(hit)}")
+
+    limit = case.get("max_chars")
+    if isinstance(limit, int) and limit > 0 and len(answer) > limit:
+        problems.append(f"回答 {len(answer)} 字，超过上限 {limit}")
+    return problems
+
+
 # ---------- LLM-as-judge ----------
 
 _JUDGE_PROMPT = """你是一个严格但公正的评审。请给下面这条回答打分（1-5 分）。
@@ -572,6 +603,7 @@ def _reason(item: CaseResult) -> str:
         parts.append(f"禁用工具真的执行了 {', '.join(item.forbidden_executed)}")
     if item.missing_mentions:
         parts.append(f"缺少关键信息 {', '.join(item.missing_mentions)}")
+    parts.extend(item.text_violations)
     if item.judge_score is not None and item.judge_score < PASS_JUDGE_SCORE:
         parts.append(f"质量分 {item.judge_score}：{item.judge_reason}")
     return "；".join(parts) or "未通过"
@@ -595,6 +627,7 @@ __all__ = [
     "run_graph",
     "score_case",
     "score_execution",
+    "score_text",
     "summarize",
     "tool_outcomes",
     "tool_trace",

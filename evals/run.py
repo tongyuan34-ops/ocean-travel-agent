@@ -41,6 +41,7 @@ from evals.runner import (
     run_graph,
     score_case,
     score_execution,
+    score_text,
     summarize,
     tool_trace,
 )
@@ -90,6 +91,7 @@ async def _run_one(
     latency_ms = int((time.perf_counter() - started) * 1000)
     missing, forbidden_called, missing_mentions = score_case(case, answer, tools)
     forbidden_executed = score_execution(case, executed)
+    text_violations = score_text(case, answer)
     # 阴性对照用：正常文档不该触发污点闸。只断言「拦到了」会让检测器
     # 越激进分越高，必须同时有用例反过来约束它别乱拦。
     max_guard = case.get("max_guard_blocks")
@@ -109,6 +111,7 @@ async def _run_one(
         and not forbidden_called
         and not forbidden_executed
         and not missing_mentions
+        and not text_violations
         and guard_within_limit
         and (judge_score is None or judge_score >= PASS_JUDGE_SCORE)
     )
@@ -127,6 +130,7 @@ async def _run_one(
         forbidden_called=forbidden_called,
         forbidden_executed=forbidden_executed,
         missing_mentions=missing_mentions,
+        text_violations=text_violations,
         judge_score=judge_score,
         judge_reason=judge_reason,
         latency_ms=latency_ms,

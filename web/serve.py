@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -213,16 +215,76 @@ def read_auth() -> tuple[str, str]:
     return (user, password)
 
 
-def lan_ip() -> str:
-    """取本机局域网地址，方便手机访问。"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_PRIVATE_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+# RFC2544 基准测试保留段，代理软件常拿它当虚拟网卡
+_RESERVED_NETS = (ipaddress.ip_network("198.18.0.0/15"),)
+
+
+def _usable(value: str) -> bool:
+    """能不能拿去给手机连。"""
     try:
-        sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if addr.is_loopback or addr.is_link_local:
+        return False
+    return not any(addr in net for net in _RESERVED_NETS)
+
+
+def pick_lan_ip(candidates: list[str], override: str = "") -> str:
+    """从候选地址里挑一个手机能连的（纯函数，便于单测）。
+
+    优先级：私有网段 > ``LAN_IP`` 指定 > 其它非保留地址 > 127.0.0.1。
+    """
+    for value in candidates:
+        if _usable(value) and any(ipaddress.ip_address(value) in net for net in _PRIVATE_NETS):
+            return value
+
+    override = override.strip()
+    if override and _usable(override):
+        return override
+
+    for value in candidates:
+        if _usable(value):
+            return value
+    return "127.0.0.1"
+
+
+def lan_ip() -> str:
+    """取本机局域网地址，方便手机访问。
+
+    不能只用「连 8.8.8.8 看出口地址」这一招：装了代理 / VPN 的机器上，
+    出口会落在代理软件的虚拟网卡（Clash 之类典型是 198.18.0.0/15，
+    这是 RFC2544 的基准测试保留段），手机连这个地址必然失败，
+    而打印出来的二维码看起来完全正常——这种「地址是错的但没人报错」
+    最难排查，所以这里按网段筛一遍。
+
+    探测不到时允许用 ``LAN_IP`` 环境变量指定。纯标准库拿不到全部网卡地址
+    （``gethostbyname`` 只返回主机名绑定的那一个，代理环境下就是虚拟网卡），
+    为此引入 psutil 不划算，交给使用者指定更诚实。
+    """
+    candidates: list[str] = []
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        candidates.append(probe.getsockname()[0])
     except OSError:
-        return "127.0.0.1"
+        pass
     finally:
-        sock.close()
+        probe.close()
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            candidates.append(str(info[4][0]))
+    except OSError:
+        pass
+
+    return pick_lan_ip(candidates, os.getenv("LAN_IP", ""))
 
 
 def main() -> None:
@@ -234,6 +296,11 @@ def main() -> None:
     parser.add_argument("--no-auth", action="store_true", help="不启用访问密码（仅限本机调试）")
     args = parser.parse_args()
 
+    # 输出被重定向到文件时默认是块缓冲，启动提示（尤其是局域网地址）会迟迟不出现，
+    # 看起来像卡住了。改成行缓冲。
+    with contextlib.suppress(AttributeError, OSError):
+        sys.stdout.reconfigure(line_buffering=True)
+
     FrontendHandler.backend = args.backend.rstrip("/")
     auth = ("", "") if args.no_auth else read_auth()
     FrontendHandler.auth = auth
@@ -241,7 +308,13 @@ def main() -> None:
     server.daemon_threads = True
 
     print("前端已启动：http://localhost:%d" % args.port)
-    print("手机同网访问：http://%s:%d" % (lan_ip(), args.port))
+    detected = lan_ip()
+    if detected == "127.0.0.1":
+        print(
+            "手机同网访问：未探测到局域网地址（可能在代理 / VPN 下），可加 LAN_IP=192.168.x.x 指定"
+        )
+    else:
+        print("手机同网访问：http://%s:%d" % (detected, args.port))
     print("接口代理：/api/v1/**  ->  %s" % FrontendHandler.backend)
     print("访问密码：%s" % ("已启用（用户 %s）" % auth[0] if auth[0] else "未启用"))
     print("后端需另行启动：.venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000")

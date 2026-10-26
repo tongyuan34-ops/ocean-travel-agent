@@ -55,6 +55,25 @@ def _get_list(key: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _get_float(key: str, default: float) -> float:
+    raw = _get(key)
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _get_price(key: str) -> tuple[float, float] | None:
+    """解析 "输入单价,输出单价"。格式不对就当作未配置，不猜。"""
+    parts = _get_list(key)
+    if len(parts) != 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
 def _derive_bearer(api_key: str) -> str:
     """图片走的是与火山方舟同一套鉴权，未显式填写 token 时自动复用。"""
     return f"Bearer {api_key}" if api_key else ""
@@ -125,6 +144,16 @@ class Settings:
     langsmith_project: str
     langsmith_endpoint: str
 
+    # 用量与成本（SPEC 2.6）
+    # 会话累计 token 上限，0 表示不限制；超限后拒绝新一轮对话
+    max_tokens_per_session: int
+    # 覆盖价目表：元/百万 token，格式 "输入,输出"；留空则按内置表匹配模型名
+    model_price: tuple[float, float] | None
+
+    # 工具重试
+    tool_retry_attempts: int
+    tool_retry_base_delay: float
+
     # 登录态采集（plugin 组 B，默认关闭，个人自用，不随核心开源发布）
     enable_session_fetch: bool
     cookie_dir: str
@@ -184,6 +213,10 @@ def load_settings() -> Settings:
         langsmith_api_key=_get("LANGSMITH_API_KEY") or _get("LANGCHAIN_API_KEY"),
         langsmith_project=_get("LANGSMITH_PROJECT", "ocean-travel-agent"),
         langsmith_endpoint=_get("LANGSMITH_ENDPOINT") or _get("LANGCHAIN_ENDPOINT"),
+        max_tokens_per_session=_get_int("MAX_TOKENS_PER_SESSION", 0),
+        model_price=_get_price("MODEL_PRICE"),
+        tool_retry_attempts=_get_int("TOOL_RETRY_ATTEMPTS", 3),
+        tool_retry_base_delay=_get_float("TOOL_RETRY_BASE_DELAY", 0.4),
         enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", False),
         cookie_dir=_get("COOKIE_DIR", "cookies"),
         mediacrawler_path=_get("MEDIACRAWLER_PATH", "D:/MediaCrawler"),

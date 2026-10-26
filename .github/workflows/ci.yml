@@ -46,7 +46,28 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
       - name: mypy
-        run: uv run --frozen mypy app
+        run: uv run --frozen mypy app evals
+
+  eval-harness:
+    name: Eval harness (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --frozen
+      # 只验证评测框架本身（脚本化模型、离线）。真模型的评测要花钱且会随模型
+      # 版本漂移，不适合卡在每次提交上——那是发版前或调完 prompt 之后才跑的。
+      - name: Self-test eval harness
+        run: uv run --frozen python -m evals.run --self-test --fail-under 1.0 --out eval-report.md
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report.md
+          if-no-files-found: ignore
 
   test:
     name: Test (py${{ matrix.python }})

@@ -24,3 +24,17 @@ class MessageItem(BaseModel):
 
 class MessageList(BaseModel):
     items: list[MessageItem]
+
+
+class UsageOut(BaseModel):
+    """会话累计用量。cost 为 None 表示价目表里没有这个模型（不是免费）。"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    calls: int = 0
+    cost: float | None = None
+    currency: str = "CNY"
+    # 是否含估算值：本地模型不返回 usage 时会退化为估算
+    estimated: bool = False
+    turns: int = 0

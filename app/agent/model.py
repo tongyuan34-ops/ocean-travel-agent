@@ -13,6 +13,7 @@ import os
 from typing import Any
 from urllib.parse import urlparse
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -98,7 +99,7 @@ _PING_TOOL = StructuredTool.from_function(
 )
 
 
-def detect_tool_calling(model: ChatOpenAI, settings: Settings) -> str:
+def detect_tool_calling(model: BaseChatModel, settings: Settings) -> str:
     """探测模型能力，返回 'native' 或 'structured'。
 
     auto（默认）会做一次真实探测：给模型一个最小工具，看它是否返回 tool_calls。

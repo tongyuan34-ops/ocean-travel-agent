@@ -6,7 +6,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.identity import resolve_user_id
-from app.schemas.chat import MessageItem, MessageList, MessageRequest, SessionCreated
+from app.schemas.chat import (
+    MessageItem,
+    MessageList,
+    MessageRequest,
+    SessionCreated,
+    UsageOut,
+)
 from app.services.chat import ChatService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -34,6 +40,12 @@ async def list_messages(session_id: str, request: Request) -> MessageList:
     """拉取会话历史，用于刷新后恢复。"""
     session = await _service(request).get_session(session_id)
     return MessageList(items=[MessageItem(**item.to_dict()) for item in session.messages])
+
+
+@router.get("/sessions/{session_id}/usage", response_model=UsageOut)
+async def get_usage(session_id: str, request: Request) -> UsageOut:
+    """会话累计 token 与成本，供前端展示用量。"""
+    return UsageOut(**await _service(request).get_usage(session_id))
 
 
 _SSE_HEADERS = {

@@ -23,6 +23,8 @@ dependencies = [
     "reportlab>=5.1,<6.0",
     "python-dotenv>=1.2,<2.0",
     "redis>=8.1,<9.0",
+    # 评测用例集用 YAML 维护：比 JSON 适合手写长中文文本与注释
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +36,7 @@ dev = [
     "pytest-cov>=7.0,<8.0",
     "ruff>=0.15,<1.0",
     "mypy>=1.19,<2.0",
+    "types-pyyaml>=6.0,<7.0",
 ]
 # LangSmith 是可选依赖：不装也能跑，装了并配好 LANGSMITH_API_KEY 才有链路追踪
 tracing = [
@@ -48,6 +51,7 @@ dev = [
     "pytest-cov>=7.0,<8.0",
     "ruff>=0.15,<1.0",
     "mypy>=1.19,<2.0",
+    "types-pyyaml>=6.0,<7.0",
 ]
 
 [project.urls]

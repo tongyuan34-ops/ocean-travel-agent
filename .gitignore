@@ -54,3 +54,8 @@ dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+# ============ 评测产物 ============
+# 报告里含完整回答，体积大且每次跑都变；基线快照 evals/report.md 才入库
+/evals/report.json
+/eval-report.md

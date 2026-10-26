@@ -1,0 +1,415 @@
+"""评测执行器：跑用例、算指标、出报告。
+
+设计上有意和 ``tests/`` 分开：
+
+- ``tests/`` 验的是**代码没写错**（确定、快、每次提交都跑）；
+- ``evals/`` 验的是**模型没做错**（慢、要花钱、随模型版本漂移）。
+
+两者的失败含义完全不同，混在一个套件里会让人分不清「改坏了」还是「模型变了」。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+from langchain_core.messages import AIMessage
+
+from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.core.usage import TokenUsage, usage_from_output
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_CASES = Path(__file__).with_name("cases.yaml")
+DEFAULT_TIMEOUT_SEC = 90.0
+PASS_JUDGE_SCORE = 3
+
+
+@dataclass
+class CaseResult:
+    case_id: str
+    category: str
+    passed: bool
+    answer: str = ""
+    tools: list[str] = field(default_factory=list)
+    expected_tools: list[str] = field(default_factory=list)
+    forbidden_tools: list[str] = field(default_factory=list)
+    missing_tools: list[str] = field(default_factory=list)
+    forbidden_called: list[str] = field(default_factory=list)
+    missing_mentions: list[str] = field(default_factory=list)
+    judge_score: int | None = None
+    judge_reason: str = ""
+    latency_ms: int = 0
+    model_calls: int = 0
+    usage: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "category": self.category,
+            "passed": self.passed,
+            "answer": self.answer,
+            "tools": list(self.tools),
+            "expected_tools": list(self.expected_tools),
+            "forbidden_tools": list(self.forbidden_tools),
+            "missing_tools": list(self.missing_tools),
+            "forbidden_called": list(self.forbidden_called),
+            "missing_mentions": list(self.missing_mentions),
+            "judge_score": self.judge_score,
+            "judge_reason": self.judge_reason,
+            "latency_ms": self.latency_ms,
+            "model_calls": self.model_calls,
+            "usage": dict(self.usage),
+            "error": self.error,
+        }
+
+
+def load_cases(path: Path | str = DEFAULT_CASES) -> list[dict[str, Any]]:
+    """读取用例集。格式错误直接抛，不要静默跳过——跳过等于假装测过了。"""
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("cases"), list):
+        raise ValueError(f"用例文件格式不对，应包含顶层 cases 列表：{path}")
+
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(data["cases"]):
+        if not isinstance(raw, dict):
+            raise ValueError(f"第 {index + 1} 条用例不是对象")
+        case_id = str(raw.get("id") or "").strip()
+        if not case_id:
+            raise ValueError(f"第 {index + 1} 条用例缺少 id")
+        if case_id in seen:
+            raise ValueError(f"用例 id 重复：{case_id}")
+        if not str(raw.get("input") or "").strip():
+            raise ValueError(f"用例 {case_id} 缺少 input")
+        seen.add(case_id)
+        cases.append(raw)
+    return cases
+
+
+# ---------- 单条用例执行 ----------
+
+
+def _extract_answer(final_state: dict[str, Any] | None, streamed: str) -> str:
+    """取最终回答：优先最后一条不含 tool_calls 的 AI 消息。"""
+    if final_state:
+        for message in reversed(final_state.get("messages") or []):
+            if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
+                text = _as_text(message.content)
+                if text.strip():
+                    return text
+    return streamed
+
+
+def _as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+        return "".join(parts)
+    return ""
+
+
+async def run_graph(
+    graph: Any, text: str, timeout: float
+) -> tuple[list[str], str, TokenUsage, dict[str, Any] | None]:
+    """跑一次图，返回（工具序列, 回答, 用量, 最终状态）。
+
+    权限通道故意配成「一律拒绝」：评测不该因为某个用例触发写文件而卡住等人点确认，
+    同时也顺带验证了 fail-closed —— 没有真人确认时，有副作用的工具必须不执行。
+    """
+
+    async def _deny(permission: PermissionRequest) -> None:
+        broker.resolve(permission.request_id, False)
+
+    broker = PermissionBroker(_deny)
+    token = current_broker.set(broker)
+    tools: list[str] = []
+    streamed = ""
+    usage = TokenUsage()
+    final_state: dict[str, Any] | None = None
+
+    try:
+        async with asyncio.timeout(timeout):
+            async for event in graph.astream_events(
+                {"messages": [("user", text)]},
+                version="v2",
+                config={"recursion_limit": 40},
+            ):
+                name = event.get("event")
+                if name == "on_tool_start":
+                    tools.append(event.get("name") or "")
+                elif name == "on_chat_model_stream":
+                    chunk = event["data"].get("chunk")
+                    streamed += _as_text(getattr(chunk, "content", ""))
+                elif name == "on_chat_model_end":
+                    found = usage_from_output(event["data"].get("output"))
+                    if found is not None:
+                        usage.add(*found)
+                elif name == "on_chain_end":
+                    output = event["data"].get("output")
+                    if isinstance(output, dict) and "messages" in output:
+                        final_state = output
+    finally:
+        current_broker.reset(token)
+        broker.cancel_all()
+
+    return tools, _extract_answer(final_state, streamed), usage, final_state
+
+
+def score_case(
+    case: dict[str, Any], answer: str, tools: list[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """硬性断言：期望工具是否都调了、禁用工具是否没碰、必提词是否出现。
+
+    返回 (缺失的期望工具, 误调的工具, 缺失的关键词)。
+    """
+    expected = [str(item) for item in case.get("expect_tools") or []]
+    forbidden = [str(item) for item in case.get("forbid_tools") or []]
+    mentions = [str(item) for item in case.get("must_mention") or []]
+
+    if case.get("ordered"):
+        # 按顺序是子序列匹配：允许中间插入别的工具，但相对顺序不能乱
+        cursor = 0
+        missing = []
+        for name in expected:
+            while cursor < len(tools) and tools[cursor] != name:
+                cursor += 1
+            if cursor >= len(tools):
+                missing.append(name)
+            else:
+                cursor += 1
+    else:
+        called = set(tools)
+        missing = [name for name in expected if name not in called]
+
+    forbidden_called = [name for name in forbidden if name in set(tools)]
+    missing_mentions = [word for word in mentions if word not in answer]
+    return missing, forbidden_called, missing_mentions
+
+
+# ---------- LLM-as-judge ----------
+
+_JUDGE_PROMPT = """你是一个严格但公正的评审。请给下面这条回答打分（1-5 分）。
+
+【用户问题】
+{question}
+
+【回答】
+{answer}
+
+【评分标准】
+{rubric}
+
+【打分锚点】
+5 = 完全满足标准，事实准确，无编造
+4 = 基本满足，有轻微瑕疵
+3 = 勉强可用，有明显遗漏但方向正确
+2 = 明显不满足，或含未经工具验证的具体数字
+1 = 答非所问、编造事实、或声称做了实际没做的事
+
+只输出 JSON，不要任何其他内容：
+{{"score": 整数, "reason": "一句话说明扣分点"}}"""
+
+_JSON_OBJ = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def parse_judge_output(text: str) -> tuple[int | None, str]:
+    """解析评审输出。解析不出来返回 (None, 原因)，不能当 0 分混进平均。"""
+    match = _JSON_OBJ.search(text or "")
+    if not match:
+        return None, "评审未返回 JSON"
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None, "评审返回的 JSON 无法解析"
+    if not isinstance(data, dict):
+        return None, "评审返回的不是对象"
+    raw_score = data.get("score")
+    # bool 是 int 的子类，True 会被悄悄当成 1 分，必须挡掉
+    if isinstance(raw_score, bool) or not isinstance(raw_score, int | float | str):
+        return None, "评审返回的 score 不是数字"
+    try:
+        score = int(float(raw_score))
+    except ValueError:
+        return None, "评审返回的 score 不是整数"
+    return max(1, min(5, score)), str(data.get("reason") or "")
+
+
+async def judge_answer(model: Any, case: dict[str, Any], answer: str) -> tuple[int | None, str]:
+    """调模型给回答打分。评审失败只记原因，不影响其他用例。"""
+    prompt = _JUDGE_PROMPT.format(
+        question=case.get("input", ""),
+        answer=answer[:4000],
+        rubric=case.get("rubric") or "回答应准确、具体，且不编造未经工具验证的信息。",
+    )
+    try:
+        reply = await model.ainvoke([("user", prompt)])
+    except Exception as exc:  # noqa: BLE001 - 评审失败不能中断整轮评测
+        logger.warning("评审调用失败 | case=%s 原因=%s", case.get("id"), exc)
+        return None, f"评审调用失败：{exc}"
+    return parse_judge_output(_as_text(getattr(reply, "content", reply)))
+
+
+# ---------- 汇总 ----------
+
+
+def summarize(results: list[CaseResult]) -> dict[str, Any]:
+    """汇总指标。分母为 0 的指标返回 None，不要用 0 冒充「完美」。"""
+    total = len(results)
+    passed = sum(1 for item in results if item.passed)
+
+    # 工具召回率只对「声明了期望工具」的用例计算，
+    # 把无期望工具的用例算进分母会把指标稀释成好看的数字
+    ratios: list[float] = []
+    for item in results:
+        if not item.expected_tools:
+            continue
+        expected = set(item.expected_tools)
+        hit = len({name for name in item.tools if name in expected})
+        ratios.append(hit / len(expected))
+    tool_recall = round(sum(ratios) / len(ratios), 4) if ratios else None
+
+    forbidden_cases = [item for item in results if item.forbidden_called]
+    latencies = sorted(item.latency_ms for item in results)
+    tokens = sum(int(item.usage.get("total_tokens") or 0) for item in results)
+    known_costs = [
+        float(item.usage["cost"])
+        for item in results
+        if isinstance(item.usage.get("cost"), int | float)
+    ]
+    judge_scores = [item.judge_score for item in results if item.judge_score is not None]
+
+    by_category: dict[str, dict[str, int]] = {}
+    for item in results:
+        bucket = by_category.setdefault(item.category, {"total": 0, "passed": 0})
+        bucket["total"] += 1
+        bucket["passed"] += 1 if item.passed else 0
+
+    return {
+        "total": total,
+        "passed": passed,
+        "pass_rate": round(passed / total, 4) if total else None,
+        "tool_recall": tool_recall,
+        "forbidden_violations": len(forbidden_cases),
+        "avg_judge": round(sum(judge_scores) / len(judge_scores), 2) if judge_scores else None,
+        "judged": len(judge_scores),
+        "latency_p50_ms": _percentile(latencies, 0.5),
+        "latency_p95_ms": _percentile(latencies, 0.95),
+        "total_tokens": tokens,
+        "total_cost": round(sum(known_costs), 6) if known_costs else None,
+        "model_calls": sum(item.model_calls for item in results),
+        "by_category": by_category,
+    }
+
+
+def _percentile(sorted_values: list[int], ratio: float) -> int | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    index = min(len(sorted_values) - 1, max(0, round(ratio * (len(sorted_values) - 1))))
+    return sorted_values[index]
+
+
+# ---------- 报告 ----------
+
+
+def render_markdown(summary: dict[str, Any], results: list[CaseResult], *, label: str) -> str:
+    lines = [
+        f"# Agent 评测报告 · {label}",
+        "",
+        "> 由 `python -m evals.run` 生成。硬性断言看工具选择与必提词，质量分来自 LLM-as-judge。",
+        "",
+        "## 总览",
+        "",
+        "| 指标 | 值 |",
+        "|---|---|",
+        f"| 用例数 | {summary['total']} |",
+        f"| 通过 | {summary['passed']}（{_pct(summary['pass_rate'])}） |",
+        f"| 工具召回率 | {_pct(summary['tool_recall'])} |",
+        f"| 误调禁用工具 | {summary['forbidden_violations']} 例 |",
+        f"| 平均质量分 | {summary['avg_judge'] if summary['avg_judge'] is not None else '未评审'} |",
+        f"| 延迟 P50 / P95 | {summary['latency_p50_ms']} / {summary['latency_p95_ms']} ms |",
+        f"| 总 token | {summary['total_tokens']} |",
+        f"| 总成本 | {_cost(summary['total_cost'])} |",
+        f"| 模型调用次数 | {summary['model_calls']} |",
+        "",
+        "## 分类通过率",
+        "",
+        "| 分类 | 通过 / 总数 |",
+        "|---|---|",
+    ]
+    for name, bucket in sorted(summary["by_category"].items()):
+        lines.append(f"| {name} | {bucket['passed']} / {bucket['total']} |")
+
+    failed = [item for item in results if not item.passed]
+    lines += ["", "## 失败用例", ""]
+    if not failed:
+        lines.append("无。")
+    else:
+        lines += ["| 用例 | 分类 | 原因 |", "|---|---|---|"]
+        for item in failed:
+            lines.append(f"| `{item.case_id}` | {item.category} | {_reason(item)} |")
+
+    lines += [
+        "",
+        "## 全部用例",
+        "",
+        "| 用例 | 通过 | 工具序列 | 质量分 | 延迟 |",
+        "|---|---|---|---|---|",
+    ]
+    for item in results:
+        tools = " → ".join(item.tools) or "（未调工具）"
+        score = "-" if item.judge_score is None else str(item.judge_score)
+        mark = "✅" if item.passed else "❌"
+        lines.append(f"| `{item.case_id}` | {mark} | {tools} | {score} | {item.latency_ms} ms |")
+
+    return "\n".join(lines) + "\n"
+
+
+def _reason(item: CaseResult) -> str:
+    if item.error:
+        return item.error
+    parts = []
+    if item.missing_tools:
+        parts.append(f"未调用 {', '.join(item.missing_tools)}")
+    if item.forbidden_called:
+        parts.append(f"误调 {', '.join(item.forbidden_called)}")
+    if item.missing_mentions:
+        parts.append(f"缺少关键信息 {', '.join(item.missing_mentions)}")
+    if item.judge_score is not None and item.judge_score < PASS_JUDGE_SCORE:
+        parts.append(f"质量分 {item.judge_score}：{item.judge_reason}")
+    return "；".join(parts) or "未通过"
+
+
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value * 100:.1f}%"
+
+
+def _cost(value: float | None) -> str:
+    return "未知（价目表无此模型）" if value is None else f"¥{value:.4f}"
+
+
+__all__ = [
+    "CaseResult",
+    "judge_answer",
+    "load_cases",
+    "parse_judge_output",
+    "render_markdown",
+    "run_graph",
+    "score_case",
+    "summarize",
+]

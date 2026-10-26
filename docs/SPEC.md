@@ -99,7 +99,20 @@
 响应 200：
 ```json
 { "items": [ { "id": "uuid", "role": "user|assistant",
-               "content": "string", "created_at": "ISO8601" } ] }
+               "content": "string", "created_at": "ISO8601",
+               "media_task_ids": ["uuid"], "usage": { "total_tokens": 368 } } ] }
+```
+
+`usage` 只有 assistant 消息才有，形状见 2.8。
+
+#### GET /api/v1/chat/sessions/{session_id}/usage
+
+会话累计用量（前端展示「本会话花了多少」）。
+响应 200：
+```json
+{ "input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500,
+  "calls": 4, "cost": 0.0021, "currency": "CNY",
+  "estimated": false, "turns": 2 }
 ```
 
 ### 发消息（SSE 流式）
@@ -123,7 +136,10 @@
            "detail": {"path": "...", "preview": "..."}}
 
     data: {"type": "end", "message_id": "uuid",
-           "finish_reason": "stop|length"}
+           "finish_reason": "stop|length", "trace_id": "16hex",
+           "usage": {"turn": {...}, "session": {...}},
+           "tool_retries": {"retries": 0, "exhausted": 0,
+                            "recovered": 0, "by_tool": {}}}
 
     data: {"type": "error", "code": "错误码", "message": "人类可读信息"}
 
@@ -245,6 +261,7 @@ HTTP 状态码与错误码映射：
     404 TASK_NOT_FOUND            媒体任务不存在
     422 VALIDATION_ERROR          字段校验失败
     429 RATE_LIMITED              超过限流
+    429 BUDGET_EXCEEDED           会话累计 token 超过 MAX_TOKENS_PER_SESSION
     501 TOOL_NOT_ENABLED          工具未启用
     502 MODEL_UNAVAILABLE         模型服务未启动或不可连
     502 MODEL_EMPTY_RESPONSE      模型返回空文本
@@ -314,6 +331,28 @@ HTTP 状态码与错误码映射：
 面向「会动手干活」的 agent 的交互界面。与普通聊天应用最大的区别：
 后端会调用工具、会请求权限、会产生媒体任务，前端必须把这些过程**可视化**，
 让用户随时看得见 agent 正在做什么、并能在有副作用的操作前拦住它。
+
+## 2.8 用量与成本
+
+每个 assistant 消息、每次 `end` 事件、以及 `GET /sessions/{id}/usage` 都使用同一个形状：
+
+```json
+{ "input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500,
+  "calls": 4, "cost": 0.0021, "currency": "CNY", "estimated": false }
+```
+
+| 字段 | 含义 |
+|---|---|
+| `calls` | 本轮模型调用次数。native 模式下一次工具往返就是两次调用，所以会大于 1 |
+| `cost` | 人民币元。`null` 表示价目表里没有这个模型——是「不知道」，不是「免费」 |
+| `estimated` | `true` 表示模型没返回 usage，数值是启发式估算，不能当账单 |
+
+`end` 事件里的 `usage.turn` 是本轮用量，`usage.session` 是会话累计（含 `turns`）。
+
+硬闸：`MAX_TOKENS_PER_SESSION` 大于 0 时，会话累计 token 达到上限后拒绝新一轮对话，
+返回 `BUDGET_EXCEEDED`，且**不把这条用户消息写入历史**——否则历史里会留下一句永远得不到回答的话。
+
+---
 
 ## 3.1 技术栈
 

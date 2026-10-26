@@ -97,7 +97,7 @@ flowchart TB
 
 ---
 
-## 四个核心设计
+## 六个核心设计
 
 ### 1. 双模式 Agent 循环，兼容无 function-call 能力的模型
 
@@ -150,6 +150,39 @@ structured : START → agent(内部 JSON 决策循环) → END
 ```
 
 删除只允许删空目录、不允许删白名单根目录；单次读取上限 200KB，防止大文件撑爆上下文。
+
+### 5. 用量计量与成本闸
+
+`app/core/usage.py` · `app/services/chat.py`
+
+Agent 的成本是**多轮工具往返**堆出来的：一轮对话可能调用模型 4 次。所以用量必须逐次累加，而不是只看最后一条消息。
+
+两个数据源要分清：
+
+```
+预算控制 → estimate_tokens 启发式估算（宁多勿少）
+真实账单 → AIMessage.usage_metadata（拿不到才退回估算，并标记 estimated=true）
+```
+
+`end` 事件带上本轮与会话累计用量，`GET /chat/sessions/{id}/usage` 可随时查。价目表按模型名前缀匹配，匹配不到时 `cost` 返回 `null`——表示「不知道」，而不是「免费」。
+
+`MAX_TOKENS_PER_SESSION` 是硬闸：超限后连用户消息都不落库，否则历史里会留下一句永远得不到回答的话。
+
+### 6. 工具失败重试，但权限拒绝永不重试
+
+`app/agent/resilience.py`
+
+工具抖动（超时、连接重置、429/5xx）在代码层按指数退避重试，默认最多 3 次，带抖动避免并发重试同步打崩上游。
+
+有一条约束比重试本身更重要：**权限拒绝永远不重试**。
+
+```
+用户拒绝 → PermissionDenied → 立即失败
+```
+
+如果把它当瞬时故障重试三次，等于给了模型三次绕过用户确认的机会——那套 fail-closed 网关就白写了。`asyncio.CancelledError` 同理：吞掉它，「停止」按钮就失效。
+
+实现上替换工具自身的 `coroutine`，而不是在外面再包一层工具对象：后者会让 `astream_events` 收到两次 `on_tool_start`，工具调用计数和推给前端的事件都会翻倍。
 
 ---
 
@@ -271,6 +304,7 @@ LANGSMITH_PROJECT=ocean-travel-agent
 | `GET` | `/api/v1/system/capabilities` | 当前真实可用能力 |
 | `POST` | `/api/v1/chat/sessions` | 建会话 |
 | `POST` | `/api/v1/chat/sessions/{id}/messages` | 发消息，返回 SSE 流 |
+| `GET` | `/api/v1/chat/sessions/{id}/usage` | 会话累计 token 与成本 |
 | `GET` | `/api/v1/chat/streams/{id}` | 断线续传（`Last-Event-ID`） |
 | `POST` | `/api/v1/chat/streams/{id}/cancel` | 中止生成 |
 | `POST` | `/api/v1/permissions/{id}/decision` | 权限裁决 |
@@ -284,13 +318,43 @@ LANGSMITH_PROJECT=ocean-travel-agent
 
 ---
 
+## 评测
+
+`tests/` 验的是**代码没写错**，`evals/` 验的是**模型没做错**。两者的失败含义不同，混在一起会让人分不清「改坏了」还是「模型变了」。
+
+```bash
+# 离线自测：只验证评测框架本身（CI 里跑这个，不花钱）
+uv run python -m evals.run --self-test
+
+# 真模型跑一遍，出报告
+uv run python -m evals.run --out evals/report.md --json evals/report.json
+
+# 卡阈值：通过率低于 80% 就以非零码退出
+uv run python -m evals.run --fail-under 0.8
+```
+
+用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 31 条，每条断言三件事，再由 LLM-as-judge 打分：
+
+| 断言 | 抓什么 |
+|---|---|
+| `expect_tools` | 该调的工具没调（漏调） |
+| `forbid_tools` | 该用专用工具却去搜网页（误调） |
+| `must_mention` | 回答里缺关键信息 |
+| `rubric` | 回答质量，1-5 分 |
+
+覆盖六类：工具选择、多工具串联（含顺序）、不该调工具、工具路由、权限拒绝、工具失败不编造。
+
+产出指标：通过率、工具召回率、误调数、平均质量分、P50/P95 延迟、总 token 与成本。详见 [`evals/README.md`](evals/README.md)。
+
+---
+
 ## 测试
 
 ```bash
-uv run pytest                        # 118 passed
+uv run pytest                        # 176 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
-uv run mypy app
+uv run mypy app evals
 ```
 
 测试全部离线：用假图替换真实 Agent 图，不联网、不调模型。校验的是**事件协议、状态映射、安全边界**，不是模型能力。
@@ -322,7 +386,8 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 118 个离线测试
+tests/               # 176 个离线测试（不联网、不调模型）
+evals/               # 31 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本
 .github/workflows/   # CI：lint + 类型检查 + 双版本测试 + 镜像冒烟
@@ -337,7 +402,7 @@ scripts/             # 批量对话、Cookie 注入、手工验证脚本
 | `requirements.txt` | 由 `uv export` 生成，给不用 uv 的场景兜底 |
 | `Dockerfile` | 多阶段构建、非 root 用户、内置 healthcheck |
 | `docker-compose.yml` | api + web + redis 一键起 |
-| `.github/workflows/ci.yml` | ruff → mypy → pytest(3.12/3.13) → 镜像构建与冒烟 |
+| `.github/workflows/ci.yml` | ruff → mypy → pytest(3.12/3.13) → 评测自测 → 镜像构建与冒烟 |
 
 ---
 
@@ -348,9 +413,9 @@ scripts/             # 批量对话、Cookie 注入、手工验证脚本
 1. **单进程**。`ChatService._streams` 与权限请求注册表都在进程内，`uvicorn --workers > 1` 会让续传和权限回调打到别的进程。要横向扩展需换成 Redis Pub/Sub 或 Stream。
 2. **媒体任务在内存**。进程重启后生图任务丢失，前端图片卡片无法重建。
 3. **无账号体系**。身份是前端 `localStorage` 生成的设备 UUID（`X-Device-ID`），可伪造。前端反代层有 Basic Auth（`WEB_AUTH_USER` / `WEB_AUTH_PASS`），但那只是「挡住路人」，不是多租户隔离。对外部署必须换成真实鉴权。
-4. **无限流**。模型额度可被无限刷。生产环境需在网关层加。
+4. **无 IP 级限流**。有会话级 token 预算闸（`MAX_TOKENS_PER_SESSION`），但同一 IP 可以无限建会话刷额度。生产环境需在网关层加。
 5. **structured 模式不流式**。该模式下模型输出的是内部 JSON 决策，不能直接透给用户，只能整段返回。
-6. **token 估算用启发式**。`estimate_tokens()` 按中英混排比例估算，不是真 tokenizer，`MAX_CONTEXT_TOKENS` 预算会漂 ±15%。
+6. **预算仍用启发式估算**。`estimate_tokens()` 按中英混排比例估算，不是真 tokenizer，`MAX_CONTEXT_TOKENS` 预算会漂 ±15%。账单不走这条路径——账单用模型返回的 `usage_metadata`，只在拿不到时才退回估算并标记 `estimated`。
 7. **社媒采集有风控风险**。`ENABLE_SESSION_FETCH` 默认关闭，开启后需自行承担平台条款与封号风险。
 
 ---

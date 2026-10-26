@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from app.agent.model import build_chat_model, detect_tool_calling
+from app.agent.resilience import RetryPolicy, make_all_resilient
 from app.agent.state import AgentState
 from app.agent.tools import ALL_TOOLS
 from app.core.config import Settings
@@ -66,20 +67,33 @@ SYSTEM_PROMPT = (
 
 
 def build_agent_graph(
-    settings: Settings, mode: str | None = None, tools: list[BaseTool] | None = None
+    settings: Settings,
+    mode: str | None = None,
+    tools: list[BaseTool] | None = None,
+    model: BaseChatModel | None = None,
 ) -> tuple[Any, str]:
     """构造 agent 图。
 
     返回 (编译后的图, 实际使用的模式)，模式为 'native' 或 'structured'。
+
+    ``model`` 只给评测用：自测时注入脚本化模型，避免依赖真实 API。
     """
-    model = build_chat_model(settings)
+    chat_model = model if model is not None else build_chat_model(settings)
     tool_list = tools if tools is not None else ALL_TOOLS
-    resolved = mode or detect_tool_calling(model, settings)
+    # 统一套一层重试：工具抖动是可恢复的，不该直接甩给模型去猜
+    resilient = make_all_resilient(
+        tool_list,
+        RetryPolicy(
+            attempts=settings.tool_retry_attempts,
+            base_delay=settings.tool_retry_base_delay,
+        ),
+    )
+    resolved = mode or detect_tool_calling(chat_model, settings)
 
     if resolved == "native":
-        graph = _build_native(model, tool_list)
+        graph = _build_native(chat_model, resilient)
     else:
-        graph = _build_structured(model, tool_list)
+        graph = _build_structured(chat_model, resilient)
 
     return graph.compile(), resolved
 

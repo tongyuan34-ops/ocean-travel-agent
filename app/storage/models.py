@@ -18,6 +18,8 @@ class ChatMessage:
     created_at: str
     # 本条回答涉及的媒体任务，前端刷新后据此重建图片卡片
     media_task_ids: list[str] = field(default_factory=list)
+    # 本条回答的 token 与成本，形状见 app.core.usage.TokenUsage.to_dict
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -26,6 +28,7 @@ class ChatMessage:
             "content": self.content,
             "created_at": self.created_at,
             "media_task_ids": list(self.media_task_ids),
+            "usage": dict(self.usage),
         }
 
     @classmethod
@@ -36,6 +39,7 @@ class ChatMessage:
             content=str(data.get("content", "")),
             created_at=str(data.get("created_at", "")),
             media_task_ids=[str(item) for item in data.get("media_task_ids") or []],
+            usage=dict(data.get("usage") or {}),
         )
 
 
@@ -47,6 +51,8 @@ class ChatSession:
     # 滚动摘要，以及已被折叠进摘要的消息条数（messages 的下标）
     summary: str = ""
     summarized_count: int = 0
+    # 会话累计用量（跨轮累加），形状同上
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +60,7 @@ class ChatSession:
             "created_at": self.created_at,
             "summary": self.summary,
             "summarized_count": self.summarized_count,
+            "usage": dict(self.usage),
             "messages": [item.to_dict() for item in self.messages],
         }
 
@@ -64,5 +71,6 @@ class ChatSession:
             created_at=str(data.get("created_at", "")),
             summary=str(data.get("summary", "")),
             summarized_count=int(data.get("summarized_count", 0)),
+            usage=dict(data.get("usage") or {}),
             messages=[ChatMessage.from_dict(item) for item in data.get("messages") or []],
         )

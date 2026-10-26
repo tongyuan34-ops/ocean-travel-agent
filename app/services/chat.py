@@ -21,10 +21,12 @@ from langchain_core.messages import AIMessage
 from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph
 from app.agent.model import build_chat_model
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.resilience import RetryStats, current_retry_stats
 from app.core.config import Settings
 from app.core.context import compose_messages, make_summary, plan_fold
 from app.core.errors import ApiError
 from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
+from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media
 from app.services.profile import ProfileService
 from app.services.streams import StreamState
@@ -133,6 +135,11 @@ class ChatService:
     async def delete_session(self, session_id: str) -> None:
         await self._store.delete(session_id)
 
+    async def get_usage(self, session_id: str) -> dict[str, Any]:
+        """会话累计用量。前端用来展示「本会话花了多少」。"""
+        session = await self.get_session(session_id)
+        return dict(session.usage)
+
     # ---------- 对话 ----------
 
     async def start_reply(
@@ -233,6 +240,23 @@ class ChatService:
     ) -> None:
         """把一轮问答写入事件流。"""
         session = await self.get_session(session_id)
+
+        # 预算闸放在最前面：超限的请求连用户消息都不落库，
+        # 否则历史里会留下一句永远得不到回答的话
+        if not self._within_budget(session):
+            await state.emit(
+                {
+                    "type": "error",
+                    "code": "BUDGET_EXCEEDED",
+                    "message": (
+                        f"本会话已累计 {session.usage.get('total_tokens', 0)} tokens，"
+                        f"超过上限 {self._settings.max_tokens_per_session}，请新建会话继续。"
+                    ),
+                    "trace_id": trace_id,
+                }
+            )
+            return
+
         session.messages.append(
             ChatMessage(id=str(uuid4()), role="user", content=text, created_at=_now())
         )
@@ -276,6 +300,9 @@ class ChatService:
         # 必须在创建后台任务之前设置：ContextVar 由任务继承，
         # 工具层要靠它拿到**同一个** MediaService 实例（任务存在实例里）
         media_token = current_media.set(self._media)
+        # 同上：工具重试发生在后台任务里，统计要回到本轮
+        retry_stats = RetryStats()
+        retry_token = current_retry_stats.set(retry_stats)
 
         async def _run_graph() -> None:
             try:
@@ -304,6 +331,8 @@ class ChatService:
         media_task_ids: list[str] = []
         # 本轮工具调用次数，只用于日志里的可观测性指标
         tool_calls = 0
+        # 本轮真实 token 用量，从模型的 usage_metadata 累加
+        turn_usage = TokenUsage()
 
         try:
             while True:
@@ -388,6 +417,13 @@ class ChatService:
                             }
                         )
 
+                    elif name == "on_chat_model_end":
+                        # native 模式下每轮工具调用都会多一次模型调用，
+                        # 所以要在这里逐次累加，而不是只看最后一条消息
+                        found = usage_from_output(event["data"].get("output"))
+                        if found is not None:
+                            turn_usage.add(*found)
+
                     elif name == "on_chain_end":
                         output = event["data"].get("output")
                         if isinstance(output, dict) and "messages" in output:
@@ -395,6 +431,7 @@ class ChatService:
         finally:
             current_broker.reset(ctx_token)
             current_media.reset(media_token)
+            current_retry_stats.reset(retry_token)
             broker.cancel_all()
             if not runner.done():
                 runner.cancel()
@@ -424,6 +461,21 @@ class ChatService:
             # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史
             return
 
+        # 拿不到真实用量（部分本地模型不返回 usage）就退回估算，
+        # 但必须把 estimated 标出来，不能让估算值冒充账单
+        if turn_usage.calls == 0:
+            est_in, est_out = estimate_usage(
+                [system_text, *(content for _, content in history), text], answer
+            )
+            turn_usage.add(est_in, est_out, estimated=True)
+
+        turn_usage_dict = turn_usage.to_dict(self._settings.model_name, self._settings.model_price)
+        session_usage = TokenUsage.from_dict(session.usage)
+        session_usage.merge(turn_usage)
+        turns = int(session.usage.get("turns") or 0) + 1
+        session.usage = session_usage.to_dict(self._settings.model_name, self._settings.model_price)
+        session.usage["turns"] = turns
+
         message_id = str(uuid4())
         session.messages.append(
             ChatMessage(
@@ -432,6 +484,7 @@ class ChatService:
                 content=answer,
                 created_at=_now(),
                 media_task_ids=media_task_ids,
+                usage=turn_usage_dict,
             )
         )
         self._trim(session)
@@ -444,12 +497,18 @@ class ChatService:
             )
 
         logger.info(
-            "本轮完成 | mode=%s 回答=%d 字 finish=%s 工具调用=%d 生图任务=%d",
+            "本轮完成 | mode=%s 回答=%d 字 finish=%s 工具调用=%d 生图任务=%d "
+            "tokens=%d/%d 成本=%s 重试=%d 估算=%s",
             mode,
             len(answer),
             finish_reason,
             tool_calls,
             len(media_task_ids),
+            turn_usage.input_tokens,
+            turn_usage.output_tokens,
+            turn_usage_dict["cost"],
+            retry_stats.retries,
+            turn_usage.estimated,
         )
 
         await state.emit(
@@ -458,10 +517,19 @@ class ChatService:
                 "message_id": message_id,
                 "finish_reason": finish_reason,
                 "trace_id": trace_id,
+                "usage": {"turn": turn_usage_dict, "session": dict(session.usage)},
+                "tool_retries": retry_stats.to_dict(),
             }
         )
 
     # ---------- 内部 ----------
+
+    def _within_budget(self, session: ChatSession) -> bool:
+        """会话累计 token 是否仍在预算内。0 表示不设上限。"""
+        limit = self._settings.max_tokens_per_session
+        if limit <= 0:
+            return True
+        return int(session.usage.get("total_tokens") or 0) < limit
 
     def _spawn(self, coro: Any) -> None:
         """起一个后台任务，并持有强引用直到它结束。

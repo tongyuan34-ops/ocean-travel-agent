@@ -21,6 +21,10 @@ dependencies = [
     "httpx>=0.28,<1.0",
     "lxml>=6.1,<7.0",
     "reportlab>=5.1,<6.0",
+    # app/media/uploads.py 直接 import PIL。它本来就是 reportlab 的传递依赖，
+    # 但「靠别人的依赖装自己 import 的包」会在 reportlab 某次升级后变成
+    # ImportError，而且是整个 app 起不来——所以显式声明。
+    "pillow>=13.0,<14.0",
     "python-dotenv>=1.2,<2.0",
     "redis>=8.1,<9.0",
     # 评测用例集用 YAML 维护：比 JSON 适合手写长中文文本与注释

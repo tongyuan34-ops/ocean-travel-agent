@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage
 
 from app.agent.graph import build_agent_graph
 from app.agent.model import build_chat_model
+from app.agent.resilience import ToolBudget
 from app.core.config import Settings, load_settings
 from evals.fake_model import ScriptedChatModel, tool_call_message
 from evals.runner import (
@@ -39,6 +40,7 @@ from evals.runner import (
     run_graph,
     score_case,
     summarize,
+    tool_trace,
 )
 from evals.stubs import make_stub_tools
 
@@ -67,14 +69,20 @@ async def _run_one(
     case_id = str(case["id"])
     category = str(case.get("category") or "uncategorized")
     started = time.perf_counter()
+    budget = ToolBudget(
+        per_tool=settings.tool_max_calls_per_tool,
+        total=settings.tool_max_calls_total,
+    )
     try:
-        tools, answer, usage, _ = await run_graph(graph, str(case["input"]), timeout)
+        tools, answer, usage, final_state = await run_graph(
+            graph, str(case["input"]), timeout, budget
+        )
         error = ""
     except TimeoutError:
-        tools, answer, usage = [], "", None
+        tools, answer, usage, final_state = [], "", None, None
         error = f"用例超时（>{timeout:.0f}s）"
     except Exception as exc:  # noqa: BLE001 - 单条用例失败不能中断整轮
-        tools, answer, usage = [], "", None
+        tools, answer, usage, final_state = [], "", None, None
         error = f"{type(exc).__name__}: {exc}"
 
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -83,7 +91,10 @@ async def _run_one(
     judge_score: int | None = None
     judge_reason = ""
     if judge_model is not None and answer:
-        judge_score, judge_reason = await judge_answer(judge_model, case, answer)
+        # 必须把工具轨迹一起交给评审，否则它会把工具查到的数字判成编造
+        judge_score, judge_reason = await judge_answer(
+            judge_model, case, answer, tool_trace(final_state)
+        )
 
     passed = (
         not error
@@ -108,6 +119,7 @@ async def _run_one(
         judge_reason=judge_reason,
         latency_ms=latency_ms,
         model_calls=usage.calls if usage is not None else 0,
+        budget_blocked=budget.blocked,
         usage=usage.to_dict(settings.model_name, settings.model_price) if usage else {},
         error=error,
     )
@@ -167,7 +179,8 @@ async def run(args: argparse.Namespace) -> int:
         print(
             f"[{index:>2}/{len(cases)}] {mark} {result.case_id}"
             f"  tools={'->'.join(result.tools) or '-'}"
-            f"  {result.latency_ms}ms",
+            f"  {result.latency_ms}ms"
+            + (f"  blocked={result.budget_blocked}" if result.budget_blocked else ""),
             file=sys.stderr,
         )
 

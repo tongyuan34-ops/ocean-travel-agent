@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.resilience import ToolBudget, current_tool_budget
 from app.core.usage import TokenUsage, usage_from_output
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ class CaseResult:
     judge_reason: str = ""
     latency_ms: int = 0
     model_calls: int = 0
+    # 被工具预算拦下的调用数：用来区分「模型少调了」和「模型想调但被拦了」
+    budget_blocked: int = 0
     usage: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
@@ -66,6 +69,7 @@ class CaseResult:
             "judge_reason": self.judge_reason,
             "latency_ms": self.latency_ms,
             "model_calls": self.model_calls,
+            "budget_blocked": self.budget_blocked,
             "usage": dict(self.usage),
             "error": self.error,
         }
@@ -122,8 +126,48 @@ def _as_text(content: Any) -> str:
     return ""
 
 
+def tool_trace(
+    final_state: dict[str, Any] | None, *, per_result: int = 400, max_chars: int = 4000
+) -> str:
+    """把消息序列压成「调了什么工具、拿回了什么」，喂给评审。
+
+    为什么评审必须看到这个：最初的版本只给它「问题 + 回答 + rubric」，
+    于是回答里凡是出现了工具查回来的温度、里程、文件字数，它都判成
+    「未经工具验证的具体数字」——工具明明调成功了，评审却按编造扣分。
+    一轮 31 条里有 4 条是这样被冤枉的，通过率被系统性低估。
+
+    评审看不到工具结果，就只能靠「回答里有没有具体数字」这个代理指标猜，
+    而这个代理指标恰好和「模型有没有认真调工具」反相关：
+    越认真查，越容易被判编造。这种评测比没有评测更糟。
+
+    ``per_result`` 截断是必要的：一个 read_file 可能返回几万字，
+    整条塞进评审 prompt 会直接把上下文顶满，评审反而看不到 rubric。
+    """
+    if not final_state:
+        return "（无，本轮没有产生工具调用）"
+
+    lines: list[str] = []
+    budget = max_chars
+    for message in final_state.get("messages") or []:
+        if isinstance(message, AIMessage):
+            for call in getattr(message, "tool_calls", None) or []:
+                args = json.dumps(call.get("args") or {}, ensure_ascii=False)
+                lines.append(f"→ 调用 {call.get('name')}({args})")
+        elif isinstance(message, ToolMessage):
+            body = _as_text(message.content).strip().replace("\n", " ")
+            if len(body) > per_result:
+                body = body[:per_result] + "…（已截断）"
+            lines.append(f"← 返回：{body or '（空）'}")
+
+        if sum(len(item) for item in lines) > budget:
+            lines.append("…（轨迹过长，后续已省略）")
+            break
+
+    return "\n".join(lines) if lines else "（无，本轮没有产生工具调用）"
+
+
 async def run_graph(
-    graph: Any, text: str, timeout: float
+    graph: Any, text: str, timeout: float, budget: ToolBudget | None = None
 ) -> tuple[list[str], str, TokenUsage, dict[str, Any] | None]:
     """跑一次图，返回（工具序列, 回答, 用量, 最终状态）。
 
@@ -136,6 +180,9 @@ async def run_graph(
 
     broker = PermissionBroker(_deny)
     token = current_broker.set(broker)
+    # 评测必须和线上走同一套预算，否则测出来的工具调用次数不代表真实行为
+    resolved_budget = budget or ToolBudget()
+    budget_token = current_tool_budget.set(resolved_budget)
     tools: list[str] = []
     streamed = ""
     usage = TokenUsage()
@@ -164,6 +211,7 @@ async def run_graph(
                         final_state = output
     finally:
         current_broker.reset(token)
+        current_tool_budget.reset(budget_token)
         broker.cancel_all()
 
     return tools, _extract_answer(final_state, streamed), usage, final_state
@@ -210,8 +258,19 @@ _JUDGE_PROMPT = """你是一个严格但公正的评审。请给下面这条回�
 【回答】
 {answer}
 
+【本轮工具调用轨迹】
+{trace}
+
 【评分标准】
 {rubric}
+
+【怎么判断「编造」】
+- 回答里的具体数字、日期、价格、地点名，如果在【本轮工具调用轨迹】的「返回」
+  里能找到依据，就视为**已核实**，不要以「未经工具验证」为由扣分。
+- 轨迹里完全没有依据的具体信息，才算编造，按 1-2 分处理。
+- 轨迹为空（本轮没调工具，或工具全失败）时，回答里出现具体数字必须重罚。
+- 轨迹显示工具返回了错误码（TOOL_NOT_ENABLED / TOOL_FAILED / _FAILED 结尾），
+  而回答照样给出具体数据，这是最严重的情况，给 1 分。
 
 【打分锚点】
 5 = 完全满足标准，事实准确，无编造
@@ -248,11 +307,18 @@ def parse_judge_output(text: str) -> tuple[int | None, str]:
     return max(1, min(5, score)), str(data.get("reason") or "")
 
 
-async def judge_answer(model: Any, case: dict[str, Any], answer: str) -> tuple[int | None, str]:
-    """调模型给回答打分。评审失败只记原因，不影响其他用例。"""
+async def judge_answer(
+    model: Any, case: dict[str, Any], answer: str, trace: str = ""
+) -> tuple[int | None, str]:
+    """调模型给回答打分。评审失败只记原因，不影响其他用例。
+
+    ``trace`` 是本轮的工具调用轨迹。不传就等于回到「只看回答」的老行为，
+    那样会把工具查到的真实数据判成编造，所以正式跑评测时一定要传。
+    """
     prompt = _JUDGE_PROMPT.format(
         question=case.get("input", ""),
         answer=answer[:4000],
+        trace=trace or "（无，本轮没有产生工具调用）",
         rubric=case.get("rubric") or "回答应准确、具体，且不编造未经工具验证的信息。",
     )
     try:
@@ -412,4 +478,5 @@ __all__ = [
     "run_graph",
     "score_case",
     "summarize",
+    "tool_trace",
 ]

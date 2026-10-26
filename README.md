@@ -184,6 +184,18 @@ Agent 的成本是**多轮工具往返**堆出来的：一轮对话可能调用�
 
 实现上替换工具自身的 `coroutine`，而不是在外面再包一层工具对象：后者会让 `astream_events` 收到两次 `on_tool_start`，工具调用计数和推给前端的事件都会翻倍。
 
+**同一层还有工具调用预算**：`TOOL_MAX_CALLS_PER_TOOL`（默认 4）与 `TOOL_MAX_CALLS_TOTAL`（默认 12）按轮重置。超限时不抛异常，而是把 `TOOL_BUDGET_EXCEEDED：<原因>` 作为工具结果返回给模型，让它基于已有信息作答——整轮失败比少调一次工具更糟。
+
+为什么必须由代码兜底：基线评测里模型对 `search_poi` 调了 6 次（参数只做微调），一轮 11 次工具调用、75 秒延迟。而在同一份 `SYSTEM_PROMPT` 里第 1 条就写着「工具失败不要编造」，模型照样编造。**规则写在 prompt 里只是提醒，写在代码里才是约束。**
+
+还有一层兜底是**工具崩溃**。LangGraph 默认只接住「参数不合法」，其余异常直接上抛——
+库的角度合理（别替使用者吞未知错误），但一个聊天应用里，某个工具的一行缺陷不该让用户的整轮对话 500。
+现在 `ToolNode` 用自定义 handler 把未预期异常转成 `TOOL_CRASHED：<类型>: <信息>` 回给模型，
+同时 `logger.exception` 留痕，`CancelledError` 照旧立即生效。
+这条是评测跑出来的：`set_wallpaper` 的形参写成 `image_path` 而 `args_schema` 声明的是 `path`，
+模型照着 schema 传参必然 `TypeError`。ruff 和 mypy 都看不出来，现在由 `tests/test_tool_contract.py`
+对全部 22 个工具统一校验「schema 声明的字段函数收得下、函数的必填参数 schema 里有」。
+
 ---
 
 ## 快速开始
@@ -346,16 +358,26 @@ uv run python -m evals.run --fail-under 0.8
 
 产出指标：通过率、工具召回率、误调数、平均质量分、P50/P95 延迟、总 token 与成本。
 
-基线（`deepseek-v4-flash`，31 条）：通过 20、工具召回率 73.9%、误调 0、平均质量分 3.81。
+基线（`deepseek-v4-flash`，31 条）：通过 19、工具召回率 78.3%、误调 0、平均质量分 3.75、
+P95 延迟 68.6 秒。三轮对比（改用例 → 加工具预算）里，被瞄准的指标都动了：
+召回率 +9.1pp、P95 −6.8 秒、模型调用 68 → 62。
+
+比数字更值得看的是**评测自己也会错**：最初评审只拿到「问题 + 回答 + rubric」，
+看不到工具返回，于是把 `get_weather` 查回来的温度判成「未经工具验证的具体数字」——
+一轮 31 条里 4 条被冤枉。越认真调工具越容易被判编造，这种评测比没有评测更糟。
+现在评审会收到完整的工具调用轨迹，判断口径也写进了 prompt。
+
 失败的 11 条里既有真实缺陷（工具抖动、超时、工具失败时编造），也有用例自身的问题，
-逐条拆解见 [`evals/BASELINE.md`](evals/BASELINE.md)；用例写法见 [`evals/README.md`](evals/README.md)。
+还有一条是产品代码的真 bug（`set_wallpaper` 的形参名和 `args_schema` 对不上，
+模型照 schema 传参必然 `TypeError`）。逐条拆解见 [`evals/BASELINE.md`](evals/BASELINE.md)，
+用例写法见 [`evals/README.md`](evals/README.md)。
 
 ---
 
 ## 测试
 
 ```bash
-uv run pytest                        # 176 passed, 1 skipped
+uv run pytest                        # 257 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -390,7 +412,7 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 176 个离线测试（不联网、不调模型）
+tests/               # 257 个离线测试（不联网、不调模型）
 evals/               # 31 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 scripts/             # 批量对话、Cookie 注入、手工验证脚本

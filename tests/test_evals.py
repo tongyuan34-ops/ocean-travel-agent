@@ -12,11 +12,13 @@ import pytest
 from evals.run import main
 from evals.runner import (
     CaseResult,
+    judge_answer,
     load_cases,
     parse_judge_output,
     render_markdown,
     score_case,
     summarize,
+    tool_trace,
 )
 
 
@@ -140,6 +142,71 @@ def test_parse_judge_output_failure_returns_none():
     score, reason = parse_judge_output("这个回答还不错")
     assert score is None
     assert "JSON" in reason
+
+
+# ---------- 工具轨迹（评审的输入） ----------
+
+
+def _state(*messages):
+    return {"messages": list(messages)}
+
+
+def test_tool_trace_records_call_and_result():
+    """轨迹要同时包含「调了什么」和「拿回了什么」，缺一半评审就没法判断。"""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    state = _state(
+        AIMessage(
+            content="", tool_calls=[{"name": "get_weather", "args": {"city": "北京"}, "id": "1"}]
+        ),
+        ToolMessage(content="北京 25 度 晴", tool_call_id="1"),
+    )
+    trace = tool_trace(state)
+    assert "get_weather" in trace
+    assert "北京" in trace
+    assert "25 度" in trace
+
+
+def test_tool_trace_truncates_long_results():
+    """read_file 可能返回几万字，整条塞进评审 prompt 会把 rubric 挤掉。"""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    state = _state(
+        AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": "a"}, "id": "1"}]),
+        ToolMessage(content="x" * 5000, tool_call_id="1"),
+    )
+    trace = tool_trace(state, per_result=100)
+    assert len(trace) < 500
+    assert "已截断" in trace
+
+
+def test_tool_trace_empty_state():
+    assert "无" in tool_trace(None)
+    assert "无" in tool_trace(_state())
+
+
+async def test_judge_prompt_includes_trace():
+    """评审 prompt 必须带轨迹，否则它会把工具查到的数字判成编造。"""
+
+    class _Echo:
+        prompt = ""
+
+        async def ainvoke(self, messages):
+            from langchain_core.messages import AIMessage
+
+            self.prompt = messages[0][1]
+            return AIMessage(content='{"score": 5, "reason": "ok"}')
+
+    model = _Echo()
+    score, _ = await judge_answer(
+        model,
+        _case(rubric="回答应准确"),
+        "北京今天 25 度",
+        "→ 调用 get_weather({})\n← 返回：北京 25 度 晴",
+    )
+    assert score == 5
+    assert "北京 25 度 晴" in model.prompt
+    assert "已核实" in model.prompt
 
 
 # ---------- 汇总 ----------

@@ -185,6 +185,35 @@ def test_tool_trace_empty_state():
     assert "无" in tool_trace(_state())
 
 
+async def test_run_graph_feeds_trace_from_real_state(settings):
+    """端到端验证轨迹的数据来源：图状态里确实带着 ToolMessage。
+
+    上面几条测的是 ``tool_trace`` 的纯函数逻辑，喂的是手工造的消息。
+    这条走真实图，防的是「final_state 里其实没有工具消息」这类接线错误——
+    那样评审照样瞎，而单测全绿。
+    """
+    from evals.fake_model import ScriptedChatModel, tool_call_message
+    from evals.runner import run_graph
+    from evals.stubs import make_stub_tools
+    from langchain_core.messages import AIMessage
+
+    from app.agent.graph import build_agent_graph
+
+    model = ScriptedChatModel(
+        script=[
+            tool_call_message("get_weather", {"city": "北京"}),
+            AIMessage(content="北京明天 18~25℃"),
+        ]
+    )
+    graph, _ = build_agent_graph(settings, mode="native", tools=make_stub_tools(), model=model)
+    _, answer, _, state = await run_graph(graph, "北京明天天气", timeout=30)
+
+    trace = tool_trace(state)
+    assert "get_weather" in trace
+    assert "18~25℃" in trace  # 工具返回的内容进了轨迹
+    assert "18~25℃" in answer
+
+
 async def test_judge_prompt_includes_trace():
     """评审 prompt 必须带轨迹，否则它会把工具查到的数字判成编造。"""
 

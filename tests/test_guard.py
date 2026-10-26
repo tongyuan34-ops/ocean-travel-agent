@@ -30,7 +30,9 @@ SANDBOX = Path(__file__).resolve().parents[1] / "sandbox"
 
 def _messages_text(messages) -> str:
     return "\n".join(
-        str(getattr(message, "content", "")) for message in messages if isinstance(message, ToolMessage)
+        str(getattr(message, "content", ""))
+        for message in messages
+        if isinstance(message, ToolMessage)
     )
 
 
@@ -92,7 +94,9 @@ def test_dangerous_tools_covers_every_permission_call():
     source = (SANDBOX.parent / "app" / "agent" / "tools" / "system.py").read_text(encoding="utf-8")
     actions = set(re.findall(r'require_permission\(\s*"([a-z_]+)"', source))
     assert actions, "没扫到 require_permission 调用，说明这个测试的定位逻辑失效了"
-    assert actions <= DANGEROUS_TOOLS, f"这些动作没被污点闸覆盖：{sorted(actions - DANGEROUS_TOOLS)}"
+    assert actions <= DANGEROUS_TOOLS, (
+        f"这些动作没被污点闸覆盖：{sorted(actions - DANGEROUS_TOOLS)}"
+    )
 
 
 def test_tools_api_reuses_the_same_permission_set():

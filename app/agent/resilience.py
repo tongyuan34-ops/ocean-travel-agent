@@ -122,6 +122,52 @@ class RetryStats:
 current_retry_stats: ContextVar[RetryStats | None] = ContextVar("current_retry_stats", default=None)
 
 
+@dataclass
+class ToolBudget:
+    """单轮对话的工具调用预算。
+
+    为什么要在代码里管这件事：基线评测里模型对同一个工具调了 6 次
+    （参数只做微调），一轮下来 11 次工具调用、75 秒延迟。在 SYSTEM_PROMPT 里
+    写「不要重复调用」是没用的——同一份 prompt 里第 1 条就写着「工具失败不要编造」，
+    模型照样编造。规则要靠代码兜底，prompt 只负责让模型少撞墙。
+
+    超限时不抛异常，而是返回一段错误文本给模型：让它看到「这条路走不通」，
+    然后基于已有信息作答。抛异常会让整轮对话失败，那是更差的结果。
+    """
+
+    # 同一个工具最多调用几次；0 表示不限
+    per_tool: int = 4
+    # 单轮工具调用总数上限；0 表示不限
+    total: int = 12
+    calls: dict[str, int] = field(default_factory=dict)
+    used: int = 0
+    blocked: int = 0
+
+    def consume(self, name: str) -> str:
+        """放行返回空串；拦截返回原因。"""
+        if self.total > 0 and self.used >= self.total:
+            self.blocked += 1
+            return f"本轮工具调用已达总上限 {self.total} 次"
+        if self.per_tool > 0 and self.calls.get(name, 0) >= self.per_tool:
+            self.blocked += 1
+            return f"「{name}」本轮已调用 {self.per_tool} 次，达到单工具上限"
+        self.calls[name] = self.calls.get(name, 0) + 1
+        self.used += 1
+        return ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "used": self.used,
+            "blocked": self.blocked,
+            "per_tool": self.per_tool,
+            "total": self.total,
+            "by_tool": dict(self.calls),
+        }
+
+
+current_tool_budget: ContextVar[ToolBudget | None] = ContextVar("current_tool_budget", default=None)
+
+
 def is_retryable(exc: BaseException) -> bool:
     """判断异常是否值得重试。
 
@@ -225,6 +271,16 @@ def make_resilient(tool: BaseTool, policy: RetryPolicy | None = None) -> BaseToo
         return tool
 
     async def _call(*args: Any, **kwargs: Any) -> Any:
+        # 预算检查放在重试之前：超限就不该再去碰上游
+        budget = current_tool_budget.get()
+        if budget is not None:
+            reason = budget.consume(tool.name)
+            if reason:
+                logger.warning("工具调用被预算拦截 | tool=%s 原因=%s", tool.name, reason)
+                return (
+                    f"TOOL_BUDGET_EXCEEDED：{reason}。"
+                    "请基于已经拿到的信息作答；若信息不足，如实告知用户还缺什么。"
+                )
         return await call_with_retry(
             lambda: original(*args, **kwargs),
             policy=resolved,
@@ -245,8 +301,10 @@ def make_all_resilient(tools: list[BaseTool], policy: RetryPolicy | None = None)
 __all__ = [
     "RetryPolicy",
     "RetryStats",
+    "ToolBudget",
     "call_with_retry",
     "current_retry_stats",
+    "current_tool_budget",
     "is_retryable",
     "make_all_resilient",
     "make_resilient",

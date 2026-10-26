@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolInvocationError
 
 from app.agent.model import build_chat_model, detect_tool_calling
 from app.agent.resilience import RetryPolicy, make_all_resilient
@@ -41,8 +42,8 @@ SYSTEM_PROMPT = (
     "只有 search_web 的检索结果需要附链接（见第 5 条）。\n"
     "4. 调用 plan_route 时必须传入 city 参数（出发地所在城市），"
     "否则「三亚市区」这类模糊地名可能被解析到错误位置；"
-    "若工具返回「数据异常」或「无法解析」，改用更具体的地名重试，"
-    "重试后仍失败就如实告知用户查不到，不要猜。\n"
+    "若工具返回「数据异常」或「无法解析」，最多改用更具体的地名再试一次，"
+    "仍失败就如实告知用户查不到，不要猜。\n"
     "5. 需要外部公开资料（攻略、开放时间、交通政策等）时用 search_web 检索，"
     "回答中必须附上检索结果里的链接作为来源，不得把检索摘要改写成自身知识。\n"
     "6. 用户粘贴了具体链接（如抖音/小红书分享链接）时用 parse_shared_link 解析；"
@@ -62,8 +63,41 @@ SYSTEM_PROMPT = (
     "write_file/create_dir/delete_path/open_file 执行时会弹权限确认。"
     "不得预先声称无法打开或操作文件；路径必须在 ALLOWED_ROOTS 白名单内，"
     "越界时如实说明白名单范围，不要编造文件内容。\n"
-    "11. 用中文回答，条理清晰。"
+    "11. 工具调用要有节制：同一个工具在本轮里最多调用 4 次，总量不超过 12 次；"
+    "已经成功返回过结果的工具，不要为了「再确认一下」重复调用；"
+    "换参数反复试探同一件事属于无效调用，会拖慢整轮回答。\n"
+    "12. 工具返回内容以 TOOL_NOT_ENABLED、TOOL_FAILED、TOOL_BUDGET_EXCEEDED、"
+    "TOOL_CRASHED 开头，或以 _FAILED 结尾的错误码开头时，"
+    "表示**这次没有拿到真实数据**："
+    "此时禁止给出任何具体数字、日期、价格或地点名，只能如实说明未取到，"
+    "并告诉用户可以怎么补上（配置哪个 Key、换更具体的地名等）。\n"
+    "13. 用中文回答，条理清晰。"
 )
+
+
+def _handle_tool_error(exc: Exception) -> str:
+    """工具抛异常时的兜底：转成错误文本回给模型，而不是让整轮对话失败。
+
+    LangGraph 的默认处理器只接住 ``ToolInvocationError``（参数不合法），
+    其余异常一律重新抛出。从库的角度这很合理——别替使用者吞掉未知错误；
+    但对一个聊天应用，某个工具的一行代码缺陷不该让用户的整轮对话 500，
+    前端连一句「哪里出了问题」都拿不到。
+
+    两条边界必须守住：
+
+    - ``logger.exception`` 不能省。转成文本等于把异常降级成返回值，
+      不打日志就再也没有人会发现这个 bug；
+    - ``asyncio.CancelledError`` 是 ``BaseException``，本来就不会进这里，
+      「用户点停止」仍然立即生效，不会被兜底逻辑拦住。
+
+    返回的 ``TOOL_CRASHED`` 前缀和 ``TOOL_FAILED`` 一样被 SYSTEM_PROMPT
+    第 12 条覆盖：模型看到它就必须承认「这次没拿到数据」，不许编造。
+    """
+    if isinstance(exc, ToolInvocationError):
+        # 参数校验失败是模型的问题，原文回给它最有信息量
+        return exc.message
+    logger.exception("工具执行抛出未预期异常 | 类型=%s", type(exc).__name__)
+    return f"TOOL_CRASHED：{type(exc).__name__}: {exc}"
 
 
 def build_agent_graph(
@@ -113,7 +147,7 @@ def _build_native(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
 
     builder = StateGraph(AgentState)
     builder.add_node("agent", agent_node)
-    builder.add_node("tools", ToolNode(tools))
+    builder.add_node("tools", ToolNode(tools, handle_tool_errors=_handle_tool_error))
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route, {"tools": "tools", END: END})
     builder.add_edge("tools", "agent")

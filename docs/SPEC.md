@@ -139,7 +139,9 @@
            "finish_reason": "stop|length", "trace_id": "16hex",
            "usage": {"turn": {...}, "session": {...}},
            "tool_retries": {"retries": 0, "exhausted": 0,
-                            "recovered": 0, "by_tool": {}}}
+                            "recovered": 0, "by_tool": {}},
+           "tool_budget": {"used": 3, "blocked": 0, "per_tool": 4,
+                           "total": 12, "by_tool": {"search_poi": 2}}}
 
     data: {"type": "error", "code": "错误码", "message": "人类可读信息"}
 
@@ -351,6 +353,15 @@ HTTP 状态码与错误码映射：
 
 硬闸：`MAX_TOKENS_PER_SESSION` 大于 0 时，会话累计 token 达到上限后拒绝新一轮对话，
 返回 `BUDGET_EXCEEDED`，且**不把这条用户消息写入历史**——否则历史里会留下一句永远得不到回答的话。
+
+### 工具调用预算
+
+`TOOL_MAX_CALLS_PER_TOOL`（默认 4）与 `TOOL_MAX_CALLS_TOTAL`（默认 12）限制单轮工具调用次数，
+每轮重置。超限时**不中断对话**，而是把 `TOOL_BUDGET_EXCEEDED：<原因>` 作为工具结果返回给模型，
+要求它基于已有信息作答——整轮失败比少调一次工具更糟。
+
+`end` 事件的 `tool_budget` 字段给出本轮实际调用数与拦截数，便于判断是模型自己收敛了，
+还是被代码拦住的。
 
 ---
 
@@ -639,7 +650,7 @@ e) 上下文预算：MAX_CONTEXT_TOKENS 默认 4096；超出时滚动摘要压�
 - write_file / create_dir / delete_path：需确认。路径**先 resolve 再按层级校验**防穿越，
   越界返回 PATH_NOT_ALLOWED；写/删前生成预览经用户确认后执行；
   目录只允许删空的，且不允许删白名单根目录
-- set_wallpaper(image_path)：仅 Windows，经 PowerShell 调 SystemParametersInfo；
+- set_wallpaper(path)：仅 Windows，经 PowerShell 调 SystemParametersInfo；
   路径以**环境变量**传入而非字符串拼接，避免命令注入；非 Windows 返回 TOOL_NOT_ENABLED
 - 沙箱白名单为空、或拿不到确认通道（脱离会话直接调工具）时，一律拒绝执行
 

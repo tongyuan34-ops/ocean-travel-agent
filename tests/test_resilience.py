@@ -17,7 +17,9 @@ from app.agent.permissions import PermissionDenied
 from app.agent.resilience import (
     RetryPolicy,
     RetryStats,
+    ToolBudget,
     call_with_retry,
+    current_tool_budget,
     is_retryable,
     make_all_resilient,
     make_resilient,
@@ -208,3 +210,77 @@ def _reset_stats(token) -> None:
     from app.agent.resilience import current_retry_stats
 
     current_retry_stats.reset(token)
+
+
+# ---------- 单轮工具预算 ----------
+
+
+def test_budget_allows_until_per_tool_limit():
+    budget = ToolBudget(per_tool=2, total=10)
+    assert budget.consume("get_weather") == ""
+    assert budget.consume("get_weather") == ""
+    # 第三次开始拦截
+    assert "上限" in budget.consume("get_weather")
+    assert budget.blocked == 1
+    # 别的工具不受影响
+    assert budget.consume("plan_route") == ""
+
+
+def test_budget_total_limit():
+    budget = ToolBudget(per_tool=10, total=3)
+    for _ in range(3):
+        assert budget.consume("search_poi") == ""
+    assert "总上限" in budget.consume("get_weather")
+    assert budget.used == 3
+
+
+def test_budget_zero_means_unlimited():
+    budget = ToolBudget(per_tool=0, total=0)
+    for _ in range(50):
+        assert budget.consume("search_poi") == ""
+    assert budget.blocked == 0
+
+
+def test_budget_to_dict_counts_by_tool():
+    budget = ToolBudget(per_tool=2, total=10)
+    budget.consume("a")
+    budget.consume("a")
+    budget.consume("a")
+    data = budget.to_dict()
+    assert data["used"] == 2
+    assert data["blocked"] == 1
+    assert data["by_tool"] == {"a": 2}
+
+
+async def test_budgeted_tool_returns_error_text_instead_of_executing():
+    """超限时不能抛异常：整轮对话失败比「少调一次工具」更糟。"""
+    calls = {"n": 0}
+
+    @tool("budgeted_tool", args_schema=_Args)
+    async def budgeted_tool(city: str) -> str:
+        """会被预算拦住的工具。"""
+        calls["n"] += 1
+        return f"{city}-ok"
+
+    wrapped = make_resilient(budgeted_tool)
+    budget = ToolBudget(per_tool=1, total=10)
+    token = current_tool_budget.set(budget)
+    try:
+        assert await wrapped.ainvoke({"city": "杭州"}) == "杭州-ok"
+        blocked = await wrapped.ainvoke({"city": "杭州"})
+    finally:
+        current_tool_budget.reset(token)
+
+    assert calls["n"] == 1  # 第二次没有真的执行
+    assert blocked.startswith("TOOL_BUDGET_EXCEEDED")
+
+
+async def test_budget_is_per_turn_not_global():
+    """每轮都要新建 ToolBudget，否则第二句话会被第一句话的调用次数拖累。"""
+    budget_one = ToolBudget(per_tool=1, total=10)
+    budget_one.consume("get_weather")
+    budget_one.consume("get_weather")
+    assert budget_one.blocked == 1
+
+    budget_two = ToolBudget(per_tool=1, total=10)
+    assert budget_two.consume("get_weather") == ""

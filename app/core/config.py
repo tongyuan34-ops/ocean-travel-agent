@@ -153,6 +153,9 @@ class Settings:
     # 工具重试
     tool_retry_attempts: int
     tool_retry_base_delay: float
+    # 单轮工具调用预算：同一工具上限 / 单轮总数上限，0 表示不限
+    tool_max_calls_per_tool: int
+    tool_max_calls_total: int
 
     # 登录态采集（plugin 组 B，默认关闭，个人自用，不随核心开源发布）
     enable_session_fetch: bool
@@ -217,6 +220,8 @@ def load_settings() -> Settings:
         model_price=_get_price("MODEL_PRICE"),
         tool_retry_attempts=_get_int("TOOL_RETRY_ATTEMPTS", 3),
         tool_retry_base_delay=_get_float("TOOL_RETRY_BASE_DELAY", 0.4),
+        tool_max_calls_per_tool=_get_int("TOOL_MAX_CALLS_PER_TOOL", 4),
+        tool_max_calls_total=_get_int("TOOL_MAX_CALLS_TOTAL", 12),
         enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", False),
         cookie_dir=_get("COOKIE_DIR", "cookies"),
         mediacrawler_path=_get("MEDIACRAWLER_PATH", "D:/MediaCrawler"),

@@ -87,6 +87,11 @@ def _count_processes_with_marker(marker: str) -> int:
         ],
         capture_output=True,
         text=True,
+        # 这里枚举的是**整机**的 python 进程，命令行里可能含中文（脚本名、
+        # 命令行参数）。PowerShell 按控制台代码页输出，用默认编码解码会抛
+        # UnicodeDecodeError，而 stdout 随之变成 None——表现为一条与本次
+        # 测试毫无关系的 AttributeError。marker 是 ASCII，替换掉坏字节即可。
+        errors="replace",
         timeout=60,
     )
-    return sum(1 for line in listing.stdout.splitlines() if marker in line)
+    return sum(1 for line in (listing.stdout or "").splitlines() if marker in line)

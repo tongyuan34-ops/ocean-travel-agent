@@ -21,7 +21,12 @@ from langchain_core.messages import AIMessage
 from app.agent.graph import MAX_STEPS, SYSTEM_PROMPT, build_agent_graph
 from app.agent.model import build_chat_model
 from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
-from app.agent.resilience import RetryStats, current_retry_stats
+from app.agent.resilience import (
+    RetryStats,
+    ToolBudget,
+    current_retry_stats,
+    current_tool_budget,
+)
 from app.core.config import Settings
 from app.core.context import compose_messages, make_summary, plan_fold
 from app.core.errors import ApiError
@@ -303,6 +308,13 @@ class ChatService:
         # 同上：工具重试发生在后台任务里，统计要回到本轮
         retry_stats = RetryStats()
         retry_token = current_retry_stats.set(retry_stats)
+        # 工具调用预算也按轮重置：模型对同一工具反复试参数时，
+        # 光靠 prompt 约束不住，必须由代码兜底
+        tool_budget = ToolBudget(
+            per_tool=self._settings.tool_max_calls_per_tool,
+            total=self._settings.tool_max_calls_total,
+        )
+        budget_token = current_tool_budget.set(tool_budget)
 
         async def _run_graph() -> None:
             try:
@@ -432,6 +444,7 @@ class ChatService:
             current_broker.reset(ctx_token)
             current_media.reset(media_token)
             current_retry_stats.reset(retry_token)
+            current_tool_budget.reset(budget_token)
             broker.cancel_all()
             if not runner.done():
                 runner.cancel()
@@ -519,6 +532,7 @@ class ChatService:
                 "trace_id": trace_id,
                 "usage": {"turn": turn_usage_dict, "session": dict(session.usage)},
                 "tool_retries": retry_stats.to_dict(),
+                "tool_budget": tool_budget.to_dict(),
             }
         )
 

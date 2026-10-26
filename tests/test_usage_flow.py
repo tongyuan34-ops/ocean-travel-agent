@@ -181,3 +181,17 @@ async def test_end_event_reports_tool_retries(monkeypatch):
     assert retries["retries"] == 0
     assert retries["exhausted"] == 0
     assert retries["by_tool"] == {}
+
+
+async def test_end_event_reports_tool_budget(monkeypatch):
+    graph = _Graph([_model_end(10, 1), _final("回答")])
+    service = _service(monkeypatch, graph, tool_max_calls_per_tool=3, tool_max_calls_total=8)
+    session = await service.create_session()
+
+    end = _end(await _frames(service, session.id, "问题"))
+
+    budget = end["tool_budget"]
+    assert budget["per_tool"] == 3
+    assert budget["total"] == 8
+    assert budget["used"] == 0
+    assert budget["blocked"] == 0

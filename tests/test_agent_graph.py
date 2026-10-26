@@ -117,3 +117,57 @@ def test_parse_decision_tolerates_surrounding_text():
     assert _parse_decision('说明：{"final": "好的"} 完毕') == {"final": "好的"}
     assert _parse_decision("完全不是 JSON") is None
     assert _parse_decision("[1, 2]") is None
+
+
+# ---------- 工具崩溃兜底 ----------
+
+
+@lc_tool
+async def boom(text: str) -> str:
+    """故意抛异常的工具，用于验证崩溃兜底。"""
+    raise TypeError(f"炸了：{text}")
+
+
+def test_handle_tool_error_turns_crash_into_text():
+    """未预期异常要变成错误文本，而不是让整轮对话 500。"""
+    from app.agent.graph import _handle_tool_error
+
+    result = _handle_tool_error(TypeError("boom"))
+    assert result.startswith("TOOL_CRASHED")
+    assert "TypeError" in result
+
+
+def test_handle_tool_error_keeps_invocation_message():
+    """参数不合法是模型的问题，原文回给它最有信息量。"""
+    from langgraph.prebuilt.tool_node import ToolInvocationError
+    from pydantic import BaseModel, ValidationError
+
+    from app.agent.graph import _handle_tool_error
+
+    class _Args(BaseModel):
+        path: str
+
+    try:
+        _Args()  # 故意漏掉必填参数
+    except ValidationError as exc:
+        error = ToolInvocationError("set_wallpaper", exc, {})
+
+    assert _handle_tool_error(error) == error.message
+    assert "set_wallpaper" in error.message
+
+
+async def test_tool_crash_does_not_kill_the_turn(monkeypatch, settings):
+    """工具抛异常后，模型仍应拿到结果并给出最终回答。"""
+    _patch(
+        monkeypatch,
+        [
+            AIMessage(content="", tool_calls=[{"name": "boom", "args": {"text": "x"}, "id": "c1"}]),
+            AIMessage(content="工具挂了，我如实告诉你"),
+        ],
+    )
+    graph, _ = graph_module.build_agent_graph(settings, mode="native", tools=[boom])
+    result = await graph.ainvoke({"messages": [HumanMessage(content="调用工具")]})
+
+    contents = [str(getattr(message, "content", "")) for message in result["messages"]]
+    assert any("TOOL_CRASHED" in text for text in contents)
+    assert "工具挂了，我如实告诉你" in contents

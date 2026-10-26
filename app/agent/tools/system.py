@@ -262,13 +262,17 @@ async def delete_path(path: str) -> str:
 
 
 @tool(args_schema=PathInput)
-async def set_wallpaper(image_path: str) -> str:
+async def set_wallpaper(path: str) -> str:
     """把白名单内的图片设为桌面壁纸（仅 Windows）。执行前会请用户确认。"""
     if not is_windows():
         return "TOOL_NOT_ENABLED：set_wallpaper 仅支持 Windows，当前系统不支持"
 
+    # 形参名必须与 args_schema 的字段名一致。这里曾经写成 image_path，
+    # 而 PathInput 声明的是 path —— 模型照着 schema 传 path，
+    # 进来就撞 TypeError: unexpected keyword argument 'path'。
+    # 单测 test_tool_contract.py 会把这类不一致挡在提交前。
     try:
-        image = build_write_preview(image_path, f"设为壁纸：{image_path}", _roots())
+        image = build_write_preview(path, f"设为壁纸：{path}", _roots())
     except PathNotAllowed as exc:
         return _failed(exc.message, exc.code)
 

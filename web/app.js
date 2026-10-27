@@ -16,10 +16,15 @@
     device: 'ocean.device.v1'
   };
 
+  /* 固定壁纸：统一 2560×1340（1.91:1），和全屏 cover 的裁切比例一致，
+   * 换哪一张首屏构图都不会跳。加新图照着这个尺寸出一份，别直接塞原图——
+   * 手机上传的大图会让首屏多等几百毫秒。 */
   var WALLPAPERS = [
     { key: 'sea', label: '海上日落', url: './assets/wallpaper-sea.jpg' },
     { key: 'bay', label: '晨雾海湾', url: './assets/wallpaper-bay.jpg' },
-    { key: 'night', label: '星空海面', url: './assets/wallpaper-night.jpg' }
+    { key: 'night', label: '星空海面', url: './assets/wallpaper-night.jpg' },
+    { key: 'fuji', label: '富士暮色', url: './assets/wallpaper-fuji.jpg' },
+    { key: 'peak', label: '雪峰倒影', url: './assets/wallpaper-peak.jpg' }
   ];
 
   var ERROR_TEXT = {

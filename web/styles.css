@@ -914,7 +914,9 @@ img{display:block;max-width:100%}
 /* 设置：壁纸 */
 .wall-grid{display:flex;flex-wrap:wrap;margin:0 -6px 6px}
 .wall-thumb{
-  flex:1 1 150px;min-width:130px;
+  /* 固定三列：张数不是 3 的倍数时（现在 5 张），末行不会被 flex-grow 拉宽，
+     缩略图大小始终一致 */
+  flex:0 0 calc(33.333% - 12px);min-width:130px;
   margin:0 6px 12px;
   border-radius:14px;
   overflow:hidden;

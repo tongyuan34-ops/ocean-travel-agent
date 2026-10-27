@@ -139,5 +139,9 @@ async def resume_stream(
 
 @router.post("/streams/{stream_id}/cancel")
 async def cancel_stream(stream_id: str, request: Request) -> dict[str, bool]:
-    """用户主动停止：终止后台生成，不保存半截回答。"""
-    return {"cancelled": _service(request).cancel_stream(stream_id)}
+    """用户主动停止：终止后台生成，不保存半截回答。
+
+    跨进程部署时这次请求可能落到生成端以外的那台机器上，此时只能写取消标记，
+    由生成端轮询退出——所以是 await，不再是同步调用。
+    """
+    return {"cancelled": await _service(request).cancel_stream(stream_id)}

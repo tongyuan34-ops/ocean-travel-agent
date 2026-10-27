@@ -117,6 +117,9 @@ class Settings:
     storage_backend: str
     redis_url: str
     session_ttl_sec: int
+    # 跨进程共享状态（SSE 事件流、权限裁决）：auto / memory / redis。
+    # auto = 会话存储用了 Redis 就跟着用 Redis
+    shared_state: str
 
     # 检索类 Key
     map_api_key: str
@@ -198,6 +201,7 @@ def load_settings() -> Settings:
         storage_backend=_get("STORAGE_BACKEND", "memory").lower(),
         redis_url=_get("REDIS_URL", "redis://localhost:6379/0"),
         session_ttl_sec=_get_int("SESSION_TTL_SEC", 0),
+        shared_state=_get("SHARED_STATE", "auto").lower(),
         map_api_key=_get("MAP_API_KEY"),
         weather_api_key=_get("WEATHER_API_KEY"),
         bing_search_api_key=_get("BING_SEARCH_API_KEY"),

@@ -21,7 +21,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.agent.graph import MAX_STEPS, build_agent_graph
 from app.agent.guard import TaintState, current_taint
 from app.agent.model import build_chat_model
-from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.permissions import (
+    DecisionChannel,
+    LocalDecisionChannel,
+    PermissionBroker,
+    PermissionRequest,
+    current_broker,
+)
 from app.agent.prompts import build_system_prompt, get_persona
 from app.agent.resilience import (
     RetryStats,
@@ -37,7 +43,7 @@ from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media
 from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
 from app.services.profile import ProfileService
-from app.services.streams import StreamState
+from app.services.streams import CANCEL_POLL_SEC, EventLog, MemoryEventLog, StreamState
 from app.storage import ChatMessage, ChatSession, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -113,6 +119,8 @@ class ChatService:
         media: MediaService | None = None,
         profile: ProfileService | None = None,
         uploads: UploadStore | None = None,
+        event_log: EventLog | None = None,
+        decision_channel: DecisionChannel | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
@@ -123,8 +131,15 @@ class ChatService:
         self._mode: str = ""
         self._summarizer: Any = None
         self._graph_lock = asyncio.Lock()
-        # 进行中/刚结束的 SSE 事件流，供断线续传
-        self._streams: dict[str, StreamState] = {}
+        # 事件流与权限裁决都放在可替换的后端后面：单进程用内存，
+        # 多进程用 Redis。默认给内存实现，测试和脚本不必配 Redis。
+        self._log: EventLog = event_log if event_log is not None else MemoryEventLog()
+        self._decisions: DecisionChannel = (
+            decision_channel if decision_channel is not None else LocalDecisionChannel()
+        )
+        # 本进程内正在生成的流：取消时要能直接 cancel 掉任务，
+        # 跨进程那一路只能靠 log.cancel() 写标记，见 cancel_stream
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
         # 后台任务的强引用。asyncio 只对 task 持弱引用，不在这里存一份，
         # 任务可能在跑完前被 GC 回收（CPython 文档明确警告过这一点）
         self._background: set[asyncio.Task[Any]] = set()
@@ -201,12 +216,15 @@ class ChatService:
         回答继续跑完并落库，之后可用 Last-Event-ID 续传。
         """
         await self.get_session(session_id)  # 先校验，避免流开始后才报错
-        self._prune_streams()
-        state = StreamState(stream_id=uuid4().hex, session_id=session_id)
-        self._streams[state.stream_id] = state
-        state.task = asyncio.create_task(
+        stream_id = uuid4().hex
+        await self._log.create(stream_id, session_id)
+        state = StreamState(stream_id=stream_id, session_id=session_id, log=self._log)
+        task: asyncio.Task[Any] = asyncio.create_task(
             self._run_reply(state, session_id, text, user_id, attachments or [])
         )
+        state.task = task
+        self._tasks[stream_id] = task
+        task.add_done_callback(lambda _: self._tasks.pop(stream_id, None))
         return state
 
     async def stream_reply(
@@ -217,23 +235,26 @@ class ChatService:
         async for frame in self.subscribe(state.stream_id, 0):
             yield frame
 
-    def get_stream(self, stream_id: str) -> StreamState | None:
-        return self._streams.get(stream_id)
+    async def cancel_stream(self, stream_id: str) -> bool:
+        """用户主动停止：取消后台生成，且不保存半截回答。
 
-    def cancel_stream(self, stream_id: str) -> bool:
-        """用户主动停止：取消后台生成，且不保存半截回答。"""
-        state = self._streams.get(stream_id)
-        if state is None:
+        两步都要做，顺序不能反：
+
+        1. 先在共享存储里写取消标记——跨进程部署时这个请求可能落在
+           另一台机器上，那边没有本进程的 Task 可以 cancel，只能靠标记
+           让生成端自己退出（见 ``_run_reply`` 里的 ``_cancelled_elsewhere``）；
+        2. 再取消本地任务——同进程时立即生效，不必等一个轮询周期。
+        """
+        if not await self._log.cancel(stream_id):
             return False
-        state.cancelled = True
-        if state.task is not None and not state.task.done():
-            state.task.cancel()
+        task = self._tasks.get(stream_id)
+        if task is not None and not task.done():
+            task.cancel()
         return True
 
     async def subscribe(self, stream_id: str, last_event_id: int = 0) -> AsyncIterator[str]:
         """从 last_event_id 之后重放，并继续等待新事件。"""
-        state = self._streams.get(stream_id)
-        if state is None:
+        if await self._log.meta(stream_id) is None:
             yield _sse(
                 {
                     "type": "error",
@@ -242,25 +263,13 @@ class ChatService:
                 }
             )
             return
-        cursor = max(0, int(last_event_id or 0))
-        while True:
-            async with state.condition:
-                pending = [(seq, payload) for seq, payload in state.events if seq > cursor]
-                done = state.done
-            for seq, payload in pending:
-                cursor = seq
-                yield f"id: {seq}\n{_sse(payload)}"
-            if done and not pending:
-                return
-            if not pending:
-                timed_out = False
-                async with state.condition:
-                    try:
-                        await asyncio.wait_for(state.condition.wait(), timeout=15)
-                    except TimeoutError:
-                        timed_out = True
-                if timed_out:
-                    yield ": ping\n\n"
+        async for item in self._log.tail(stream_id, max(0, int(last_event_id or 0))):
+            if item is None:
+                # 空闲心跳：公网反代会掐断长时间无数据的 SSE 连接
+                yield ": ping\n\n"
+                continue
+            seq, payload = item
+            yield f"id: {seq}\n{_sse(payload)}"
 
     async def _run_reply(
         self,
@@ -397,7 +406,7 @@ class ChatService:
         async def _notify_permission(permission: PermissionRequest) -> None:
             await queue.put(("permission", permission.to_event()))
 
-        broker = PermissionBroker(_notify_permission)
+        broker = PermissionBroker(self._decisions, _notify_permission)
         ctx_token = current_broker.set(broker)
         # 必须在创建后台任务之前设置：ContextVar 由任务继承，
         # 工具层要靠它拿到**同一个** MediaService 实例（任务存在实例里）
@@ -446,6 +455,21 @@ class ChatService:
         tool_calls = 0
         # 本轮真实 token 用量，从模型的 usage_metadata 累加
         turn_usage = TokenUsage()
+        # 上次检查「别的进程有没有取消我」的时刻。跨进程取消只能轮询共享标记，
+        # 限流到每秒一次：每条 token 都查一次 Redis，延迟和成本都不划算
+        last_cancel_check = 0.0
+
+        async def _cancelled_elsewhere() -> bool:
+            nonlocal last_cancel_check
+            now = time.monotonic()
+            if now - last_cancel_check < CANCEL_POLL_SEC:
+                return False
+            last_cancel_check = now
+            if not await self._log.is_cancelled(state.stream_id):
+                return False
+            logger.info("检测到跨进程取消 | stream=%s", state.stream_id)
+            state.cancelled = True
+            return True
 
         try:
             while True:
@@ -455,7 +479,12 @@ class ChatService:
                     # 采集/生图这类长工具调用期间没有 token；公网反代会把长时间
                     # 无数据的 SSE 连接掐断，这里定期发心跳保活（前端忽略该类型）
                     await state.emit({"type": "ping"})
+                    if await _cancelled_elsewhere():
+                        break
                     continue
+
+                if await _cancelled_elsewhere():
+                    break
 
                 if kind == "permission":
                     await state.emit(payload)
@@ -547,9 +576,16 @@ class ChatService:
             current_retry_stats.reset(retry_token)
             current_tool_budget.reset(budget_token)
             current_taint.reset(taint_token)
-            broker.cancel_all()
+            await broker.cancel_all()
             if not runner.done():
                 runner.cancel()
+
+        if state.cancelled:
+            # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史。
+            # 放在 failed/空回答判断之前——取消时 final_state 往往是 None，
+            # 走后面的分支会先报一条 MODEL_EMPTY_RESPONSE，等于把「用户主动停止」
+            # 说成「模型出错」
+            return
 
         if failed is not None:
             await state.emit({"type": "error", **failed, "trace_id": trace_id})
@@ -570,10 +606,6 @@ class ChatService:
                     "trace_id": trace_id,
                 }
             )
-            return
-
-        if state.cancelled:
-            # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史
             return
 
         # 拿不到真实用量（部分本地模型不返回 usage）就退回估算，
@@ -664,17 +696,6 @@ class ChatService:
         task = asyncio.create_task(coro)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
-
-    def _prune_streams(self) -> None:
-        """结束超过 10 分钟的流不再保留；同时限制总量，避免内存增长。"""
-        now = time.time()
-        for stream_id, state in list(self._streams.items()):
-            if state.done and now - state.updated_at > 600:
-                self._streams.pop(stream_id, None)
-        if len(self._streams) > 200:
-            oldest = sorted(self._streams.values(), key=lambda s: s.updated_at)
-            for state in oldest[: len(self._streams) - 200]:
-                self._streams.pop(state.stream_id, None)
 
     async def _ensure_graph(self) -> tuple[Any, str]:
         """首次调用时构图（含 tool calling 能力探测），之后复用。"""

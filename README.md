@@ -148,14 +148,21 @@ structured : START → agent(内部 JSON 决策循环) → END
 
 ### 2. 断线续传的 SSE 事件流
 
-`app/services/chat.py:133-203` · `app/api/routes/chat.py`
+`app/services/streams.py` · `app/services/chat.py` · `app/api/routes/chat.py`
 
 事件类型：`token` / `tool_call` / `tool_result` / `permission_request` / `end` / `error` / `ping`
 
 - 生成跑在 `asyncio.create_task` 里，与 HTTP 连接解耦
-- 事件带自增 `seq`，写进 `StreamState.events`；重连时从 `last_event_id` 之后重放
+- 事件带自增 `seq`，重连时从 `last_event_id` 之后重放
 - 15 秒无事件发心跳 `ping`——公网反代会掐断长时间无数据的连接
 - 用户点「停止」时取消任务，且**不把半截回答写进历史**
+
+状态放在 `EventLog` 接口后面，两套实现语义一致：`MemoryEventLog`（`asyncio.Condition`，零依赖）/ `RedisEventLog`（List 存事件 + Pub/Sub 唤醒）。`uvicorn --workers > 1` 时续传会落到别的进程上，那时只有共享存储救得回来。
+
+两个决定值得记一笔：
+
+- **用 List 而不是 Redis Stream**。游标就是列表下标，和 `Last-Event-ID` 一一对应，`LRANGE key cursor -1` 一次取完；换 `XADD/XRANGE` 得先把客户端传来的整数翻译成 `毫秒-序号` 的 stream id，多一层换算就多一处能错的地方。这里要的是「按序重放」，不是「消费组 + ACK」。
+- **Pub/Sub 只做唤醒，不做真相**。Pub/Sub 会丢消息（订阅前发布、断线期间发布），所以每次被唤醒都回 List 重读一遍。唤醒丢了也不致命，最坏退化成心跳间隔的轮询。
 
 ### 3. 默认拒绝的权限网关
 
@@ -167,11 +174,13 @@ structured : START → agent(内部 JSON 决策循环) → END
 工具 → require_permission()
      → ContextVar 取到本会话的 PermissionBroker
      → 生成 request_id，推 permission_request 事件
-     → await Future，等 POST /permissions/{id}/decision
+     → await channel.wait()，等 POST /permissions/{id}/decision
      → 120 秒无决策 → PermissionDenied
 ```
 
 设计原则只有一条：**失败方向必须是拒绝，不是放行**。超时、连接断开、未知 request_id、拿不到 broker（脚本直调工具）——全部收敛为不执行。
+
+待决请求不再是一张模块级 `dict`，而是 `DecisionChannel`：`LocalDecisionChannel`（进程内 Future）/ `RedisDecisionChannel`（key 存裁决 + Pub/Sub 通知）。原因是原来那张表只在单进程成立——多 worker 下前端那次 POST 大概率落到另一个进程，那个进程的 dict 里没有这条请求，于是 404，而真正在等的那台机器一直等到 120 秒超时，用户点了「允许」也没用。现在等待方先查 key 再订阅，覆盖「裁决比订阅先到」的竞态；订阅只是让延迟变低，真相永远是 key，所以 Pub/Sub 丢消息最多慢一秒，不会丢裁决。
 
 ### 4. 路径沙箱
 
@@ -703,7 +712,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 416 passed, 1 skipped
+uv run pytest                        # 443 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -711,10 +720,18 @@ uv run mypy app evals
 
 测试全部离线：用假图替换真实 Agent 图，不联网、不调模型。校验的是**事件协议、状态映射、安全边界**，不是模型能力。
 
+跨进程那两条路径（续传落到另一个进程、在另一个进程点停止）用替身 Redis 在 `test_streams.py` / `test_chat_sse.py` 里覆盖了；另外有一份**真进程**验证脚本，需要两个 uvicorn 实例和一份真 Redis：
+
+```bash
+uvicorn app.main:app --port 8001 & uvicorn app.main:app --port 8002 &
+python scripts/verify_multiprocess.py
+```
+
 覆盖重点：
 
-- `test_chat_sse.py` — 事件顺序、续传重放、中止不落库、摘要失败不丢历史
-- `test_permissions.py` — 超时拒绝、无 broker 拒绝、remember 语义
+- `test_chat_sse.py` — 事件顺序、续传重放、中止不落库、摘要失败不丢历史；含两条**跨 worker** 用例（续传落到另一个进程、在另一个进程点停止）
+- `test_streams.py` — `MemoryEventLog` / `RedisEventLog` 语义一致、`Last-Event-ID` 重放、append 每次续期、跨进程取消标记、裁决通道跨进程与「脏数据按拒绝处理」
+- `test_permissions.py` — 超时拒绝、无 broker 拒绝、remember 语义、裁决先于订阅到达
 - `test_security.py` — 路径穿越、软链接、白名单为空、跨盘符
 - `test_adapters.py` — 单源失败降级、超时、mock 标记
 - `test_tracing.py` — trace_id 生成、上下文嵌套、SSE 与图 config 的 id 一致性
@@ -740,7 +757,7 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 416 个离线测试（不联网、不调模型）
+tests/               # 443 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）
@@ -768,7 +785,7 @@ LICENSE              # MIT
 
 写在这里而不是藏着，因为它们都是有意的取舍：
 
-1. **单进程**。`ChatService._streams` 与权限请求注册表都在进程内，`uvicorn --workers > 1` 会让续传和权限回调打到别的进程。要横向扩展需换成 Redis Pub/Sub 或 Stream。
+1. **多进程只做到「能跑」，没做到「无感」**。事件流与权限裁决已经抽成 `EventLog` / `DecisionChannel` 两套接口，`SHARED_STATE=auto`（默认）在会话存 Redis 时自动切到 Redis 实现，`uvicorn --workers 2` 下续传与权限回调都能落到任意进程。剩下两条取舍：一是流状态有 TTL（1 小时），过期后无法续传，只能提示刷新会话——已完成的回答本身在会话存储里，不会丢；二是「用户点停止」靠生成端轮询共享标记（`CANCEL_POLL_SEC=1s`），跨进程时最多晚 1 秒生效，同进程则是立刻 `task.cancel()`。
 2. **媒体任务在内存**。进程重启后生图任务丢失，前端图片卡片无法重建。
 3. **无账号体系**。身份是前端 `localStorage` 生成的设备 UUID（`X-Device-ID`），可伪造。前端反代层有 Basic Auth（`WEB_AUTH_USER` / `WEB_AUTH_PASS`），但那只是「挡住路人」，不是多租户隔离。对外部署必须换成真实鉴权。
 4. **无 IP 级限流**。有会话级 token 预算闸（`MAX_TOKENS_PER_SESSION`），但同一 IP 可以无限建会话刷额度。生产环境需在网关层加。

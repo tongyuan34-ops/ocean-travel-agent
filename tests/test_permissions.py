@@ -2,6 +2,9 @@
 
 对应 SPEC 1.3 底线二、契约 2.4 的需确认动作清单，以及
 4.6 system 组「拿不到确认通道一律拒绝执行」。
+
+裁决不再经过 broker 上的同步方法，而是走 ``DecisionChannel``——
+多进程下那次 POST 可能落在任何一台机器上，所以测试也照着这条链路走。
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ import pytest
 
 from app.agent import permissions as perm_module
 from app.agent.permissions import (
+    Decision,
+    LocalDecisionChannel,
     PermissionBroker,
     PermissionDenied,
     current_broker,
@@ -20,6 +25,17 @@ from app.agent.permissions import (
 from app.agent.tools.system import write_file
 
 TIMEOUT_POLL = 0.01
+
+
+def _broker() -> tuple[PermissionBroker, LocalDecisionChannel, list]:
+    """造一对 broker / channel，并把收到的通知收集起来。"""
+    seen: list = []
+
+    async def notify(request) -> None:
+        seen.append(request)
+
+    channel = LocalDecisionChannel()
+    return PermissionBroker(channel, notify), channel, seen
 
 
 async def _start(broker: PermissionBroker, seen: list, **kwargs) -> asyncio.Task:
@@ -40,41 +56,26 @@ async def test_without_broker_refuses():
 
 
 async def test_user_denial_does_not_execute():
-    seen: list = []
-
-    async def notify(request) -> None:
-        seen.append(request)
-
-    broker = PermissionBroker(notify)
+    broker, channel, seen = _broker()
     task = await _start(broker, seen, action="write_file", detail={"path": "x"}, remember_key="k")
 
     assert not task.done()
-    assert broker.resolve(seen[0].request_id, granted=False) is True
+    assert await channel.decide(seen[0].request_id, Decision(granted=False)) is True
     with pytest.raises(PermissionDenied):
         await task
 
 
 async def test_grant_returns():
-    seen: list = []
-
-    async def notify(request) -> None:
-        seen.append(request)
-
-    broker = PermissionBroker(notify)
+    broker, channel, seen = _broker()
     task = await _start(broker, seen, action="delete_path", detail={"path": "x"})
-    assert broker.resolve(seen[0].request_id, granted=True) is True
+    assert await channel.decide(seen[0].request_id, Decision(granted=True)) is True
     await task  # 不抛异常即通过
 
 
 async def test_remember_skips_second_prompt():
-    seen: list = []
-
-    async def notify(request) -> None:
-        seen.append(request)
-
-    broker = PermissionBroker(notify)
+    broker, channel, seen = _broker()
     task = await _start(broker, seen, action="write_file", detail={}, remember_key="same")
-    broker.resolve(seen[0].request_id, granted=True, remember=True)
+    await channel.decide(seen[0].request_id, Decision(granted=True, remember=True))
     await task
 
     # 第二次同类请求不再通知用户，直接放行
@@ -83,36 +84,33 @@ async def test_remember_skips_second_prompt():
 
 
 async def test_timeout_is_treated_as_denial(monkeypatch):
-    seen: list = []
-
-    async def notify(request) -> None:
-        seen.append(request)
-
     monkeypatch.setattr(perm_module, "DECISION_TIMEOUT_SEC", 0.05)
-    broker = PermissionBroker(notify)
+    broker, _channel, _seen = _broker()
     with pytest.raises(PermissionDenied):
         await broker.request(action="set_wallpaper", detail={})
 
 
 async def test_unknown_request_id_not_resolved():
-    async def notify(request) -> None:
-        return None
-
-    broker = PermissionBroker(notify)
-    assert broker.resolve("not-a-real-id", granted=True) is False
+    _broker_obj, channel, _seen = _broker()
+    assert await channel.decide("not-a-real-id", Decision(granted=True)) is False
 
 
 async def test_cancel_all_denies_pending():
-    seen: list = []
-
-    async def notify(request) -> None:
-        seen.append(request)
-
-    broker = PermissionBroker(notify)
+    broker, _channel, seen = _broker()
     task = await _start(broker, seen, action="delete_path", detail={})
-    broker.cancel_all()
+    await broker.cancel_all()
     with pytest.raises(PermissionDenied):
         await task
+
+
+async def test_decision_survives_a_lost_wakeup():
+    """Pub/Sub 丢了消息也不能丢裁决：等待方回读 key 就能拿到。"""
+    channel = LocalDecisionChannel()
+    await channel.open("req-1")
+    # 裁决先到，等待方后到——这就是「消息比订阅先到」那个竞态
+    assert await channel.decide("req-1", Decision(granted=True)) is True
+    decision = await channel.wait("req-1", timeout=0.5)
+    assert decision is not None and decision.granted is True
 
 
 # ---------- 工具层：拒绝后绝不落盘 ----------

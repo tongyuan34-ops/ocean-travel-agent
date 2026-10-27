@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.permissions import build_decision_channel
 from app.api.routes import chat, media, memory, permissions, share, system, tools, trips
 from app.core.config import PROJECT_ROOT, load_settings
 from app.core.errors import register_exception_handlers
@@ -21,6 +22,7 @@ from app.media.service import build_media_service
 from app.media.uploads import UploadStore
 from app.services.chat import ChatService
 from app.services.profile import build_profile_service
+from app.services.streams import build_event_log
 from app.storage import build_session_store
 from app.version import __version__
 
@@ -43,12 +45,17 @@ def create_app() -> FastAPI:
         app.state.uploads = UploadStore(PROJECT_ROOT / "data" / "uploads")
         app.state.session_store = build_session_store(settings)
         app.state.profile = build_profile_service(settings)
+        # 事件流与权限裁决：单进程用内存，多进程用 Redis（见 app/services/streams.py）
+        app.state.event_log = build_event_log(settings)
+        app.state.decisions = build_decision_channel(settings)
         app.state.chat = ChatService(
             settings,
             app.state.session_store,
             app.state.media,
             app.state.profile,
             uploads=app.state.uploads,
+            event_log=app.state.event_log,
+            decision_channel=app.state.decisions,
         )
 
         # 启动时把不可用原因打出来，避免"配了但没生效"这类静默问题
@@ -67,6 +74,8 @@ def create_app() -> FastAPI:
         # 等待进行中的媒体任务收尾，并释放存储连接
         await app.state.media.aclose()
         await app.state.profile.aclose()
+        await app.state.event_log.aclose()
+        await app.state.decisions.aclose()
         await app.state.session_store.aclose()
 
     app = FastAPI(

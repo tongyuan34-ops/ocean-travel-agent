@@ -22,7 +22,13 @@ import yaml
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.guard import TaintState, current_taint
-from app.agent.permissions import PermissionBroker, PermissionRequest, current_broker
+from app.agent.permissions import (
+    Decision,
+    LocalDecisionChannel,
+    PermissionBroker,
+    PermissionRequest,
+    current_broker,
+)
 from app.agent.prompts import build_system_prompt
 from app.agent.resilience import ToolBudget, current_tool_budget, is_blocked_result
 from app.core.context import compose_messages
@@ -259,10 +265,14 @@ async def run_graph(
     等于在测「一个没有任何规则的裸模型」，跟线上跑的完全是两回事。
     """
 
-    async def _deny(permission: PermissionRequest) -> None:
-        broker.resolve(permission.request_id, False)
+    channel = LocalDecisionChannel()
 
-    broker = PermissionBroker(_deny)
+    async def _deny(permission: PermissionRequest) -> None:
+        # 通知即裁决：评测里没有真人，所以收到请求的那一刻就拒绝，
+        # 走的是和线上完全相同的 DecisionChannel 链路，而不是直接改本地状态
+        await channel.decide(permission.request_id, Decision(granted=False))
+
+    broker = PermissionBroker(channel, _deny)
     token = current_broker.set(broker)
     # 评测必须和线上走同一套预算，否则测出来的工具调用次数不代表真实行为
     resolved_budget = budget or ToolBudget()
@@ -300,7 +310,7 @@ async def run_graph(
         current_broker.reset(token)
         current_tool_budget.reset(budget_token)
         current_taint.reset(taint_token)
-        broker.cancel_all()
+        await broker.cancel_all()
 
     executed, _ = tool_outcomes(final_state)
     return RunOutcome(

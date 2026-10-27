@@ -15,11 +15,13 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from app.agent.graph import SYSTEM_PROMPT
-from app.agent.permissions import find_broker
+from app.agent.permissions import Decision, DecisionChannel, LocalDecisionChannel
 from app.core.config import Settings
 from app.services import chat as chat_module
 from app.services.chat import ChatService
+from app.services.streams import RedisEventLog
 from app.storage import MemorySessionStore
+from fake_redis import FakeRedis
 
 
 class _Chunk:
@@ -55,11 +57,33 @@ class ExplodingGraph:
         yield {}  # pragma: no cover - 让函数成为异步生成器
 
 
-def _service(monkeypatch, graph: Any, mode: str = "native") -> ChatService:
+def _service(
+    monkeypatch,
+    graph: Any,
+    mode: str = "native",
+    channel: DecisionChannel | None = None,
+    event_log: Any = None,
+) -> ChatService:
     monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (graph, mode))
     from app.core.config import load_settings
 
-    return ChatService(load_settings(), MemorySessionStore())
+    return ChatService(
+        load_settings(),
+        MemorySessionStore(),
+        decision_channel=channel,
+        event_log=event_log,
+    )
+
+
+def _other_worker(event_log: Any) -> ChatService:
+    """另起一个 worker，**不**碰 ``build_agent_graph``。
+
+    它只订阅/取消，永远不跑图；如果也去 monkeypatch，就会把前一个 worker
+    的图覆盖掉——那样测出来的「跨进程」其实是同一个空图，用例会假装通过。
+    """
+    from app.core.config import load_settings
+
+    return ChatService(load_settings(), MemorySessionStore(), event_log=event_log)
 
 
 async def _frames(service: ChatService, session_id: str, text: str) -> list[dict]:
@@ -119,12 +143,85 @@ async def test_cancel_stream_is_not_persisted(monkeypatch):
     )
     session = await service.create_session()
     state = await service.start_reply(session.id, "问题")
-    service.cancel_stream(state.stream_id)
+    assert await service.cancel_stream(state.stream_id) is True
     with contextlib.suppress(asyncio.CancelledError):
         await state.task
 
     stored = await service.get_session(session.id)
     assert all(item.role != "assistant" for item in stored.messages)
+
+
+class SlowGraph:
+    """每产一个 token 前等一下，用来制造「生成进行中」的窗口。"""
+
+    def __init__(self, chunks: list[str], delay: float = 0.02) -> None:
+        self._chunks = chunks
+        self._delay = delay
+
+    async def astream_events(
+        self, _input: Any, version: str | None = None, config: Any = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        for text in self._chunks:
+            await asyncio.sleep(self._delay)
+            yield {"event": "on_chat_model_stream", "data": {"chunk": _Chunk(text)}}
+        yield _final_message("".join(self._chunks))
+
+
+async def test_resume_lands_on_another_worker(monkeypatch):
+    """多 worker 的核心场景：生成在 A，断线后重连落到 B，靠 Last-Event-ID 接着推。
+
+    两个 service 各持一个 EventLog 实例、共用同一份 Redis——这正是
+    ``uvicorn --workers 2`` 下两个进程看到的世界。B 从来看不到 A 的内存，
+    能续上完全靠共享存储。
+    """
+    client = FakeRedis()
+    script = [
+        {"event": "on_chat_model_stream", "data": {"chunk": _Chunk("一")}},
+        {"event": "on_chat_model_stream", "data": {"chunk": _Chunk("二")}},
+        {"event": "on_chat_model_stream", "data": {"chunk": _Chunk("三")}},
+        _final_message("一二三"),
+    ]
+    worker_a = _service(monkeypatch, FakeGraph(script), event_log=RedisEventLog(client))
+    worker_b = _other_worker(RedisEventLog(client))
+
+    session = await worker_a.create_session()
+    state = await worker_a.start_reply(session.id, "问题")
+    await state.task
+
+    # 客户端只收到过第 1 个事件，重连时带上 Last-Event-ID=1
+    resumed = [frame async for frame in worker_b.subscribe(state.stream_id, 1)]
+    payloads = [json.loads(frame.split("data: ", 1)[1]) for frame in resumed if "data: " in frame]
+    assert _types(payloads) == ["token", "token", "end"]
+
+
+async def test_cancel_from_another_worker_stops_generation(monkeypatch):
+    """用户在 B 点停止，生成在 A：A 没有那条 Task，只能靠共享标记轮询退出。
+
+    这是 ``cancel_stream`` 里「先写标记再 cancel 本地任务」两半中的后一半——
+    只测同进程取消的话，这条路径永远不会被执行。
+    """
+    monkeypatch.setattr(chat_module, "CANCEL_POLL_SEC", 0.01)
+    client = FakeRedis()
+    worker_a = _service(
+        monkeypatch, SlowGraph(["一", "二", "三", "四"]), event_log=RedisEventLog(client)
+    )
+    worker_b = _other_worker(RedisEventLog(client))
+
+    session = await worker_a.create_session()
+    state = await worker_a.start_reply(session.id, "问题")
+    # 等 A 真的开始生成，再让 B 去取消
+    for _ in range(200):
+        if client.lists.get(f"chat:stream:{state.stream_id}:events"):
+            break
+        await asyncio.sleep(0.01)
+
+    assert await worker_b.cancel_stream(state.stream_id) is True
+    await asyncio.wait_for(state.task, timeout=5)
+
+    stored = await worker_a.get_session(session.id)
+    assert all(item.role != "assistant" for item in stored.messages), "取消后不该落库半截回答"
+    meta = await worker_a._log.meta(state.stream_id)
+    assert meta is not None and meta.cancelled is True
 
 
 async def test_disconnect_does_not_cancel_generation(monkeypatch):
@@ -235,7 +332,12 @@ async def test_tool_error_event(monkeypatch):
 
 
 async def test_permission_request_then_granted(monkeypatch):
-    """有副作用的操作必须先出现在流里等用户决策，拿到放行后才继续。"""
+    """有副作用的操作必须先出现在流里等用户决策，拿到放行后才继续。
+
+    裁决走的是注入的 `DecisionChannel`，不再是「按 request_id 找一个 broker」——
+    多进程下那次 POST 可能落在任何一台机器上，进程内的 dict 找不到它。
+    """
+    channel = LocalDecisionChannel()
     service = _service(
         monkeypatch,
         FakeGraph(
@@ -249,6 +351,7 @@ async def test_permission_request_then_granted(monkeypatch):
                 _final_message("写好了"),
             ]
         ),
+        channel=channel,
     )
     session = await service.create_session()
 
@@ -263,9 +366,8 @@ async def test_permission_request_then_granted(monkeypatch):
             saw_request = True
             assert payload["action"] == "write_file"
             assert payload["detail"]["path"] == "x.txt"
-            broker = find_broker(payload["request_id"])
-            assert broker is not None, "permission_request 必须能被裁决接口找到"
-            assert broker.resolve(payload["request_id"], granted=True) is True
+            decided = await channel.decide(payload["request_id"], Decision(granted=True))
+            assert decided is True, "permission_request 必须能被裁决接口命中"
 
     assert saw_request
     assert _types(frames)[-1] == "end"

@@ -108,9 +108,27 @@ cases:
 
   - id: trip-budget-xiamen
     category: multi_tool
-    input: 两个人去厦门玩四天大概要花多少钱？
+    # 原输入「两个人去厦门玩四天大概要花多少钱」一个金额都没有，
+    # 而 estimate_budget 只做算术、不编价格 —— 模型要调它就得先自己造出机票酒店价，
+    # 那正好违反核心规则第 2 条。三轮评测里模型都绕开它去查真实交通与住宿，
+    # 判定失败。这是**产品底线与用例期望的直接冲突**，不是模型能力问题。
+    # 现在把金额写进输入：测的是「给了明细会不会算对」，而不是「会不会编价格」。
+    # 「没有金额时该不该编」另有 budget-without-amounts 反向用例兜住。
+    input: 两个人去厦门玩四天，机票 2400、酒店 1800、门票和吃饭大概 1200，帮我算一下总共多少、人均多少。
     expect_tools: [estimate_budget]
-    rubric: 应给出预算区间与构成，并说明估算口径。
+    must_mention: [人均]
+    rubric: 应算出合计 5400 元、人均 2700 元，并说明金额来自用户提供。
+
+  - id: budget-without-amounts
+    category: multi_tool
+    # 反向用例，和上一条配对。没有金额时**不该**调 estimate_budget：
+    # 「不编造价格」这条底线会主动砍掉一类看起来很好用的工具，预算估算最典型。
+    # 早先把这条写成正向期望（见 trip-budget-xiamen 的注释），
+    # 等于逼模型在「调对工具」和「不编价格」之间二选一。
+    input: 两个人去厦门玩四天大概要花多少钱？
+    forbid_tools: [estimate_budget]
+    must_mention_any: [以平台为准, 以实价为准, 无法给出, 拿不到, 构成]
+    rubric: 应说明拿不到实时价格、列出花费构成、并提醒以平台实价为准。给出标注了口径的区间（如「两人四天约 2000–4500 元，不含大交通」）是正确做法，不算编造；把数字说成查到的结果才扣分。
 
   - id: stay-sanya
     category: multi_tool
@@ -126,7 +144,13 @@ cases:
 
   - id: optimize-chengdu-day1
     category: multi_tool
-    input: 帮我优化一下第一天在成都的路线顺序。
+    # 原输入「帮我优化一下第一天在成都的路线顺序」没给任何地点，
+    # 而 optimize_day_route 至少要两个地点才排得动。模型不调工具、反问一句，
+    # 三方都没错：模型没错（没地点怎么排）、工具没错（它确实需要地点）、
+    # 用例错了——它假设模型会自己先 search_poi 找几个景点。
+    # 「用户省略了必要信息」这条洞见留在 evals/BASELINE.md 里，
+    # 但一条永远不可能通过的用例会让整份基线失去可信度，所以补全输入。
+    input: 第一天打算去宽窄巷子、武侯祠、锦里，帮我排一下顺序，少走回头路。
     expect_tools: [optimize_day_route]
     rubric: 应说明重排依据（距离/耗时），并给出调整后的顺序。
 

@@ -402,6 +402,20 @@ def test_render_markdown_lists_failures():
     assert "误调" in report
 
 
+def test_judge_prompt_distinguishes_ranges_from_fabrication():
+    """评审 prompt 必须区分「说成事实的确定数字」和「标注口径的区间」。
+
+    同一个盲区出现过两次：第一次是评审看不到工具轨迹，把查回来的温度判成编造；
+    第二次是规则太钝——「轨迹为空时出现具体数字必须重罚」把
+    「查不到实时价格，两人四天大约 2000-4500 元，以平台实价为准」也罚了。
+    后者恰恰是「不编造」底线要求的行为。
+    """
+    from evals.runner import _JUDGE_PROMPT
+
+    assert "区间" in _JUDGE_PROMPT
+    assert "不要扣分" in _JUDGE_PROMPT
+
+
 # ---------- 端到端：离线自测 ----------
 
 

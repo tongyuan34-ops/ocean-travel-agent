@@ -215,9 +215,11 @@ async def run(args: argparse.Namespace) -> int:
     summary["self_test"] = bool(args.self_test)
 
     report = render_markdown(summary, results, label=label)
+    # newline="\n"：Windows 上默认写 CRLF，而 .gitattributes 强制 eol=lf，
+    # 于是每次跑批都会在 diff 里留下一整份「只改了换行符」的噪音。
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(report, encoding="utf-8")
+        Path(args.out).write_text(report, encoding="utf-8", newline="\n")
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(
@@ -227,6 +229,7 @@ async def run(args: argparse.Namespace) -> int:
                 indent=2,
             ),
             encoding="utf-8",
+            newline="\n",
         )
 
     print(report)

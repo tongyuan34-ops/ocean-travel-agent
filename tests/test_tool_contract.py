@@ -104,3 +104,41 @@ def test_wallpaper_takes_path_keyword() -> None:
     params = inspect.signature(func).parameters
     assert "path" in params
     assert "image_path" not in params
+
+
+# 三个工具都自称「路线」，模型只能靠 description 分辨。
+# 只写「我做什么」不够——40 条评测里 `trip-chongqing-2d` 三轮都选了
+# `optimize_day_route`，因为「顺路」这个词只出现在它的描述里；
+# `plan-then-optimize` 连「先规划三天行程」这一步都漏了。
+# 有效的是「什么时候**不要**用我」，并且点名另一个工具。
+_ROUTE_TOOL_NAMES = {
+    "plan_trip": ("plan_route", "optimize_day_route"),
+    "plan_route": ("plan_trip", "optimize_day_route"),
+    "optimize_day_route": ("plan_trip",),
+}
+
+
+@pytest.mark.parametrize("tool_name", sorted(_ROUTE_TOOL_NAMES))
+def test_route_tools_disambiguate_against_each_other(tool_name: str) -> None:
+    from app.agent.tools import ALL_TOOLS
+
+    tool = next(item for item in ALL_TOOLS if item.name == tool_name)
+    description = tool.description or ""
+    assert "不要" in description, f"{tool_name} 没写「什么时候不要用我」，模型会误选"
+    for other in _ROUTE_TOOL_NAMES[tool_name]:
+        assert other in description, f"{tool_name} 的描述里没点名 {other}，模型无从比较"
+
+
+def test_budget_tool_refuses_to_guess_prices() -> None:
+    """`estimate_budget` 只做算术。
+
+    早先用例「两个人去厦门四天大概多少钱」期望它被调用，但它要跑起来就得先编出
+    机票酒店价——和「不编造价格」的底线正面冲突。现在把这条写进 description，
+    并改成反向用例 `budget-without-amounts`。
+    """
+    from app.agent.tools import ALL_TOOLS
+
+    tool = next(item for item in ALL_TOOLS if item.name == "estimate_budget")
+    description = tool.description or ""
+    assert "不要调用本工具" in description
+    assert "编造" in description or "编出" in description

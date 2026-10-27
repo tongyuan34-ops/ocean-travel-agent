@@ -390,7 +390,7 @@ SSE 有个决定性的好处：断线重连时浏览器自动带 `Last-Event-ID`
 ### 评测不卡在 CI 上
 
 CI 只跑 `evals.run --self-test`（脚本化模型，验证框架本身），不跑真实模型。
-因为 40 条用例的单次通过率波动约 ±10 个百分点（见 [`evals/BASELINE.md`](evals/BASELINE.md)），
+因为 41 条用例的单次通过率波动约 ±7.5 个百分点（见 [`evals/BASELINE.md`](evals/BASELINE.md)），
 一个会随机的数字卡在每次提交上，只会训练出「多跑几次直到绿」的习惯。
 真实评测是改动前后各跑一次、只看差值。
 
@@ -560,7 +560,7 @@ uv run python -m evals.run --out evals/report.md --json evals/report.json
 uv run python -m evals.run --fail-under 0.8
 ```
 
-用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 40 条，每条断言三到四件事，再由 LLM-as-judge 打分：
+用例集 [`evals/cases.yaml`](evals/cases.yaml) 共 41 条，每条断言三到四件事，再由 LLM-as-judge 打分：
 
 | 断言 | 抓什么 |
 |---|---|
@@ -597,6 +597,40 @@ A → B 改的是提示词，B → C 只改了评测口径（只可能让结果�
 按分类拆开才看得出改动打在哪：`tool_selection` 5 → 6 → 7、`permission` 2 → 2 → 3，
 这两个是单调的，因为改动直接对应具体用例；其余分类的波动都在噪声范围内。
 
+### 41 条时代：把「选错工具」修成工具设计问题
+
+三轮全挂的用例里有两条是「模型总是选错工具」：
+
+| 用例 | 期望 | 三轮实际 |
+|---|---|---|
+| `trip-chongqing-2d`「重庆两天怎么玩比较顺路」 | `plan_trip` | `search_poi ×2 → optimize_day_route ×2` |
+| `plan-then-optimize`「先规划三天，再优化第一天」 | `plan_trip → optimize_day_route` | 漏掉 `plan_trip` |
+
+根因不在模型，在三个工具的描述——它们都自称「路线」，而且只写了「我做什么」：
+
+```
+plan_route      规划两地之间的路线
+plan_trip       把多个目的地按顺序串成一条行程线路
+optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
+```
+
+模型只能在三个同义词之间靠词面重合猜，而「顺路」恰好只出现在 `optimize_day_route` 里。
+改法是给每个工具写死「什么时候**不要**用我」并点名另一个，例如 `optimize_day_route`：
+
+> 只在「地点定了、顺序没定」时用它。用户还在问「N 天怎么玩」时**不要**用它——
+> 那时应该先用 `plan_trip` 出整体线路，再回来优化其中某一天。
+
+顺带把 `plan_trip` 的 `origin` / `stops` 放宽成可省略：只给 `city + days` 就按高德 POI
+热度自动挑候选景点，并明确标注「这些是候选，可按偏好替换」。「重庆两天怎么玩」里
+用户一个地点都没给，原实现直接回「请提供出发地和至少一个目的地」——等于把能答的问题推回给用户。
+
+结果：四条目标用例 **0/12 → 12/12**，工具序列也对上了。总数只从 29 涨到 33（三轮中位数），
+因为同期文件类任务在抖（`list_dir` 之后不读文件，三轮 4/15）——**单看总数说明不了什么，
+看确定性用例才有意义**。
+
+这一轮 `app/agent/prompts.py` **一个字没改**。工具描述是模型每次都在读、离决策最近的地方；
+提示词是第二现场，而上一轮的教训已经证明它会和工具调用抢方向盘。
+
 比数字更值得看的是**评测自己也会错**，这一轮抓到三处：
 
 - **`must_mention` 要求了工具入参已经证明的东西**。模型调了 `get_weather(city=上海)`，
@@ -614,10 +648,18 @@ A → B 改的是提示词，B → C 只改了评测口径（只可能让结果�
 教训是人格提示词里的每一句都在和工具调用抢方向盘，现在这条钉在
 `tests/test_prompts.py` 里。
 
-五条**三轮全挂**的确定性失败（`plan_trip` 与 `plan_route` 边界不清、`estimate_budget`
-在「大概多少钱」上无解、注入内容「安全地忽略却不报告」等）逐条拆解见
-[`evals/BASELINE.md`](evals/BASELINE.md)，用例写法见 [`evals/README.md`](evals/README.md)。
-离线自测（13 条带剧本用例）当前 13/13。
+五条**三轮全挂**的确定性失败已拆解三条（工具描述边界不清、`estimate_budget` 在
+「大概多少钱」上无解、`optimize_day_route` 缺必要入参），另两条
+（检索类任务 90 秒整轮超时、注入内容「安全地忽略却不报告」）仍未修。
+逐条拆解见 [`evals/BASELINE.md`](evals/BASELINE.md)，用例写法见
+[`evals/README.md`](evals/README.md)。离线自测（13 条带剧本用例）当前 13/13。
+
+还有一处值得单独提：`budget-without-amounts` 第一次跑**断言全过却被打了 2 分**——
+回答是「实时价格查不到，两人四天大约 2000–4500 元，以平台实价为准」，
+评审却按「轨迹为空时出现具体数字必须重罚」判了编造。规则太钝，分不清
+「门票 118 元（说成事实）」和「区间 + 口径 + 不装成查到的」。改完单条复跑 2 分 → 5 分。
+**同一个评审盲区换着形态出现了两次**（先是有轨迹没给评审看，后是规则太钝），
+所以评审 prompt 和用例一样需要回归验证。
 
 ### 一次提示词归因实验
 
@@ -654,7 +696,7 @@ A → B 改的是提示词，B → C 只改了评测口径（只可能让结果�
 ## 测试
 
 ```bash
-uv run pytest                        # 396 passed, 1 skipped
+uv run pytest                        # 406 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -691,8 +733,8 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 396 个离线测试（不联网、不调模型）
-evals/               # 40 条评测用例 + 判分框架（验模型表现，与 tests 分工）
+tests/               # 406 个离线测试（不联网、不调模型）
+evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）
 docs/screenshots/    # README 首屏截图（`scripts/shot.js` 无头浏览器实拍）

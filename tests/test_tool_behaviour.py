@@ -412,6 +412,110 @@ async def test_trip_all_unresolved_is_honest(monkeypatch):
     assert "第 1 段" not in out
 
 
+def _poi(name: str, location: str) -> dict[str, str]:
+    return {"name": name, "location": location, "type": "风景名胜;风景名胜"}
+
+
+async def test_trip_auto_picks_stops_from_city_and_days(monkeypatch):
+    """「重庆两天怎么玩」里用户一个地点都没给，工具不能只会反问。
+
+    早先直接回「请提供出发地和至少一个目的地」——把一个能答的问题推回给用户。
+    现在只给 city + days 就按城市热度挑点，并且**明确标注是候选**，
+    不能假装是用户点名要去的。
+    """
+    fake = _install(
+        monkeypatch,
+        FakeAmap(
+            routes={
+                "/v3/place/text": {
+                    "status": "1",
+                    "pois": [
+                        _poi("洪崖洞民俗风貌区", "106.579,29.562"),
+                        _poi("重庆市人民大礼堂", "106.553,29.561"),
+                        _poi("重庆中国三峡博物馆", "106.550,29.562"),
+                        _poi("重庆十八梯传统风貌区", "106.573,29.551"),
+                        _poi("不该被选中", "106.000,29.000"),
+                    ],
+                },
+                "/v3/direction/driving": {
+                    "status": "1",
+                    "route": {"paths": [{"distance": "3400", "duration": "720"}]},
+                },
+            }
+        ),
+    )
+    out = await plan_trip.ainvoke({"city": "重庆", "days": 2})
+
+    # 2 天 → 每天 2 个点，第 5 个不该出现
+    params = fake.params_for("/v3/place/text")[0]
+    assert params["offset"] == "4"
+    assert params["sortrule"] == "weight"
+    assert "不该被选中" not in out
+    assert "候选景点" in out, "自动选的点必须标注成候选，不能冒充用户指定"
+
+    # 没给出发地 → 以第一个点为起点，不凭空多算一段
+    assert out.splitlines()[0].startswith("行程串联（洪崖洞民俗风貌区 出发")
+    assert out.count("第 ") == 3
+
+
+async def test_trip_auto_stops_skip_geocoding(monkeypatch):
+    """POI 检索已经带了坐标，再逐个地理编码等于白花 N 次网络往返。"""
+    fake = _install(
+        monkeypatch,
+        FakeAmap(
+            routes={
+                "/v3/place/text": {
+                    "status": "1",
+                    "pois": [
+                        _poi("甲景点", "106.1,29.1"),
+                        _poi("乙景点", "106.2,29.2"),
+                        _poi("丙景点", "106.3,29.3"),
+                    ],
+                },
+                "/v3/direction/driving": {
+                    "status": "1",
+                    "route": {"paths": [{"distance": "5000", "duration": "900"}]},
+                },
+            }
+        ),
+    )
+    await plan_trip.ainvoke({"city": "重庆", "days": 2})
+    assert fake.params_for(_GEOCODE) == [], "自动选点时不应再发地理编码请求"
+
+
+async def test_trip_without_origin_starts_from_first_stop(monkeypatch):
+    """没说从哪出发时以第一个目的地为起点；拿城市中心当起点会凭空多一段里程。"""
+    _install(
+        monkeypatch,
+        FakeAmap(
+            geocodes={"甲地": _geo("106.1,29.1", "甲地"), "乙地": _geo("106.2,29.2", "乙地")},
+            routes={
+                "/v3/direction/driving": {
+                    "status": "1",
+                    "route": {"paths": [{"distance": "5000", "duration": "900"}]},
+                }
+            },
+        ),
+    )
+    out = await plan_trip.ainvoke({"stops": ["甲地", "乙地"]})
+    assert "甲地 出发" in out
+    assert out.count("第 ") == 1
+    assert "第 1 段　甲地 → 乙地" in out
+
+
+async def test_trip_asks_for_days_when_nothing_to_go_on(monkeypatch):
+    _install(monkeypatch, FakeAmap())
+    out = await plan_trip.ainvoke({})
+    assert "city" in out and "days" in out
+
+
+async def test_trip_auto_pick_failure_points_at_search_poi(monkeypatch):
+    """自动选点失败不能只说「找不到」，要给出下一步该干什么。"""
+    _install(monkeypatch, FakeAmap(routes={"/v3/place/text": {"status": "1", "pois": []}}))
+    out = await plan_trip.ainvoke({"city": "重庆", "days": 2})
+    assert "search_poi" in out
+
+
 # ==================== stay：酒店 ====================
 
 

@@ -740,13 +740,33 @@ e) 上下文预算：MAX_CONTEXT_TOKENS 默认 4096；超出时滚动摘要压�
 - fetch_url(url)                           按 URL 抓正文（web_fetch）
 
 **plan 组（确定性计算，输入必须来自真实数据）**
-- estimate_budget(items, budget_total, people)：预算分项小计、占比、余额或超支、人均。纯算术
+- estimate_budget(items, budget_total, people)：预算分项小计、占比、余额或超支、人均。纯算术。
+  **一个金额都没有时不要调用它**——那要先自己编出机票酒店价，与底线二冲突；
+  此时应说明拿不到实时价格、列出花费构成、提醒以平台实价为准
 - optimize_day_route(city, places, mode, start)：单日多点最近邻排序 + 真实里程与在途耗时，
-  在途超过 150 分钟时提示行程过满
+  在途超过 150 分钟时提示行程过满。**只用于「地点已定、顺序未定」**，
+  多天行程应先走 plan_trip
 - plan_trip(origin, stops, city, days, mode)：多目的地串联，**逐段**给出真实里程与耗时并汇总，
   按天数判断节奏是否合理；顺序明显绕路时给出「可省多少里程」的提示；
   每个目的地生成高德手机版导航 scheme（lat / lon 为具名参数，无坐标顺序歧义）。
+  `origin` / `stops` **均可省略**：只给 `city + days` 时按城市热度自动挑 `days × 2`
+  个候选景点（上限 8）并在结果里标注「候选，可按偏好替换」；`origin` 省略时以第一个
+  目的地为起点，避免凭空多算一段里程。
   **不输出 uri.amap.com/navigation 网页链接**——其坐标顺序与 marker 接口相反且未实测确认
+
+**三个「路线」工具的分工（描述里必须互相点名）**
+
+| 工具 | 用于 | 不要用于 |
+|---|---|---|
+| `plan_trip` | 跨天、多目的地的整体串联 | 只问两点怎么走、只给一天排顺序 |
+| `plan_route` | 两个地点之间的一段路 | 串多天行程、给多个点排顺序 |
+| `optimize_day_route` | 地点已定、只差顺序的单日行程 | 用户还在问「N 天怎么玩」 |
+
+三个工具的描述都写死了「什么时候**不要**用我」并点名另一个工具。
+只写「我做什么」不够——模型在三个同义词之间只能靠排除法选，
+40 条评测里 `trip-chongqing-2d` 三轮都误选了 `optimize_day_route`。
+`tests/test_tool_contract.py::test_route_tools_disambiguate_against_each_other` 钉住这条。
+
 - recommend_stay(city, area, checkin, checkout, adults, rooms, budget_per_night, room_type, star_rating)：
   用高德 POI（types=100000 住宿服务）检索**具体酒店**，按预算推断星级后用 type 字段筛选，
   输出逐家的名称/星级/地址/电话/坐标 + 高德 URI API 地图链接（逐家可点开）。

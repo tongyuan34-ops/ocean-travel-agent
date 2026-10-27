@@ -157,7 +157,13 @@ async def search_poi(city: str, keyword: str) -> str:
 
 @tool
 async def plan_route(origin: str, destination: str, mode: str = "driving", city: str = "") -> str:
-    """规划两地之间的路线。
+    """只计算**两个地点之间的一段路程**（点对点）：距离、耗时与导航入口。
+
+    用于「A 到 B 怎么走」「开车要多久」「打车大概多远」这类单段问题。
+
+    不要用它串多天行程或多段动线——那是 plan_trip 的活；
+    也不要用它给一天里的多个点排顺序——那是 optimize_day_route 的活。
+    它一次只看一段路，看不到全局。
 
     origin / destination 传地名，如「亚龙湾国家旅游度假区」「蜈支洲岛码头」；
     mode 传 driving（驾车）、walking（步行）或 bicycling（骑行）；

@@ -17,7 +17,14 @@ from typing import Any
 
 import pytest
 
-from app.agent.tools.info import _name_matches, get_weather, plan_route, search_poi
+from app.agent.tools.info import (
+    _city_matches,
+    _geocode,
+    _name_matches,
+    get_weather,
+    plan_route,
+    search_poi,
+)
 from app.agent.tools.plan import estimate_budget, optimize_day_route
 from app.agent.tools.stay import recommend_stay
 from app.agent.tools.transport import recommend_transport
@@ -190,7 +197,6 @@ async def test_geocode_rejects_mismatched_resolution(monkeypatch):
         monkeypatch,
         FakeAmap(geocodes={"不存在的城市xyz": _geo("116.4,39.9", "北京市朝阳区", "北京市")}),
     )
-    from app.agent.tools.info import _geocode
 
     assert await _geocode("不存在的城市xyz") is None
 
@@ -201,10 +207,56 @@ async def test_geocode_passes_city_hint_to_upstream(monkeypatch):
         monkeypatch,
         FakeAmap(geocodes={"三亚市区": _geo("109.5,18.2", "海南省三亚市三亚市区")}),
     )
-    from app.agent.tools.info import _geocode
 
     assert await _geocode("三亚市区", "三亚") is not None
     assert fake.params_for(_GEOCODE)[0]["city"] == "三亚"
+
+
+async def test_geocode_rejects_right_name_wrong_city(monkeypatch):
+    """名字对上了、城市不对，同样必须拒绝。
+
+    实测（2026-10）高德的 city 只是提示不是过滤：
+    「南山一棵树观景台」带 city=重庆 会解析到**深圳市南山区**，
+    「长江索道」到江西萍乡，「李子坝轻轨站」到广东肇庆。
+    `_name_matches` 拦不住——输入的「南山」「索道」确实出现在结果里。
+    真跑时算出了「磁器口 → 南山一棵树 1407 公里」，看起来有据可查，起点却在深圳。
+    """
+    _install(
+        monkeypatch,
+        FakeAmap(
+            geocodes={
+                "南山一棵树观景台": _geo(
+                    "113.946447,22.558462", "广东省深圳市南山区观景台", "深圳市"
+                )
+            }
+        ),
+    )
+
+    assert await _geocode("南山一棵树观景台", "重庆") is None
+    # 不给城市提示时无从判断，仍然放行（由 _name_matches 把关）
+    assert await _geocode("南山一棵树观景台") is not None
+
+
+@pytest.mark.parametrize(
+    ("hint", "resolved", "expected"),
+    [
+        # 直辖市带不带「市」都算同一个城市
+        ("重庆", "重庆市", True),
+        ("重庆市", "重庆", True),
+        # 同一城市不同写法
+        ("三亚", "三亚市", True),
+        # 这是要拦的那种
+        ("重庆", "深圳市", False),
+        ("重庆", "萍乡市", False),
+        # 省名兜底：高德个别返回不带 city，只给 province
+        ("重庆", "重庆市", True),
+        # 拿不到城市信息就不判死刑
+        ("重庆", "", True),
+        ("", "深圳市", True),
+    ],
+)
+def test_city_matches(hint: str, resolved: str, expected: bool):
+    assert _city_matches(hint, resolved) is expected
 
 
 async def test_plan_route_without_key_is_not_enabled(monkeypatch):
@@ -507,6 +559,38 @@ async def test_trip_asks_for_days_when_nothing_to_go_on(monkeypatch):
     _install(monkeypatch, FakeAmap())
     out = await plan_trip.ainvoke({})
     assert "city" in out and "days" in out
+
+
+async def test_trip_reports_wrong_city_place_as_unresolved(monkeypatch):
+    """名字对上、城市不对的地点必须报「解析失败」，不能算出跨省里程。
+
+    真跑时这条链算出过「磁器口 → 南山一棵树 1407 公里」：高德把
+    「南山一棵树观景台」解析到了深圳南山区。提示也要给得可执行——
+    这类失败几乎都是重名，带上城市名重试即可，不必回头问用户。
+    """
+    _install(
+        monkeypatch,
+        FakeAmap(
+            geocodes={
+                "磁器口古镇": _geo("106.44,29.58", "重庆市沙坪坝区磁器口古镇", "重庆市"),
+                "洪崖洞民俗风貌区": _geo("106.57,29.56", "重庆市渝中区洪崖洞", "重庆市"),
+                "南山一棵树观景台": _geo("113.94,22.55", "广东省深圳市南山区观景台", "深圳市"),
+            },
+            routes={
+                "/v3/direction/driving": {
+                    "status": "1",
+                    "route": {"paths": [{"distance": "9000", "duration": "1200"}]},
+                }
+            },
+        ),
+    )
+    out = await plan_trip.ainvoke(
+        {"city": "重庆", "stops": ["磁器口古镇", "洪崖洞民俗风貌区", "南山一棵树观景台"]}
+    )
+    assert "未纳入线路" in out
+    assert "南山一棵树观景台" in out
+    assert "重庆长江索道" in out, "提示要给出可照做的写法"
+    assert "1407" not in out
 
 
 async def test_trip_auto_pick_failure_points_at_search_poi(monkeypatch):

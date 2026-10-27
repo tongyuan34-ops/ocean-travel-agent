@@ -194,7 +194,10 @@ async def optimize_day_route(
     if anchor is not None:
         lines.append(f"（已按出发点「{start.strip()}」起算顺序）")
     if unresolved:
-        lines.append(f"⚠️ 未纳入排序的地点（解析失败）：{'、'.join(unresolved)}")
+        lines.append(
+            f"⚠️ 未纳入排序的地点（解析失败）：{'、'.join(unresolved)}。"
+            "这类失败多为重名，可把城市名带上重试（如「重庆长江索道」）"
+        )
     if duration_min > _DAY_TRAVEL_WARN_MIN:
         lines.append(
             f"⚠️ 在途时间偏长（超过 {_DAY_TRAVEL_WARN_MIN:.0f} 分钟），建议减少一个地点或拆成两天"

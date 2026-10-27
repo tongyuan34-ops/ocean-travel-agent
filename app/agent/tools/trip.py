@@ -186,7 +186,12 @@ async def plan_trip(
             "可以按用户偏好替换后再调用一次"
         )
     if unresolved:
-        header.append(f"⚠️ 未纳入线路的地点（解析失败）：{'、'.join(unresolved)}")
+        # 提示要给得可执行：这几种失败几乎都是重名（「长江索道」全国不止一个），
+        # 带上城市名就能解析对，模型照着重试一次即可，不必问用户
+        header.append(
+            f"⚠️ 未纳入线路的地点（解析失败）：{'、'.join(unresolved)}。"
+            "这类失败多为重名，可把城市名带上重试（如「重庆长江索道」）"
+        )
     if truncated:
         header.append(f"⚠️ 目的地超过 {_MAX_STOPS} 个，只规划了前 {_MAX_STOPS} 个")
     lines.extend(header)

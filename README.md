@@ -631,6 +631,13 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 这一轮 `app/agent/prompts.py` **一个字没改**。工具描述是模型每次都在读、离决策最近的地方；
 提示词是第二现场，而上一轮的教训已经证明它会和工具调用抢方向盘。
 
+改完跑真实对话时还撞出一个真 bug：`plan_trip` 算出「磁器口 → 南山一棵树 1407 公里」——
+高德把「南山一棵树观景台」解析到了**深圳南山区**（「南山」命中），
+而 `city=重庆` 只是提示、不是过滤。现在 `_geocode` 多一道城市校验，
+这三个地点会如实报「解析失败，可带上城市名重试」。没做自动重试，是因为
+加城市前缀后「李子坝轻轨站」会解析到**长寿区**（同城错区 70 公里，校验放行）——
+把明显的错换成隐蔽的错更糟。
+
 比数字更值得看的是**评测自己也会错**，这一轮抓到三处：
 
 - **`must_mention` 要求了工具入参已经证明的东西**。模型调了 `get_weather(city=上海)`，
@@ -696,7 +703,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 406 passed, 1 skipped
+uv run pytest                        # 416 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -733,7 +740,7 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 406 个离线测试（不联网、不调模型）
+tests/               # 416 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）

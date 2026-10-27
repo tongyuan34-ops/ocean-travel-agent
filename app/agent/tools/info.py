@@ -70,6 +70,35 @@ async def _amap_get(path: str, params: dict[str, str]) -> dict:
     return data
 
 
+def _city_matches(hint: str, resolved: str) -> bool:
+    """校验解析结果所在城市是否与预期一致。
+
+    高德的 ``city`` 参数只是**提示**，不是过滤条件。实测（2026-10）：
+
+    ==========================  ==========  ==================================
+    输入                        传入 city   实际解析到
+    ==========================  ==========  ==================================
+    长江索道                     重庆        江西省萍乡市（「索道」命中）
+    李子坝轻轨站                 重庆        广东省肇庆市（「轻轨站」命中）
+    南山一棵树观景台             重庆        广东省深圳市南山区（「南山」命中）
+    ==========================  ==========  ==================================
+
+    ``_name_matches`` 拦不住这三种：输入的「南山」「索道」确实出现在结果里。
+    于是「磁器口 → 南山一棵树」会算出 1407 公里，看起来有据可查，实则起点完全错误。
+
+    **宁可判为解析失败**（工具会如实列出未纳入线路的地点、请用户换更规范的名称），
+    也不要用一个外地坐标算出一条假路线。真实模型确实会照单全收——
+    这一轮实测里模型自己发现了「坐标落在深圳」，但那是运气，不能靠它兜底。
+
+    ``resolved`` 为空时放行：拿不到城市信息就没法判断，此时仍有 ``_name_matches`` 把关。
+    """
+    left = hint.strip().removesuffix("市")
+    right = resolved.strip().removesuffix("市")
+    if not left or not right:
+        return True
+    return left in right or right in left
+
+
 async def _geocode(address: str, city: str | None = None) -> tuple[str, str] | None:
     """把地名转成 "lng,lat"。
 
@@ -92,6 +121,9 @@ async def _geocode(address: str, city: str | None = None) -> tuple[str, str] | N
         # 高德会对无法识别的输入做模糊匹配，返回一个毫不相干的地点。
         # 必须在这里拦住，否则会算出比如「北京 → 三亚 2898 公里」这种
         # 看起来合理、实际起点完全错误的路线。
+        return None
+    if city and not _city_matches(city, str(item.get("city") or item.get("province") or "")):
+        # 名字对上了但城市不对，见 _city_matches 的实测表
         return None
 
     return item.get("location"), item.get("city") or address

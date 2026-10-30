@@ -253,23 +253,40 @@ class ChatService:
         return True
 
     async def subscribe(self, stream_id: str, last_event_id: int = 0) -> AsyncIterator[str]:
-        """从 last_event_id 之后重放，并继续等待新事件。"""
-        if await self._log.meta(stream_id) is None:
+        """从 last_event_id 之后重放，并继续等待新事件。
+
+        后端存储（Redis）抽风时必须**发一条 error 事件**再结束，不能让生成器
+        直接抛出去：SSE 的响应头早就发出去了，异常只能让连接断掉，客户端拿到的是
+        一个 200 + 空响应体——用户看到的是「点了发送，什么都没发生」，
+        既没有回答也没有报错。实测就是这么撞上的：重启后第一次对话，
+        Redis 冷连接超过 5 秒默认读超时，整条流静默消失。
+        """
+        try:
+            if await self._log.meta(stream_id) is None:
+                yield _sse(
+                    {
+                        "type": "error",
+                        "code": "STREAM_NOT_FOUND",
+                        "message": "事件流不存在或已过期，请刷新会话重新获取。",
+                    }
+                )
+                return
+            async for item in self._log.tail(stream_id, max(0, int(last_event_id or 0))):
+                if item is None:
+                    # 空闲心跳：公网反代会掐断长时间无数据的 SSE 连接
+                    yield ": ping\n\n"
+                    continue
+                seq, payload = item
+                yield f"id: {seq}\n{_sse(payload)}"
+        except Exception as exc:  # 任何存储异常都要转成可读事件
+            logger.warning("事件流中断 | stream=%s err=%r", stream_id, exc, exc_info=True)
             yield _sse(
                 {
                     "type": "error",
-                    "code": "STREAM_NOT_FOUND",
-                    "message": "事件流不存在或已过期，请刷新会话重新获取。",
+                    "code": "STREAM_UNAVAILABLE",
+                    "message": "事件流暂时不可用（存储连接异常），请重试或刷新会话。",
                 }
             )
-            return
-        async for item in self._log.tail(stream_id, max(0, int(last_event_id or 0))):
-            if item is None:
-                # 空闲心跳：公网反代会掐断长时间无数据的 SSE 连接
-                yield ": ping\n\n"
-                continue
-            seq, payload = item
-            yield f"id: {seq}\n{_sse(payload)}"
 
     async def _run_reply(
         self,

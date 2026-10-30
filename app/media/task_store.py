@@ -83,9 +83,9 @@ def build_media_task_store(settings: Settings):
     if settings.storage_backend != "redis":
         return NullMediaTaskStore()
     try:
-        from redis.asyncio import from_url
+        from app.core.redis import async_redis
 
-        client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        client = async_redis(settings.redis_url)
         logger.info("媒体任务存储：Redis（TTL=%ss）", settings.media_task_ttl_sec)
         return RedisMediaTaskStore(client, ttl_sec=settings.media_task_ttl_sec)
     except Exception:  # noqa: BLE001 - 存储不可用时退回内存

@@ -305,8 +305,8 @@ def build_decision_channel(settings: Any) -> DecisionChannel:
         logger.info("权限裁决通道：内存（单进程；--workers > 1 时回调会 404）")
         return LocalDecisionChannel()
 
-    from redis.asyncio import from_url
+    from app.core.redis import async_redis
 
-    client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    client = async_redis(settings.redis_url)
     logger.info("权限裁决通道：Redis（%s）", settings.redis_url)
     return RedisDecisionChannel(client)

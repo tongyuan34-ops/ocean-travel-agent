@@ -355,8 +355,8 @@ def build_event_log(settings: Any) -> EventLog:
         logger.info("事件流：内存（单进程；--workers > 1 时续传会失效）")
         return MemoryEventLog()
 
-    from redis.asyncio import from_url
+    from app.core.redis import async_redis
 
-    client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    client = async_redis(settings.redis_url)
     logger.info("事件流：Redis（%s，TTL=%ss）", settings.redis_url, STREAM_TTL_SEC)
     return RedisEventLog(client)

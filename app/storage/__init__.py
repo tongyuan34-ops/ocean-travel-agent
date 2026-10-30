@@ -26,11 +26,10 @@ def build_session_store(settings: Settings) -> SessionStore:
     redis 客户端延迟导入：用内存后端时无需安装 redis 包。
     """
     if settings.storage_backend == "redis":
-        from redis.asyncio import from_url
-
+        from app.core.redis import async_redis
         from app.storage.redis_store import RedisSessionStore
 
-        client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        client = async_redis(settings.redis_url)
         logger.info("会话存储：Redis（%s，TTL=%ss）", settings.redis_url, settings.session_ttl_sec)
         return RedisSessionStore(client, ttl_sec=settings.session_ttl_sec)
 

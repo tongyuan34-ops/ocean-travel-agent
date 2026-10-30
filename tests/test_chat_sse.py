@@ -86,6 +86,66 @@ def _other_worker(event_log: Any) -> ChatService:
     return ChatService(load_settings(), MemorySessionStore(), event_log=event_log)
 
 
+class FlakyLog:
+    """事件日志抽风：``meta`` 或 ``tail`` 按脚本抛异常，其余接口照常。
+
+    模拟的是真实撞到过的一次：重启后第一次对话，Redis 冷连接越过默认 5 秒
+    读超时，SSE 生成器直接把异常抛出去，客户端收到 200 + 空响应体。
+    """
+
+    def __init__(self, fail_at: str = "meta") -> None:
+        self._fail_at = fail_at
+
+    async def create(self, stream_id: str, session_id: str) -> None: ...
+
+    async def append(self, stream_id: str, payload: dict) -> int:
+        return 1
+
+    async def finish(self, stream_id: str, *, cancelled: bool = False) -> None: ...
+
+    async def cancel(self, stream_id: str) -> bool:
+        return True
+
+    async def is_cancelled(self, stream_id: str) -> bool:
+        return False
+
+    async def aclose(self) -> None: ...
+
+    async def meta(self, stream_id: str):
+        if self._fail_at == "meta":
+            raise ConnectionError("Timeout reading from localhost:6379")
+        from app.services.streams import StreamMeta
+
+        return StreamMeta(session_id="s", done=False)
+
+    async def tail(self, stream_id: str, after: int, heartbeat: float = 15.0):
+        # 先推一条再炸：模拟「回答推到一半存储断了」
+        yield 1, {"type": "token", "content": "半截"}
+        raise ConnectionError("Timeout reading from localhost:6379")
+
+
+def _payloads(frames: list[str]) -> list[dict]:
+    return [json.loads(frame.split("data: ", 1)[1]) for frame in frames if "data: " in frame]
+
+
+async def test_stream_error_before_first_event_is_reported(monkeypatch):
+    """存储挂了也要发一条 error 事件——静默空响应比报错更难查。"""
+    service = _service(monkeypatch, FakeGraph([]), event_log=FlakyLog("meta"))
+    frames = [frame async for frame in service.subscribe("s1", 0)]
+    payloads = _payloads(frames)
+    assert payloads[-1]["type"] == "error"
+    assert payloads[-1]["code"] == "STREAM_UNAVAILABLE"
+
+
+async def test_stream_error_midway_keeps_delivered_events(monkeypatch):
+    """已经推出去的 token 不撤回，但必须补一条 error 说明为什么断了。"""
+    service = _service(monkeypatch, FakeGraph([]), event_log=FlakyLog("tail"))
+    frames = [frame async for frame in service.subscribe("s1", 0)]
+    payloads = _payloads(frames)
+    assert [item["type"] for item in payloads] == ["token", "error"]
+    assert payloads[-1]["code"] == "STREAM_UNAVAILABLE"
+
+
 async def _frames(service: ChatService, session_id: str, text: str) -> list[dict]:
     out: list[dict] = []
     async for frame in service.stream_reply(session_id, text):

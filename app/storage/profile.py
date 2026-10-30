@@ -146,8 +146,8 @@ class RedisProfileStore(ProfileStore):
 def build_profile_store(settings: Settings) -> ProfileStore:
     """按 STORAGE_BACKEND 选择实现；Redis 客户端延迟导入。"""
     if settings.storage_backend == "redis":
-        from redis.asyncio import from_url
+        from app.core.redis import async_redis
 
-        client = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        client = async_redis(settings.redis_url)
         return RedisProfileStore(client)
     return MemoryProfileStore()

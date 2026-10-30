@@ -347,7 +347,7 @@ class ChatService:
                     "code": "BUDGET_EXCEEDED",
                     "message": (
                         f"本会话已累计 {session.usage.get('total_tokens', 0)} tokens，"
-                        f"超过上限 {self._settings.max_tokens_per_session}，请新建会话继续。"
+                        f"超过上限 {self._settings.max_tokens_per_session}"
                     ),
                     "trace_id": trace_id,
                 }
@@ -810,11 +810,52 @@ def _extract_answer(final_state: dict | None, streamed: str) -> tuple[str, str]:
     return streamed, "stop"
 
 
+# 上游账单类错误的关键词。命中了就说明「重试」永远没用——
+# 火山方舟欠费返回 403 AccountOverdueError，OpenAI 是 429 insufficient_quota，
+# 有的网关只给一句 "insufficient balance"。这些都是账户状态问题，
+# 归到 INTERNAL_ERROR 会给出「请稍后重试」，等于让用户白试。
+_QUOTA_HINTS = (
+    "overdue",
+    "arrears",
+    "insufficient_quota",
+    "insufficient balance",
+    "exceeded your current quota",
+    "billing",
+    "欠费",
+    "余额不足",
+    "额度",
+)
+# 上游鉴权失败：Key 写错、被吊销、没有该模型的权限
+_AUTH_HINTS = ("invalid api key", "incorrect api key", "unauthorized", "authentication")
+
+
 def _map_failure(exc: Exception) -> dict[str, str]:
-    """把异常映射成契约错误码。"""
+    """把异常映射成契约错误码。
+
+    顺序有讲究：**先认账单，再认鉴权，最后才看状态码**。
+    403 既可能是欠费也可能是 Key 没权限，只看状态码会把「去充值」说成
+    「检查 Key」；而这两件事都不是重试能解决的，说错方向用户会一直点重试。
+    """
     name = type(exc).__name__
     text = str(exc)
-    if "Timeout" in name or "timeout" in text.lower():
+    lowered = text.lower()
+    status = getattr(exc, "status_code", None)
+
+    if any(hint in lowered for hint in _QUOTA_HINTS):
+        return {
+            "code": "MODEL_QUOTA_EXCEEDED",
+            "message": "请到服务商控制台充值或补缴欠款后再试（重试不会恢复）",
+        }
+
+    if status in (401, 403) or any(hint in lowered for hint in _AUTH_HINTS):
+        return {
+            "code": "MODEL_AUTH_FAILED",
+            "message": "请检查 .env 里的 MODEL_API_KEY 是否填错或被吊销",
+        }
+
+    # 「timed out」和「timeout」两种写法都要认：openai SDK 的异常名是
+    # APITimeoutError，但有的网关只在正文里写 "Request timed out"
+    if "Timeout" in name or "timeout" in lowered or "timed out" in lowered:
         return {"code": "MODEL_TIMEOUT", "message": f"模型响应超时：{text}"}
     if "Connection" in name or "Connect" in name:
         return {"code": "MODEL_UNAVAILABLE", "message": f"无法连接模型服务：{text}"}

@@ -32,6 +32,9 @@ CODE_TO_HTTP: dict[str, int] = {
     "UPLOAD_TYPE_NOT_ALLOWED": 415,
     "TOOL_NOT_ENABLED": 501,
     "VISION_NOT_ENABLED": 501,
+    # 402 而不是 403：这是「账户该付钱」，不是「你没权限」，两者用户要做的事不一样
+    "MODEL_QUOTA_EXCEEDED": 402,
+    "MODEL_AUTH_FAILED": 401,
     "MODEL_UNAVAILABLE": 502,
     "MODEL_EMPTY_RESPONSE": 502,
     "MEDIA_UPSTREAM_ERROR": 502,

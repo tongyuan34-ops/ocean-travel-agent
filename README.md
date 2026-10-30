@@ -525,6 +525,18 @@ LANGSMITH_PROJECT=ocean-travel-agent
 16:41:04 INFO    [a1b2c3d4e5f60718] app.services.chat: 本轮结束 | session=... 耗时=2.71s cancelled=False
 ```
 
+### 错误码不只是给机器看的
+
+`_map_failure` 原来只认「超时」和「连不上」，其余一律 `INTERNAL_ERROR`。于是模型账户欠费时用户看到的是：
+
+```
+处理失败，请稍后重试 · 处理失败：Error code: 403 - {'error': {'code': 'AccountOverdueError', ...}}
+```
+
+这句话有两个毛病：没说清是什么问题，还给了一个「重试」——而欠费重试一百次也还是欠费。现在账单类和鉴权类单独成码（`MODEL_QUOTA_EXCEEDED` / `MODEL_AUTH_FAILED`），**判断顺序是先认账单再认状态码**：403 既可能是欠费也可能是 Key 没权限，只看状态码会把「去充值」说成「检查 Key」，指错方向用户就会一直点重试。
+
+配套的一条规则：**重试按钮只在重试有意义时出现**。欠费、Key 没权限、用户拒绝授权、路径越界、会话额度用完——这几类重试必然复现，藏掉按钮比解释「重试没用」直接。`tests/test_error_contract.py` 拿 `web/app.js` 的 `ERROR_TEXT` 和后端 `CODE_TO_HTTP` 对表，漏一个码、拼错一个码、文案写着「可重试」却在 `NO_RETRY` 里，都会红。
+
 ---
 
 ## API 一览
@@ -712,7 +724,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 443 passed, 1 skipped
+uv run pytest                        # 458 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -736,6 +748,7 @@ python scripts/verify_multiprocess.py
 - `test_adapters.py` — 单源失败降级、超时、mock 标记
 - `test_tracing.py` — trace_id 生成、上下文嵌套、SSE 与图 config 的 id 一致性
 - `test_subprocess.py` — 子进程超时与编码
+- `test_error_contract.py` — 后端 `CODE_TO_HTTP` 与前端 `ERROR_TEXT` 对表；文案写「可重试」却在 `NO_RETRY` 里会红
 
 ---
 
@@ -757,7 +770,7 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 443 个离线测试（不联网、不调模型）
+tests/               # 458 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）

@@ -372,6 +372,8 @@ HTTP 状态码与错误码映射：
     502 MODEL_UNAVAILABLE         模型服务未启动或不可连
     502 MODEL_EMPTY_RESPONSE      模型返回空文本
     502 MEDIA_UPSTREAM_ERROR      媒体上游返回错误（原因原样透传）
+    402 MODEL_QUOTA_EXCEEDED      模型账户欠费或额度用尽（充值才能恢复，重试无效）
+    401 MODEL_AUTH_FAILED        模型 API Key 无效、被吊销或没有该模型权限
     503 MEDIA_BACKEND_MISSING     未配置生图/生视频后端
     503 SESSION_EXPIRED           登录态失效，需用户重新登录
     504 MODEL_TIMEOUT             模型响应超时
@@ -649,13 +651,18 @@ HTTP 状态码与错误码映射：
   MODEL_UNAVAILABLE → 「本地模型服务未启动，请检查 LM Studio 是否在运行」
   MODEL_TIMEOUT → 「模型响应超时，可重试」
   MODEL_EMPTY_RESPONSE → 「模型未返回内容，可重试」
+  MODEL_QUOTA_EXCEEDED → 「模型账户欠费或额度已用尽」+ 服务商给的原文（**不展示重试按钮**）
+  MODEL_AUTH_FAILED → 「模型 API Key 无效或没有该模型权限」（**不展示重试按钮**）
   PERMISSION_DENIED → 「该操作未获授权，已取消」
   PATH_NOT_ALLOWED → 「该路径不在允许范围内」
   TOOL_NOT_ENABLED → 「该功能未启用或未配置」
   MEDIA_BACKEND_MISSING → 「未配置生图后端」
   SESSION_EXPIRED → 「登录态已失效，请重新登录」
   RATE_LIMITED → 「操作过于频繁，请稍后重试」
-- 网络错误与错误事件均展示可重试的错误条，不弹 alert
+  BUDGET_EXCEEDED → 「本会话额度已用完，请新建会话继续」（**不展示重试按钮**）
+- 网络错误与错误事件均展示错误条，不弹 alert；**重试按钮只在重试有意义时出现**——
+  账单欠费、Key 没权限、用户拒绝授权、路径越界、功能未配置这几类重试必然复现，
+  给了按钮只会让人反复点（见 3.11 的两条「不展示重试按钮」）
 
 ## 3.12 质量
 
@@ -1244,6 +1251,8 @@ bili_limit_count 20 → 10；CRAWLER_MAX_SLEEP_SEC 2 → 1；叠加后从 >200s 
 - 限流：每 session 每分钟 20 次请求；HTML 抓取类源做进程内限速
 - 全局异常处理器：APITimeoutError → MODEL_TIMEOUT；
   APIConnectionError → MODEL_UNAVAILABLE；业务异常 → 契约对应错误码
+- 上游账单/鉴权类错误单独成码：先认「欠费」再认状态码（403 既可能是欠费也可能是
+  没权限），两类都不给重试入口——重试不会让账户有钱
 - CORS 白名单仅允许 http://localhost:3001
 - 同一 session 同时只允许一个进行中的对话流，重复请求返回 429
 

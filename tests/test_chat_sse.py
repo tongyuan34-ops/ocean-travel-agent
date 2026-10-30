@@ -12,6 +12,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from app.agent.graph import SYSTEM_PROMPT
@@ -466,6 +467,64 @@ async def test_internal_error_when_graph_crashes(monkeypatch):
 
     assert frames[-1]["type"] == "error"
     assert frames[-1]["code"] == "INTERNAL_ERROR"
+
+
+class UpstreamError(Exception):
+    """模拟 openai SDK 的 APIStatusError：带 status_code 的异常。"""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("exc", "expect"),
+    [
+        # 火山方舟欠费：403 + AccountOverdueError（用户真实撞到的那一条）
+        (
+            UpstreamError(
+                "Error code: 403 - {'error': {'code': 'AccountOverdueError', "
+                "'message': 'The request failed because your account has an overdue balance.'}}",
+                403,
+            ),
+            "MODEL_QUOTA_EXCEEDED",
+        ),
+        (UpstreamError("Error code: 429 - insufficient_quota", 429), "MODEL_QUOTA_EXCEEDED"),
+        (UpstreamError("insufficient balance", 402), "MODEL_QUOTA_EXCEEDED"),
+        # 同样是 403，但不是账单：Key 没权限
+        (UpstreamError("Error code: 403 - forbidden", 403), "MODEL_AUTH_FAILED"),
+        (UpstreamError("Error code: 401 - Invalid API key", 401), "MODEL_AUTH_FAILED"),
+        (UpstreamError("Request timed out", None), "MODEL_TIMEOUT"),
+        (ConnectionError("Connection refused"), "MODEL_UNAVAILABLE"),
+        (RuntimeError("boom"), "INTERNAL_ERROR"),
+    ],
+)
+def test_failure_mapping_puts_billing_before_status_code(exc, expect):
+    """403 既可能是欠费也可能是没权限，必须先认账单再认状态码。
+
+    只看状态码会把「去充值」说成「检查 Key」，两件事都不是重试能解决的，
+    指错方向用户就会一直点重试。这条用例锁住判断顺序。
+    """
+    from app.services.chat import _map_failure
+
+    assert _map_failure(exc)["code"] == expect
+
+
+async def test_overdue_account_surfaces_actionable_error(monkeypatch):
+    """欠费要走完整链路：图里抛 → 映射 → SSE error 事件带新错误码。"""
+
+    class OverdueGraph:
+        async def astream_events(self, _input: Any, **_: Any) -> AsyncIterator[dict[str, Any]]:
+            raise UpstreamError("Error code: 403 - {'error': {'code': 'AccountOverdueError'}}", 403)
+            yield {}  # pragma: no cover - 让函数成为异步生成器
+
+    service = _service(monkeypatch, OverdueGraph())
+    session = await service.create_session()
+    frames = await _frames(service, session.id, "在吗")
+
+    assert frames[-1]["type"] == "error"
+    assert frames[-1]["code"] == "MODEL_QUOTA_EXCEEDED"
+    assert "充值" in frames[-1]["message"]
 
 
 async def test_summary_failure_keeps_history(monkeypatch):

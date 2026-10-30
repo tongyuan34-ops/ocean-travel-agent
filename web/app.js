@@ -31,6 +31,8 @@
     MODEL_UNAVAILABLE: '模型服务不可用，请检查网络或稍后重试',
     MODEL_TIMEOUT: '模型响应超时，可重试',
     MODEL_EMPTY_RESPONSE: '模型未返回内容，可重试',
+    MODEL_QUOTA_EXCEEDED: '模型账户欠费或额度已用尽',
+    MODEL_AUTH_FAILED: '模型 API Key 无效或没有该模型权限',
     PERMISSION_DENIED: '该操作未获授权，已取消',
     PATH_NOT_ALLOWED: '该路径不在允许范围内',
     TOOL_NOT_ENABLED: '该功能未启用或未配置',
@@ -39,6 +41,7 @@
     MEDIA_UPSTREAM_TIMEOUT: '生成服务超时，请稍后重试',
     TASK_NOT_FOUND: '任务不存在或已过期',
     RATE_LIMITED: '操作过于频繁，请稍后重试',
+    BUDGET_EXCEEDED: '本会话额度已用完，请新建会话继续',
     SESSION_NOT_FOUND: '会话不存在或已过期',
     SESSION_EXPIRED: '会话已过期，请新建会话',
     VALIDATION_ERROR: '输入不合法',
@@ -50,6 +53,19 @@
     NETWORK: '无法连接后端服务，请确认后端已启动',
     NETWORK_TIMEOUT: '请求超时，请稍后重试',
     INTERNAL_ERROR: '处理失败，请稍后重试'
+  };
+
+  /* 这些错误重试也不会变好：账单欠费、Key 没权限、用户拒绝了授权、路径越界、
+     功能没配。早先所有错误卡片都挂「重试」按钮，欠费时用户会一直点、一直失败，
+     还以为是网络问题——把按钮藏掉比解释「重试没用」更直接。 */
+  var NO_RETRY = {
+    MODEL_QUOTA_EXCEEDED: 1,
+    MODEL_AUTH_FAILED: 1,
+    BUDGET_EXCEEDED: 1,
+    PERMISSION_DENIED: 1,
+    PATH_NOT_ALLOWED: 1,
+    TOOL_NOT_ENABLED: 1,
+    MEDIA_BACKEND_MISSING: 1
   };
 
   var CAT_TEXT = {
@@ -1913,7 +1929,7 @@
       }
 
       if (errored) {
-        appendErrorCard(shell.root, errored, text);
+        appendErrorCard(shell.root, errored, NO_RETRY[errored.code] ? '' : text);
       } else if (reason === 'abort') {
         appendNotice('已停止生成');
       } else if (!gotText) {

@@ -31,6 +31,20 @@ def test_price_override_wins():
     assert resolve_price("gpt-4o", (1.0, 2.0)) == (1.0, 2.0)
 
 
+def test_deepseek_official_models_have_prices():
+    """DeepSeek 官方模型名要能查到价。
+
+    价目表漏了模型不会报错，只是成本那一栏永远是「—」，看起来像没计费。
+    而且 deepseek-flash / deepseek-v4-pro 与旧的 deepseek-chat / deepseek-reasoner
+    前缀相同（deepseek-），按前缀匹配时必须各自命中，不能被邻居抢走。
+    """
+    assert resolve_price("deepseek-flash") == (2.13, 8.52)
+    assert resolve_price("deepseek-v4-pro") == (9.37, 28.12)
+    # 旧的仍在售模型不受影响
+    assert resolve_price("deepseek-chat") == (0.50, 2.00)
+    assert resolve_price("deepseek-reasoner") == (1.00, 4.00)
+
+
 def test_usage_accumulates_and_marks_estimated():
     usage = TokenUsage()
     usage.add(100, 20)

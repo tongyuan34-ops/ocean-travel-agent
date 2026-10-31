@@ -724,7 +724,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 458 passed, 1 skipped
+uv run pytest                        # 459 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -770,7 +770,7 @@ app/
 ├── storage/         # 会话存储（memory / redis）
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 458 个离线测试（不联网、不调模型）
+tests/               # 459 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）

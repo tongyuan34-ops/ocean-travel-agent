@@ -52,6 +52,9 @@ def _needs_thinking_disabled(host: str) -> bool:
     全烧在 reasoning 上，content 直接为空、finish_reason=length——
     agent 就会拿到空回答并触发 MODEL_EMPTY_RESPONSE。
 
+    DeepSeek 官方（api.deepseek.com）同样是「thinking 默认开启」，参数形状
+    与方舟一致：``{"thinking": {"type": "disabled"}}``（见官方 Chat Completions 文档）。
+
     只在明确支持该参数的服务商上注入：本地 LM Studio / 其它 provider
     收到不认识的 `thinking` 字段会直接 400。
     """

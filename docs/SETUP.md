@@ -174,7 +174,8 @@ Infinite Canvas 保留作你手动创作的画布与工作台。
 
     # 模型
     MODEL_PROVIDER=openai_compatible
-    MODEL_NAME=<DeepSeek 模型名>
+    # deepseek-flash = DeepSeek-V4.1-Flash：1M 上下文，支持 tool calls 与视觉
+    MODEL_NAME=deepseek-flash
     MODEL_API_KEY=<DeepSeek Key>
     MODEL_BASE_URL=https://api.deepseek.com
 

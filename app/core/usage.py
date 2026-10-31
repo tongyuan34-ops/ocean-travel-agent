@@ -30,6 +30,11 @@ PRICE_TABLE: dict[str, tuple[float, float]] = {
     "qwen-max": (2.40, 9.60),
     "deepseek-chat": (0.50, 2.00),
     "deepseek-reasoner": (1.00, 4.00),
+    # DeepSeek 官方按美元计价（每百万 token），这里按 7.1 折算成人民币，取**峰时**
+    # 且**未命中缓存**的那一档：成本报表低估会让人以为便宜，高估只是保守。
+    # 峰时 01:00-04:00 / 06:00-10:00 UTC 的工作日，其余时段价格减半。
+    "deepseek-flash": (2.13, 8.52),
+    "deepseek-v4-pro": (9.37, 28.12),
     "glm-4-flash": (0.00, 0.00),
     "glm-4": (1.00, 1.00),
     "moonshot-v1-8k": (12.00, 12.00),

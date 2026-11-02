@@ -206,6 +206,15 @@ async def test_generate_image_reports_upstream_error_immediately():
         ("HTTP 401：{'error': {'code': 'AuthenticationError'}}", "鉴权失败"),
         ("HTTP 429：rate limit exceeded", "限流"),
         ("HTTP 504：gateway timeout", "超时"),
+        # 真实遇到过：往照片里加「奶龙」玩偶，被按版权拦了。
+        # 这条的 type 是 BadRequest、文案里带 request，不能被当成参数错误
+        (
+            "HTTP 400：{'error': {'code': 'OutputImageSensitiveContentDetected.PolicyViolation', "
+            "'message': 'The request failed because the output image may be related to "
+            "copyright restrictions.', 'type': 'BadRequest'}}",
+            "内容审核",
+        ),
+        ("HTTP 400：{'error': {'code': 'InvalidParameter'}}", "参数不被接受"),
         ("something nobody has seen before", "生图任务失败"),
     ],
 )
@@ -373,3 +382,23 @@ def test_task_status_translates_upstream_error(client):
     assert "重试不会恢复" in data["error"]
     # 原始片段要留着，否则排查时无从下手
     assert "AccountOverdueError" in data["error"]
+
+
+def test_policy_rejection_tells_user_retry_is_pointless():
+    """版权/敏感内容拦截必须说清楚「重试无效，要改提示词」。
+
+    这条真实出现过：用户要往照片里加一个受版权保护的卡通玩偶。
+    如果说成「生图失败，请重试」，用户会一直点重试，永远过不去。
+    """
+    from app.media.errors import explain_media_error
+
+    raw = (
+        "HTTP 400：{'error': {'code': 'OutputImageSensitiveContentDetected.PolicyViolation', "
+        "'message': 'The request failed because the output image may be related to "
+        "copyright restrictions.'}}"
+    )
+    text = explain_media_error(raw)
+    assert "重试" in text
+    assert "不会通过" in text
+    # 要给出可执行的动作，而不是只说"失败了"
+    assert "换" in text

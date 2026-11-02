@@ -27,6 +27,22 @@ def explain_media_error(raw: str) -> str:
             f"生图账号欠费，图片没有生成。请到服务商控制台补缴后再试，"
             f"重试不会恢复。（{_brief(text)}）"
         )
+    # 内容审核拦下。这一条要排在最前面判，因为它的 type 是 BadRequest、
+    # 文案里又带 request，很容易被后面的分支误判成"参数错了"
+    if (
+        "sensitivecontent" in lowered
+        or "policyviolation" in lowered
+        or "copyright" in lowered
+        or "内容审核" in text
+    ):
+        return (
+            "生成结果被内容审核拦下，通常是版权或敏感内容。"
+            "提示词里如果写了具体的卡通形象、影视角色、明星或品牌 logo，"
+            "换成通用描述再试——这条改账号、重试都不会通过。（"
+            f"{_brief(text)}）"
+        )
+    if "invalidparameter" in lowered or "invalid parameter" in lowered:
+        return f"生图参数不被接受（多半是尺寸或模型名不对）。（{_brief(text)}）"
     if "unauthorized" in lowered or "forbidden" in lowered or " 401" in text or " 403" in text:
         return (
             f"生图服务拒绝了当前 Key（鉴权失败）。"

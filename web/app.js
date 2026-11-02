@@ -1106,7 +1106,7 @@
     root.appendChild(meta);
   }
 
-  function appendAssistantText(text, taskIds, usage, latencyMs) {
+  function appendAssistantText(text, taskIds, usage, latencyMs, warnings) {
     var root = document.createElement('div');
     root.className = 'msg msg-ai';
     var md = document.createElement('div');
@@ -1128,6 +1128,8 @@
       root.appendChild(holder);
       startInlineTask(holder, ids[k]);
     }
+    /* 刷新后告警也得在：这一轮当时其实没成，翻记录时不能看着像成功了 */
+    appendWarnings(root, warnings);
     /* 刷新后用量也得在，否则「只有刚聊完那几条有数字」会让人以为是 bug */
     appendUsageMeta(root, latencyMs, usage);
     stickIfNeeded();
@@ -1154,6 +1156,26 @@
       };
     }
     box.appendChild(node);
+    stickIfNeeded();
+  }
+
+  /* 本轮自检告警：模型声称做了但实际没做，或后端发现的其他不一致。
+     放在回答下方、用量之前——用户要先知道「这件事没发生」，再看花了多少钱 */
+  function appendWarnings(box, warnings) {
+    if (!warnings || !warnings.length) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'turn-warn';
+    var html = '';
+    for (var i = 0; i < warnings.length; i++) {
+      var w = warnings[i] || {};
+      html += '<div class="tw-item">' +
+        '<b>' + esc(w.title || '本轮有异常') + '</b>' +
+        '<span>' + esc(w.message || '') + '</span>' +
+        (w.evidence ? '<i>' + esc(w.evidence) + '</i>' : '') +
+      '</div>';
+    }
+    wrap.innerHTML = html;
+    box.appendChild(wrap);
     stickIfNeeded();
   }
 
@@ -1190,7 +1212,8 @@
             items[i].content || '',
             items[i].media_task_ids || [],
             items[i].usage || null,
-            items[i].latency_ms || 0
+            items[i].latency_ms || 0,
+            items[i].warnings || []
           );
       }
       stickNow();
@@ -1810,6 +1833,9 @@
     /* 本轮用量与耗时：end 事件带回，回答结束后显示在正文下方 */
     var turnUsage = null;
     var latencyMs = 0;
+    /* 本轮自检告警：模型声称做了但实际没做时，后端会在 end 里带回，
+       必须显示出来，不能让用户对着空气等 */
+    var turnWarnings = [];
     /* 断线续传状态：stream id、最后收到的事件序号、重试次数 */
     var streamId = '';
     var lastEventId = 0;
@@ -1879,6 +1905,7 @@
         /* 用量与耗时只在 end 事件里给一次，先存着，等 finish() 统一渲染 */
         turnUsage = (ev.usage && ev.usage.turn) || null;
         latencyMs = typeof ev.latency_ms === 'number' ? ev.latency_ms : 0;
+        turnWarnings = ev.warnings || [];
       } else if (ev.type === 'error') {
         errored = normalizeError(ev, 0);
       }
@@ -1935,6 +1962,9 @@
       } else if (!gotText) {
         appendErrorCard(shell.root, { code: 'MODEL_EMPTY_RESPONSE', message: ERROR_TEXT.MODEL_EMPTY_RESPONSE, detail: '' }, text);
       }
+
+      /* 告警优先于用量：先让用户知道这轮其实没成，再谈花了多少 */
+      if (!errored) appendWarnings(shell.root, turnWarnings);
 
       if (!errored && finishReason === 'length') {
         appendNotice('回答已达长度上限，可能被截断');

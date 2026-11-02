@@ -485,6 +485,21 @@ img{display:block;max-width:100%}
   margin:10px 0;font-size:11.5px;color:var(--ink-40);
   letter-spacing:.02em;
 }
+/* 本轮自检告警：不是报错，是「说的和做的不一致」，所以用琥珀色而不是红色。
+   红会让人以为请求失败了，实际请求成功、只是没干活 */
+.turn-warn{margin:12px 0;display:flex;flex-direction:column;gap:8px}
+.turn-warn .tw-item{
+  padding:11px 13px;border-radius:13px;
+  background:rgba(176,116,28,.09);
+  border:1px solid rgba(176,116,28,.26);
+  border-left:3px solid rgba(176,116,28,.62);
+}
+.turn-warn b{display:block;font-weight:600;font-size:12.5px;color:#8a5a12;margin-bottom:3px}
+.turn-warn span{display:block;font-size:12.5px;line-height:1.68;color:#6f4a10}
+.turn-warn i{
+  display:block;margin-top:6px;font-style:normal;
+  font-size:11px;letter-spacing:.02em;color:rgba(111,74,16,.62);
+}
 
 /* 打字提示 */
 .thinking{display:inline-flex;align-items:center;height:22px;font-size:12px;color:rgba(20,36,60,.45);letter-spacing:.02em}

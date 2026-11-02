@@ -43,6 +43,7 @@ from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media
 from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
 from app.services.profile import ProfileService
+from app.services.selfcheck import check_turn
 from app.services.streams import CANCEL_POLL_SEC, EventLog, MemoryEventLog, StreamState
 from app.storage import ChatMessage, ChatSession, SessionStore
 
@@ -470,6 +471,9 @@ class ChatService:
         media_task_ids: list[str] = []
         # 本轮工具调用次数，只用于日志里的可观测性指标
         tool_calls = 0
+        # 本轮真正调用过的工具名。用来做收尾自检：
+        # 模型声称「已提交」但这里没有 generate_image，就是假的
+        called_tools: set[str] = set()
         # 本轮真实 token 用量，从模型的 usage_metadata 累加
         turn_usage = TokenUsage()
         # 上次检查「别的进程有没有取消我」的时刻。跨进程取消只能轮询共享标记，
@@ -531,6 +535,7 @@ class ChatService:
 
                     elif name == "on_tool_start":
                         tool_calls += 1
+                        called_tools.add(event.get("name") or "")
                         logger.info(
                             "调用工具 | tool=%s category=%s",
                             event.get("name") or "",
@@ -625,6 +630,23 @@ class ChatService:
             )
             return
 
+        # 收尾自检：模型可能声称「已提交」但一次工具都没调。
+        # 这一轮必须自己承认，不能等用户对着空气猜
+        warnings = check_turn(
+            user_text=text,
+            answer=answer,
+            tool_names=called_tools,
+            media_task_ids=media_task_ids,
+        )
+        for item in warnings:
+            logger.warning(
+                "本轮自检告警 | code=%s 工具=%s 生图任务=%d | %s",
+                item.get("code"),
+                ",".join(sorted(called_tools)) or "无",
+                len(media_task_ids),
+                item.get("evidence", ""),
+            )
+
         # 拿不到真实用量（部分本地模型不返回 usage）就退回估算，
         # 但必须把 estimated 标出来，不能让估算值冒充账单
         if turn_usage.calls == 0:
@@ -653,6 +675,7 @@ class ChatService:
                 media_task_ids=media_task_ids,
                 usage=turn_usage_dict,
                 latency_ms=latency_ms,
+                warnings=warnings,
             )
         )
         self._trim(session)
@@ -689,6 +712,9 @@ class ChatService:
                 "latency_ms": latency_ms,
                 "tool_retries": retry_stats.to_dict(),
                 "tool_budget": tool_budget.to_dict(),
+                # 本轮自检告警。前端必须显示出来——用户看到的「已完成」
+                # 和实际发生的事不一致时，这是唯一能纠正它的地方
+                "warnings": warnings,
                 # 本轮是否读到过注入内容、拦了几次危险操作。前端不展示，
                 # 但排查「为什么写文件没执行」时这是唯一线索
                 "taint": taint.to_dict(),

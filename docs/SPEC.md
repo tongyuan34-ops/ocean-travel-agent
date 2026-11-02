@@ -179,7 +179,11 @@
            "tool_budget": {"used": 3, "blocked": 0, "per_tool": 4,
                            "total": 12, "by_tool": {"search_poi": 2}},
            "taint": {"tainted": false, "sources": [],
-                     "patterns": [], "blocked": 0}}
+                     "patterns": [], "blocked": 0},
+           "warnings": [{"code": "CLAIMED_WITHOUT_ACTION",
+                         "title": "这一轮没有真的提交生图任务",
+                         "message": "模型说图片已经提交，但本轮没有调用生图工具……",
+                         "evidence": "用户要图（生成…三张）· 回答声称完成（已提交）· 工具调用 0 次"}]}
 
     data: {"type": "error", "code": "错误码", "message": "人类可读信息"}
 
@@ -190,6 +194,10 @@
 - 前端必须展示 tool_call / tool_result，让用户看见 agent 正在做什么
 - tool_result 的 summary 必须简短（建议 200 字内），不得回传大段原始文本
 - search 组工具的 summary 需含「命中源数 / 各源命中数 / 耗时 / 是否降级或 mock」
+- `warnings` 是本轮自检结果，**前端必须显示**。它的存在前提是：
+  用户看到的「已完成」和实际发生的事不一致（例如模型声称提交了生图任务，
+  但本轮 `generate_image` 调用次数为 0）。这种不一致模型自己不会承认，
+  只能由服务端在收尾时比对工具调用记录后指出。空数组表示没有发现问题
 
 #### GET /api/v1/chat/streams/{stream_id}
 断线续传。请求头带 `Last-Event-ID: <seq>`，响应同样是 `text/event-stream`，

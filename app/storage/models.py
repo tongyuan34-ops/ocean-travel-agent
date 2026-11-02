@@ -25,6 +25,10 @@ class ChatMessage:
     # 用户消息附带的图片 upload_id。存 id 不存字节：
     # 图片落在 data/uploads/，历史消息只记引用，刷新后照样能显示
     attachments: list[str] = field(default_factory=list)
+    # 本轮自检告警（见 app/services/selfcheck.py）。空表示没发现问题。
+    # 存下来而不是只推给当前页面：刷新之后用户仍然要知道
+    # 「那一轮其实没提交」，否则他回头翻记录会以为当时是成功的
+    warnings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +40,7 @@ class ChatMessage:
             "usage": dict(self.usage),
             "latency_ms": self.latency_ms,
             "attachments": list(self.attachments),
+            "warnings": [dict(item) for item in self.warnings],
         }
 
     @classmethod
@@ -49,6 +54,7 @@ class ChatMessage:
             usage=dict(data.get("usage") or {}),
             latency_ms=int(data.get("latency_ms") or 0),
             attachments=[str(item) for item in data.get("attachments") or []],
+            warnings=[dict(item) for item in data.get("warnings") or []],
         )
 
 

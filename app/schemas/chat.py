@@ -32,6 +32,8 @@ class MessageItem(BaseModel):
     latency_ms: int = 0
     # 用户消息附带的图片。刷新后据此重建气泡里的缩略图
     attachments: list[str] = Field(default_factory=list)
+    # 本轮自检告警。刷新后仍要显示，否则用户回头翻记录会以为当时成功了
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MessageList(BaseModel):

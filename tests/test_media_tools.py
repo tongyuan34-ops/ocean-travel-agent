@@ -8,6 +8,8 @@ from __future__ import annotations
 import dataclasses
 from typing import ClassVar
 
+import pytest
+
 from app.agent.tools.media import generate_image, list_image_templates
 from app.media.base import MediaBackend, MediaKind, MediaRequest, MediaResult, TaskStatus
 from app.media.service import MediaService, current_media
@@ -116,7 +118,7 @@ async def test_generate_image_submits_task_without_blocking():
 
     assert "task_id：" in out
     # 任务确实进了同一个 service 实例，因此前端能查得到
-    assert "pending" in out or "running" in out
+    assert "状态：" in out
     assert len(backend.requests) == 1
     assert backend.requests[0].kind == MediaKind.IMAGE
     assert "24 小时" in out  # 必须提示临时链接会失效
@@ -170,7 +172,12 @@ async def test_generate_image_rejects_empty_prompt():
     assert out.startswith("INVALID_REQUEST")
 
 
-async def test_generate_image_propagates_upstream_error():
+async def test_generate_image_reports_upstream_error_immediately():
+    """确定性的上游失败必须当场报出来。
+
+    之前的实现会返回「已创建任务」，模型照着说「生成中」，
+    用户就对着一张永远不会出现的图等下去——真实故障。
+    """
     from app.media.base import UpstreamError
 
     backend = StubImageBackend(error=UpstreamError("模型未开通"))
@@ -180,11 +187,43 @@ async def test_generate_image_propagates_upstream_error():
         out = await generate_image.ainvoke({"prompt": "海边"})
     finally:
         current_media.reset(token)
-    # 背景任务的失败不会冒到工具返回值里，但任务状态会被标记失败
-    assert "task_id：" in out
+
+    assert out.startswith("MEDIA_UPSTREAM_ERROR")
+    assert "模型未开通" in out
+    assert "task_id：" not in out  # 不能既报错又给出任务号，那等于给用户留了个空等
     task = next(iter(service._tasks.values()))
     assert task.status == TaskStatus.FAILED
-    assert "模型未开通" in (task.error or "")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expect"),
+    [
+        # 上游原文长这样：HTTP 403：{'error': {'code': 'AccountOverdueError', ...}}
+        (
+            "HTTP 403：{'error': {'code': 'AccountOverdueError', 'message': 'overdue balance'}}",
+            "欠费",
+        ),
+        ("HTTP 401：{'error': {'code': 'AuthenticationError'}}", "鉴权失败"),
+        ("HTTP 429：rate limit exceeded", "限流"),
+        ("HTTP 504：gateway timeout", "超时"),
+        ("something nobody has seen before", "生图任务失败"),
+    ],
+)
+def test_explain_media_error_speaks_human(raw, expect):
+    """上游报错要翻译成用户能看懂、且知道下一步做什么的一句话。"""
+    from app.media.errors import explain_media_error
+
+    assert expect in explain_media_error(raw)
+
+
+def test_explain_media_error_keeps_short_evidence():
+    """人话之外要保留原始片段，否则排查时无从下手。"""
+    from app.media.errors import explain_media_error
+
+    text = explain_media_error("HTTP 403：{'code': 'AccountOverdueError'}")
+    assert "AccountOverdueError" in text
+    # 但不能把整段原始 JSON 糊到用户脸上
+    assert len(text) < 260
 
 
 # ---------- 模板清单工具 ----------
@@ -298,3 +337,39 @@ async def test_watermark_can_be_enabled(settings, monkeypatch):
     )
     await backend.generate(MediaRequest(kind=MediaKind.IMAGE, prompt="海边"))
     assert _CaptureClient.captured["watermark"] is True
+
+
+def test_task_status_translates_upstream_error(client):
+    """前端轮询到的失败原因必须是人话。
+
+    上游给的是 `HTTP 403：{'error': {'code': 'AccountOverdueError'...}}`。
+    原样返回等于让用户自己判断"要不要重试"，而正确答案是"重试无效"。
+    """
+    from app.media.base import MediaKind, TaskStatus
+    from app.media.service import MediaTask
+
+    class _FakeService:
+        async def get(self, task_id: str) -> MediaTask:
+            return MediaTask(
+                id=task_id,
+                kind=MediaKind.IMAGE,
+                status=TaskStatus.FAILED,
+                prompt="湄洲岛日落",
+                error=(
+                    "HTTP 403：{'error': {'code': 'AccountOverdueError', "
+                    "'message': 'The request failed because your account has an overdue balance.'}}"
+                ),
+            )
+
+    original = client.app.state.media
+    client.app.state.media = _FakeService()
+    try:
+        data = client.get("/api/v1/media/tasks/5a6e4e87-4629-42f5-839e-6d2bde65cbe3").json()
+    finally:
+        client.app.state.media = original
+
+    assert data["status"] == "failed"
+    assert "欠费" in data["error"]
+    assert "重试不会恢复" in data["error"]
+    # 原始片段要留着，否则排查时无从下手
+    assert "AccountOverdueError" in data["error"]

@@ -555,3 +555,72 @@ async def test_summary_failure_keeps_history(monkeypatch):
     # 失败时不推进 summarized_count，那批消息继续留在窗口里
     assert session.summary == ""
     assert session.summarized_count == 0
+
+
+# ---------- 收尾自检：说做了但没做 ----------
+
+
+async def test_end_reports_claim_without_tool_call(monkeypatch):
+    """模型说「已提交」但一次工具都没调，end 必须带告警。
+
+    这是真实故障：连续四轮对话都在说「已提交」，页面上从没有过一张图。
+    用户没有能力分辨「已提交」和「真的提交了」，所以这一轮必须自己认。
+    """
+    claim = "三张图都提交生成好了，等前端轮询出图就会显示。"
+    service = _service(monkeypatch, FakeGraph([_final_message(claim)]))
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    assert end["warnings"][0]["code"] == "CLAIMED_WITHOUT_ACTION"
+    # 告警要落库：刷新之后翻记录，不能看着像当时成功了
+    stored = (await service.get_session(session.id)).messages[-1]
+    assert stored.warnings[0]["code"] == "CLAIMED_WITHOUT_ACTION"
+
+
+async def test_end_has_no_warning_when_image_tool_was_called(monkeypatch):
+    """真调了 generate_image 就不该报警——失败原因由任务卡片自己说。"""
+    task_id = "81fcd01d-3ed6-4946-88d3-aecdf90991cb"
+    service = _service(
+        monkeypatch,
+        FakeGraph(
+            [
+                {
+                    "event": "on_tool_start",
+                    "name": "generate_image",
+                    "run_id": "img1",
+                    "data": {"input": {"prompt": "湄洲岛日落"}},
+                },
+                {
+                    "event": "on_tool_end",
+                    "name": "generate_image",
+                    "run_id": "img1",
+                    "data": {"output": f"已创建生图任务\ntask_id：{task_id}\n状态：pending"},
+                },
+                _final_message("三张图都提交好了，稍等。"),
+            ]
+        ),
+    )
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    assert end["warnings"] == []
+    stored = (await service.get_session(session.id)).messages[-1]
+    assert stored.media_task_ids == [task_id]
+
+
+async def test_clarifying_reply_does_not_warn(monkeypatch):
+    """模型反问要几张、什么风格，是正常交互，不能误报成撒谎。"""
+    service = _service(
+        monkeypatch,
+        FakeGraph([_final_message("你想画几张？偏打卡风还是海报风？")]),
+    )
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    assert end["warnings"] == []

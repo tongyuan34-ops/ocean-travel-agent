@@ -13,6 +13,7 @@ from app.core.config import PROJECT_ROOT
 from app.core.errors import ApiError
 from app.core.identity import resolve_user_id
 from app.media.base import MediaKind, MediaRequest
+from app.media.errors import explain_media_error
 from app.media.service import MediaService
 from app.media.templates import TEMPLATES
 from app.media.uploads import ALLOWED_MIME, MAX_UPLOAD_BYTES, UploadStore
@@ -73,7 +74,12 @@ async def get_task(task_id: str, request: Request) -> TaskStatusResponse:
     task = await _service(request).get(task_id)
     if task is None:
         raise ApiError("TASK_NOT_FOUND", f"任务不存在或已过期：{task_id}")
-    return TaskStatusResponse(**task.to_dict())
+    data = task.to_dict()
+    if data.get("error"):
+        # 上游原文是 `HTTP 403：{'error': {'code': 'AccountOverdueError'...}}`，
+        # 直接甩给前端等于让用户自己猜要不要重试。存储保持原样，只在出口翻译
+        data["error"] = explain_media_error(str(data["error"]))
+    return TaskStatusResponse(**data)
 
 
 _IMAGE_EXT = {

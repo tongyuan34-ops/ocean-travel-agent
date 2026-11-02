@@ -1916,6 +1916,28 @@
         updateToolCard(cards[ev.call_id], ev);
       } else if (ev.type === 'permission_request') {
         showPermission(ev);
+      } else if (ev.type === 'retry') {
+        /* 自愈重跑：服务端认定上一轮「只说了做、其实没做」，那段文字已作废。
+           这里必须把已经画出来的正文和工具卡片清掉——否则用户会看到两段
+           回答首尾相接，还以为模型真的说了这么多。 */
+        gotText = '';
+        for (var oldId in cards) {
+          if (Object.prototype.hasOwnProperty.call(cards, oldId)) {
+            var oldCard = cards[oldId];
+            if (oldCard && oldCard.parentNode) oldCard.parentNode.removeChild(oldCard);
+          }
+        }
+        cards = {};
+        shell.tools.innerHTML = '';
+        shell.md.innerHTML = '<span class="thinking"><i></i><i></i><i></i><em>正在重试…</em></span>';
+        if (!shell.retryNotice) {
+          var retryNode = document.createElement('p');
+          retryNode.className = 'notice notice-retry';
+          retryNode.textContent = ev.message || '上一轮没有真的执行，正在自动重试';
+          shell.root.insertBefore(retryNode, shell.md);
+          shell.retryNotice = retryNode;
+        }
+        stickIfNeeded();
       } else if (ev.type === 'end') {
         finishReason = ev.finish_reason || 'stop';
         /* 用量与耗时只在 end 事件里给一次，先存着，等 finish() 统一渲染 */

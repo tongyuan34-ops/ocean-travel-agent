@@ -170,6 +170,10 @@
            "action": "write_file|delete_path|set_wallpaper|run_script",
            "detail": {"path": "...", "preview": "..."}}
 
+    data: {"type": "retry", "reason": "CLAIMED_WITHOUT_ACTION",
+           "attempt": 2,
+           "message": "模型上一轮只写了文字、没有真的调用工具，正在自动重试一次。"}
+
     data: {"type": "end", "message_id": "uuid",
            "finish_reason": "stop|length", "trace_id": "16hex",
            "usage": {"turn": {...}, "session": {...}},
@@ -198,6 +202,14 @@
   用户看到的「已完成」和实际发生的事不一致（例如模型声称提交了生图任务，
   但本轮 `generate_image` 调用次数为 0）。这种不一致模型自己不会承认，
   只能由服务端在收尾时比对工具调用记录后指出。空数组表示没有发现问题
+- 自检发现问题时服务端**先尝试自愈**，而不是直接把锅甩给用户：
+  1. 收尾比对失败 → 决策层给出一句纠正话术 → 带着它重跑一趟（最多 1 次）
+  2. 重跑前发一条 `retry` 事件。前端收到后**必须清空本轮已渲染的正文与工具卡片**，
+     否则两趟的输出会首尾相接，用户会以为模型话变多了
+  3. 重跑成功（真的调了工具）→ `end.warnings` 为空数组，`retry` 是唯一的痕迹
+  4. 重跑仍然失败 → 不再重试，`end.warnings` 带上诊断，如实告诉用户
+  纠正话术只在内存里活一趟，**不写进会话历史**：用户翻记录不该看到
+  「你刚才做错了」这种内部纠错消息
 
 #### GET /api/v1/chat/streams/{stream_id}
 断线续传。请求头带 `Last-Event-ID: <seq>`，响应同样是 `text/event-stream`，

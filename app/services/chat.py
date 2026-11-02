@@ -12,6 +12,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -43,6 +44,7 @@ from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media, current_ref_images
 from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
 from app.services.profile import ProfileService
+from app.services.repair import Diagnosis, RepairPolicy, build_repair_policy
 from app.services.selfcheck import check_turn
 from app.services.streams import CANCEL_POLL_SEC, EventLog, MemoryEventLog, StreamState
 from app.storage import ChatMessage, ChatSession, SessionStore
@@ -54,6 +56,9 @@ MAX_TURNS = 20
 # 单轮最多几张图能当生图参考图。实测上游接受两张的数组，
 # 再多只是把请求体撑大（一张 1280 的图 base64 后约 250KB）
 MAX_REF_IMAGES = 2
+# 一轮最多跑几次模型。1 次正常 + 1 次自愈重试，再多就是在拿用户的钱试错：
+# 同一句纠正话术重复第三遍，模型大概率还是同样的行为
+MAX_REPAIR_ATTEMPTS = 2
 # 工具名 → 契约中的 category
 _TOOL_CATEGORY = {
     "get_weather": "info",
@@ -113,6 +118,37 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@dataclass
+class _Attempt:
+    """一趟模型循环的结果。默认值让「什么都没发生」也是合法状态。"""
+
+    streamed: str = ""
+    final_state: dict[str, Any] | None = None
+    failed: dict[str, Any] | None = None
+    media_task_ids: list[str] = field(default_factory=list)
+    tool_calls: int = 0
+    called_tools: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _TurnRun:
+    """多趟尝试之间不变的东西。
+
+    打包传参而不是排七个位置参数：自愈重跑时调用处只写
+    ``_run_attempt(ctx, messages)``，不会因为参数顺序记错而把
+    trace_id 传成 session_id。
+    """
+
+    state: StreamState
+    graph: Any
+    mode: str
+    queue: asyncio.Queue
+    trace_id: str
+    session_id: str
+    user_id: str
+    turn_usage: TokenUsage
+
+
 class ChatService:
     """会话与对话服务。持久化交给注入的 SessionStore，与后端实现无关。"""
 
@@ -125,12 +161,16 @@ class ChatService:
         uploads: UploadStore | None = None,
         event_log: EventLog | None = None,
         decision_channel: DecisionChannel | None = None,
+        repair: RepairPolicy | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._media = media
         self._profile = profile
         self._uploads = uploads
+        # 自愈策略是注入的：主流程不认识具体规则，测试可以换成
+        # 「永远说不用修」的空策略，从而把重试路径单独关掉
+        self._repair: RepairPolicy = repair if repair is not None else build_repair_policy()
         self._graph: Any = None
         self._mode: str = ""
         self._summarizer: Any = None
@@ -457,29 +497,24 @@ class ChatService:
         taint = TaintState()
         taint_token = current_taint.set(taint)
 
-        async def _run_graph() -> None:
-            try:
-                async for graph_event in graph.astream_events(
-                    {"messages": messages},
-                    version="v2",
-                    config={
-                        "recursion_limit": MAX_STEPS * 2 + 5,
-                        # run_name / metadata 会出现在 LangSmith 面板上，
-                        # 便于按 session_id 或 trace_id 直接筛出这一轮
-                        **trace_config(trace_id, session_id=session_id, user_id=user_id),
-                    },
-                ):
-                    await queue.put(("graph", graph_event))
-            except Exception as exc:  # noqa: BLE001 - 交给消费端统一映射错误码
-                await queue.put(("failed", exc))
-                return
-            await queue.put(("finished", None))
-
-        runner = asyncio.create_task(_run_graph())
+        turn_usage = TokenUsage()
+        # 一次尝试需要的、多趟之间不变的东西。打包传下去，
+        # 免得 _run_attempt 长出一排位置参数，调用处全靠顺序记忆
+        ctx = _TurnRun(
+            state=state,
+            graph=graph,
+            mode=mode,
+            queue=queue,
+            trace_id=trace_id,
+            session_id=session_id,
+            user_id=user_id,
+            turn_usage=turn_usage,
+        )
 
         streamed = ""
         final_state: dict | None = None
         failed: dict | None = None
+        answer, finish_reason = "", ""
         # 本轮生图任务，随回答一起持久化，刷新后前端据此重建图片卡片
         media_task_ids: list[str] = []
         # 本轮工具调用次数，只用于日志里的可观测性指标
@@ -487,124 +522,72 @@ class ChatService:
         # 本轮真正调用过的工具名。用来做收尾自检：
         # 模型声称「已提交」但这里没有 generate_image，就是假的
         called_tools: set[str] = set()
-        # 本轮真实 token 用量，从模型的 usage_metadata 累加
-        turn_usage = TokenUsage()
-        # 上次检查「别的进程有没有取消我」的时刻。跨进程取消只能轮询共享标记，
-        # 限流到每秒一次：每条 token 都查一次 Redis，延迟和成本都不划算
-        last_cancel_check = 0.0
-
-        async def _cancelled_elsewhere() -> bool:
-            nonlocal last_cancel_check
-            now = time.monotonic()
-            if now - last_cancel_check < CANCEL_POLL_SEC:
-                return False
-            last_cancel_check = now
-            if not await self._log.is_cancelled(state.stream_id):
-                return False
-            logger.info("检测到跨进程取消 | stream=%s", state.stream_id)
-            state.cancelled = True
-            return True
+        warnings: list[dict[str, str]] = []
+        repairs = 0
 
         try:
             while True:
-                try:
-                    kind, payload = await asyncio.wait_for(queue.get(), timeout=15)
-                except TimeoutError:
-                    # 采集/生图这类长工具调用期间没有 token；公网反代会把长时间
-                    # 无数据的 SSE 连接掐断，这里定期发心跳保活（前端忽略该类型）
-                    await state.emit({"type": "ping"})
-                    if await _cancelled_elsewhere():
-                        break
-                    continue
+                attempt = await self._run_attempt(ctx, messages)
+                streamed = attempt.streamed
+                final_state = attempt.final_state
+                failed = attempt.failed
+                media_task_ids.extend(attempt.media_task_ids)
+                tool_calls += attempt.tool_calls
+                called_tools |= attempt.called_tools
 
-                if await _cancelled_elsewhere():
+                if state.cancelled or failed is not None:
                     break
 
-                if kind == "permission":
-                    await state.emit(payload)
-
-                elif kind == "failed":
-                    failed = _map_failure(payload)
+                answer, finish_reason = _extract_answer(final_state, streamed)
+                if not answer.strip():
+                    # 空回答交给下面的错误分支，不在这里判自检
                     break
 
-                elif kind == "finished":
+                # 收尾自检：模型可能声称「已提交」但一次工具都没调。
+                # 这一轮必须自己承认，不能等用户对着空气猜
+                warnings = check_turn(
+                    user_text=text,
+                    answer=answer,
+                    tool_names=called_tools,
+                    media_task_ids=media_task_ids,
+                )
+                if not warnings or repairs >= MAX_REPAIR_ATTEMPTS - 1:
                     break
 
-                else:
-                    event = payload
-                    name = event.get("event")
+                instruction = self._repair.instruction(
+                    Diagnosis(
+                        code=warnings[0]["code"],
+                        title=warnings[0]["title"],
+                        evidence=warnings[0].get("evidence", ""),
+                        user_text=text,
+                        answer=answer,
+                    )
+                )
+                if not instruction:
+                    # 策略认领不了：照旧把问题摆给用户，不硬修
+                    break
 
-                    if name == "on_chat_model_stream":
-                        chunk = event["data"].get("chunk")
-                        # 兜底取 chunk 本身：万一上游给的是裸字符串，
-                        # getattr(..., "content", None) 会得到 None 并**静默丢掉**
-                        # 这一段输出——用户会看到回答凭空少一截，且没有任何报错
-                        piece = _as_text(getattr(chunk, "content", chunk))
-                        if piece:
-                            streamed += piece
-                            # structured 模式内部会输出 JSON 决策，不能直接透给用户
-                            if mode == "native":
-                                await state.emit({"type": "token", "content": piece})
-
-                    elif name == "on_tool_start":
-                        tool_calls += 1
-                        called_tools.add(event.get("name") or "")
-                        logger.info(
-                            "调用工具 | tool=%s category=%s",
-                            event.get("name") or "",
-                            tool_category(event.get("name") or ""),
-                        )
-                        await state.emit(
-                            {
-                                "type": "tool_call",
-                                "call_id": str(event.get("run_id") or ""),
-                                "tool": event.get("name") or "",
-                                "category": tool_category(event.get("name") or ""),
-                                "args": event["data"].get("input") or {},
-                            }
-                        )
-
-                    elif name == "on_tool_end":
-                        output = event["data"].get("output")
-                        summary = _summarize(output)
-                        status = "error" if summary.startswith(_ERROR_PREFIXES) else "ok"
-                        if event.get("name") == "generate_image" and status == "ok":
-                            raw = _as_text(getattr(output, "content", output)) or str(output)
-                            match = _TASK_ID_RE.search(raw)
-                            if match and match.group(1) not in media_task_ids:
-                                media_task_ids.append(match.group(1))
-                        await state.emit(
-                            {
-                                "type": "tool_result",
-                                "call_id": str(event.get("run_id") or ""),
-                                "status": status,
-                                "summary": summary,
-                            }
-                        )
-
-                    elif name == "on_tool_error":
-                        await state.emit(
-                            {
-                                "type": "tool_result",
-                                "call_id": str(event.get("run_id") or ""),
-                                "status": "error",
-                                "summary": _truncate(
-                                    str(event["data"].get("error") or "工具执行失败")
-                                ),
-                            }
-                        )
-
-                    elif name == "on_chat_model_end":
-                        # native 模式下每轮工具调用都会多一次模型调用，
-                        # 所以要在这里逐次累加，而不是只看最后一条消息
-                        found = usage_from_output(event["data"].get("output"))
-                        if found is not None:
-                            turn_usage.add(*found)
-
-                    elif name == "on_chain_end":
-                        output = event["data"].get("output")
-                        if isinstance(output, dict) and "messages" in output:
-                            final_state = output
+                repairs += 1
+                logger.warning(
+                    "本轮自愈重跑 | code=%s 第 %d 次尝试 | 工具=%s 生图任务=%d",
+                    warnings[0]["code"],
+                    repairs + 1,
+                    ",".join(sorted(called_tools)) or "无",
+                    len(media_task_ids),
+                )
+                await state.emit(
+                    {
+                        "type": "retry",
+                        "reason": warnings[0]["code"],
+                        "attempt": repairs + 1,
+                        "message": "模型上一轮只写了文字、没有真的调用工具，正在自动重试一次。",
+                    }
+                )
+                # 纠正话术只活在这一轮的内存里，不落库：
+                # 用户的历史里不该出现一条「你刚才做错了」的系统消息
+                messages = [*messages, HumanMessage(content=instruction)]
+                # 上一轮的诊断作废，重跑后重新判
+                warnings = []
         finally:
             current_broker.reset(ctx_token)
             current_media.reset(media_token)
@@ -613,8 +596,6 @@ class ChatService:
             current_tool_budget.reset(budget_token)
             current_taint.reset(taint_token)
             await broker.cancel_all()
-            if not runner.done():
-                runner.cancel()
 
         if state.cancelled:
             # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史。
@@ -626,8 +607,6 @@ class ChatService:
         if failed is not None:
             await state.emit({"type": "error", **failed, "trace_id": trace_id})
             return
-
-        answer, finish_reason = _extract_answer(final_state, streamed)
 
         if mode != "native" and answer:
             # structured 模式无法逐字流式，整段一次性给出
@@ -644,14 +623,7 @@ class ChatService:
             )
             return
 
-        # 收尾自检：模型可能声称「已提交」但一次工具都没调。
-        # 这一轮必须自己承认，不能等用户对着空气猜
-        warnings = check_turn(
-            user_text=text,
-            answer=answer,
-            tool_names=called_tools,
-            media_task_ids=media_task_ids,
-        )
+        # 自愈之后仍然不成立的告警，就是这一轮要如实告诉用户的东西
         for item in warnings:
             logger.warning(
                 "本轮自检告警 | code=%s 工具=%s 生图任务=%d | %s",
@@ -734,6 +706,166 @@ class ChatService:
                 "taint": taint.to_dict(),
             }
         )
+
+    async def _run_attempt(self, ctx: _TurnRun, messages: list[Any]) -> _Attempt:
+        """跑一趟模型循环：把图事件转成 SSE 推出去，返回这一趟的结果。
+
+        单独成方法而不是内联，是因为自愈要重跑同一段流程。内联的话第二趟
+        只能复制一遍，两处迟早走样——而这段代码里每个分支都关系到
+        「用户能不能看见正在发生什么」，复制走样的代价是静默丢事件。
+        """
+        state = ctx.state
+        queue = ctx.queue
+        result = _Attempt()
+        last_cancel_check = 0.0
+
+        # 上一趟若被打断，队列里可能还留着没消费完的事件。
+        # 不清干净的话，第二趟会先把上一趟的 token 吐出来
+        while not queue.empty():
+            queue.get_nowait()
+
+        # 上次检查「别的进程有没有取消我」的时刻。跨进程取消只能轮询共享标记，
+        # 限流到每秒一次：每条 token 都查一次 Redis，延迟和成本都不划算
+        async def _cancelled_elsewhere() -> bool:
+            nonlocal last_cancel_check
+            now = time.monotonic()
+            if now - last_cancel_check < CANCEL_POLL_SEC:
+                return False
+            last_cancel_check = now
+            if not await self._log.is_cancelled(state.stream_id):
+                return False
+            logger.info("检测到跨进程取消 | stream=%s", state.stream_id)
+            state.cancelled = True
+            return True
+
+        # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，消费端只从队列取。
+        # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死
+        async def _run_graph() -> None:
+            try:
+                async for graph_event in ctx.graph.astream_events(
+                    {"messages": messages},
+                    version="v2",
+                    config={
+                        "recursion_limit": MAX_STEPS * 2 + 5,
+                        # run_name / metadata 会出现在 LangSmith 面板上，
+                        # 便于按 session_id 或 trace_id 直接筛出这一轮
+                        **trace_config(
+                            ctx.trace_id, session_id=ctx.session_id, user_id=ctx.user_id
+                        ),
+                    },
+                ):
+                    await queue.put(("graph", graph_event))
+            except Exception as exc:  # noqa: BLE001 - 交给消费端统一映射错误码
+                await queue.put(("failed", exc))
+                return
+            await queue.put(("finished", None))
+
+        runner = asyncio.create_task(_run_graph())
+        try:
+            while True:
+                try:
+                    kind, payload = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    # 采集/生图这类长工具调用期间没有 token；公网反代会把长时间
+                    # 无数据的 SSE 连接掐断，这里定期发心跳保活（前端忽略该类型）
+                    await state.emit({"type": "ping"})
+                    if await _cancelled_elsewhere():
+                        break
+                    continue
+
+                if await _cancelled_elsewhere():
+                    break
+
+                if kind == "permission":
+                    await state.emit(payload)
+
+                elif kind == "failed":
+                    result.failed = _map_failure(payload)
+                    break
+
+                elif kind == "finished":
+                    break
+
+                else:
+                    event = payload
+                    name = event.get("event")
+
+                    if name == "on_chat_model_stream":
+                        chunk = event["data"].get("chunk")
+                        # 兜底取 chunk 本身：万一上游给的是裸字符串，
+                        # getattr(..., "content", None) 会得到 None 并**静默丢掉**
+                        # 这一段输出——用户会看到回答凭空少一截，且没有任何报错
+                        piece = _as_text(getattr(chunk, "content", chunk))
+                        if piece:
+                            result.streamed += piece
+                            # structured 模式内部会输出 JSON 决策，不能直接透给用户
+                            if ctx.mode == "native":
+                                await state.emit({"type": "token", "content": piece})
+
+                    elif name == "on_tool_start":
+                        result.tool_calls += 1
+                        result.called_tools.add(event.get("name") or "")
+                        logger.info(
+                            "调用工具 | tool=%s category=%s",
+                            event.get("name") or "",
+                            tool_category(event.get("name") or ""),
+                        )
+                        await state.emit(
+                            {
+                                "type": "tool_call",
+                                "call_id": str(event.get("run_id") or ""),
+                                "tool": event.get("name") or "",
+                                "category": tool_category(event.get("name") or ""),
+                                "args": event["data"].get("input") or {},
+                            }
+                        )
+
+                    elif name == "on_tool_end":
+                        output = event["data"].get("output")
+                        summary = _summarize(output)
+                        status = "error" if summary.startswith(_ERROR_PREFIXES) else "ok"
+                        if event.get("name") == "generate_image" and status == "ok":
+                            raw = _as_text(getattr(output, "content", output)) or str(output)
+                            match = _TASK_ID_RE.search(raw)
+                            if match and match.group(1) not in result.media_task_ids:
+                                result.media_task_ids.append(match.group(1))
+                        await state.emit(
+                            {
+                                "type": "tool_result",
+                                "call_id": str(event.get("run_id") or ""),
+                                "status": status,
+                                "summary": summary,
+                            }
+                        )
+
+                    elif name == "on_tool_error":
+                        await state.emit(
+                            {
+                                "type": "tool_result",
+                                "call_id": str(event.get("run_id") or ""),
+                                "status": "error",
+                                "summary": _truncate(
+                                    str(event["data"].get("error") or "工具执行失败")
+                                ),
+                            }
+                        )
+
+                    elif name == "on_chat_model_end":
+                        # native 模式下每轮工具调用都会多一次模型调用，
+                        # 所以要在这里逐次累加，而不是只看最后一条消息
+                        found = usage_from_output(event["data"].get("output"))
+                        if found is not None:
+                            ctx.turn_usage.add(*found)
+
+                    elif name == "on_chain_end":
+                        output = event["data"].get("output")
+                        if isinstance(output, dict) and "messages" in output:
+                            result.final_state = output
+        finally:
+            if not runner.done():
+                runner.cancel()
+
+        return result
 
     # ---------- 内部 ----------
 

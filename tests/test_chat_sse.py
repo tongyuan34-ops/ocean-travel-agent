@@ -58,12 +58,36 @@ class ExplodingGraph:
         yield {}  # pragma: no cover - 让函数成为异步生成器
 
 
+class ScriptedGraph:
+    """每一趟喂一份脚本，用来验证「自愈重跑」真的跑了第二趟。
+
+    ``FakeGraph`` 每次调用都重放同一份脚本，测不出「第二趟和第一趟不一样」，
+    而自愈的全部意义就在这个不一样上。
+    """
+
+    def __init__(self, scripts: list[list[dict[str, Any]]]) -> None:
+        self._scripts = scripts
+        self.calls = 0
+        # 每趟收到的 messages，用来确认纠正话术真的传进去了
+        self.inputs: list[list[Any]] = []
+
+    async def astream_events(
+        self, _input: Any, version: str | None = None, config: Any = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        index = min(self.calls, len(self._scripts) - 1)
+        self.inputs.append(list(_input.get("messages") or []))
+        self.calls += 1
+        for event in self._scripts[index]:
+            yield event
+
+
 def _service(
     monkeypatch,
     graph: Any,
     mode: str = "native",
     channel: DecisionChannel | None = None,
     event_log: Any = None,
+    repair: Any = None,
 ) -> ChatService:
     monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (graph, mode))
     from app.core.config import load_settings
@@ -73,6 +97,7 @@ def _service(
         MemorySessionStore(),
         decision_channel=channel,
         event_log=event_log,
+        repair=repair,
     )
 
 
@@ -665,3 +690,144 @@ async def test_uploaded_image_is_handed_to_image_tool(monkeypatch, tmp_path):
     assert len(seen) == 1
     assert seen[0], "上传的图没有传给生图工具"
     assert seen[0][0].startswith("data:image/")
+
+
+# ---------- 自愈：说做了却没做，自动重跑一次 ----------
+
+_CLAIM = "三张图都提交生成好了，等前端轮询出图就会显示。"
+_TOOL_OK = [
+    {
+        "event": "on_tool_start",
+        "name": "generate_image",
+        "run_id": "img1",
+        "data": {"input": {"prompt": "湄洲岛日落"}},
+    },
+    {
+        "event": "on_tool_end",
+        "name": "generate_image",
+        "run_id": "img1",
+        "data": {
+            "output": "已创建生图任务\ntask_id：7e0684c9-1c4a-4a4f-9d0e-2b7d3f1a5c88\n状态：pending"
+        },
+    },
+    _final_message("三张图都提交好了，稍等。"),
+]
+
+
+async def test_claim_without_action_is_repaired_automatically(monkeypatch):
+    """第一趟只说不做 → 自动补一句纠正话术重跑 → 第二趟真调了工具。
+
+    这是这一版的核心：告警只是「知道自己错了」，自愈才是「改过来」。
+    用户不该为模型的偷懒手动点一次重试。
+    """
+    graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    # 真的跑了两趟，且第一趟的纠正话术进了第二趟的输入
+    assert graph.calls == 2
+    assert len(graph.inputs[1]) == len(graph.inputs[0]) + 1
+    assert "没有真正调用 generate_image" in graph.inputs[1][-1].content
+
+    # 修好了就不该再报警，也不该把上一轮的假话留在历史里
+    assert end["warnings"] == []
+    stored = (await service.get_session(session.id)).messages[-1]
+    assert stored.warnings == []
+    assert stored.content == "三张图都提交好了，稍等。"
+    assert stored.media_task_ids == ["7e0684c9-1c4a-4a4f-9d0e-2b7d3f1a5c88"]
+
+
+async def test_retry_event_precedes_the_second_attempt(monkeypatch):
+    """重跑前必须先发 retry 事件，前端据此清掉上一轮已经画出来的字。
+
+    不发的话用户会看到两段回答首尾相接，还以为模型话变多了。
+    """
+    graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    kinds = _types(frames)
+
+    assert "retry" in kinds
+    retry = next(frame for frame in frames if frame["type"] == "retry")
+    assert retry["reason"] == "CLAIMED_WITHOUT_ACTION"
+    assert retry["attempt"] == 2
+    assert retry["message"]
+    # 顺序：retry 在 end 之前，且只发一次
+    assert kinds.index("retry") < kinds.index("end")
+    assert kinds.count("retry") == 1
+
+
+async def test_repair_stops_after_one_retry_and_still_warns(monkeypatch):
+    """重跑一次还是只说不做，就收手并如实报警。
+
+    不设上限会变成死循环：每趟都花钱、每趟都不干活，
+    而用户界面一直在「正在重试」，比直接报错更糟。
+    """
+    graph = ScriptedGraph([[_final_message(_CLAIM)], [_final_message(_CLAIM)]])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    assert graph.calls == 2, "只该重跑一次，不能无限重试"
+    assert _types(frames).count("retry") == 1
+    # 修不好就必须让用户知道，不能静默
+    assert end["warnings"][0]["code"] == "CLAIMED_WITHOUT_ACTION"
+
+
+async def test_corrective_message_is_not_persisted(monkeypatch):
+    """纠正话术只在内存里活一趟，不能写进会话历史。
+
+    落库的话，用户翻记录会看到一条「你刚才做错了」的系统消息，
+    既莫名其妙，也把模型的内部纠错暴露给了用户。
+    """
+    graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    await _frames(service, session.id, "帮我生成三张旅行图")
+    stored = (await service.get_session(session.id)).messages
+
+    assert [m.role for m in stored] == ["user", "assistant"]
+    assert all("没有真正调用 generate_image" not in m.content for m in stored)
+
+
+async def test_policy_without_matching_rule_does_not_retry(monkeypatch):
+    """策略认领不了就照旧报警，不硬修。
+
+    这条是依赖倒置的验收：ChatService 只认 RepairPolicy，
+    换一个什么都不认的策略，它就不该自作主张重跑。
+    """
+
+    class _Silent:
+        def instruction(self, diagnosis):
+            return None
+
+    graph = ScriptedGraph([[_final_message(_CLAIM)]])
+    service = _service(monkeypatch, graph, repair=_Silent())
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+    end = next(frame for frame in frames if frame["type"] == "end")
+
+    assert graph.calls == 1
+    assert "retry" not in _types(frames)
+    assert end["warnings"][0]["code"] == "CLAIMED_WITHOUT_ACTION"
+
+
+async def test_successful_turn_is_not_retried(monkeypatch):
+    """正常干活的一轮不能被自愈误伤——多跑一趟就是多花一次钱。"""
+    graph = ScriptedGraph([_TOOL_OK])
+    service = _service(monkeypatch, graph)
+    session = await service.create_session()
+
+    frames = await _frames(service, session.id, "帮我生成三张旅行图")
+
+    assert graph.calls == 1
+    assert "retry" not in _types(frames)

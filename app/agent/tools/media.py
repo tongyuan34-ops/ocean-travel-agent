@@ -28,7 +28,7 @@ from app.core.config import load_settings
 from app.core.context import truncate_tool_output
 from app.media.base import MediaError, MediaKind, MediaRequest, TaskStatus
 from app.media.errors import explain_media_error
-from app.media.service import current_media
+from app.media.service import current_media, current_ref_images
 from app.media.templates import (
     TEMPLATE_KEYS,
     compose_prompt,
@@ -74,7 +74,13 @@ class GenerateImageInput(BaseModel):
             f"风格模板 key（{'/'.join(TEMPLATE_KEYS)}），或直接写自由风格描述；留空表示不加风格约束"
         ),
     )
-    ref_image: str = Field(default="", description="参考图 URL（可选，用于图生图/风格参考）")
+    ref_image: str = Field(
+        default="",
+        description=(
+            "参考图 URL（可选）。留空时会自动使用用户本轮上传的图片作为底图——"
+            "用户说「在我这张图上加个东西」时不要填这个参数，交给默认行为"
+        ),
+    )
 
 
 @tool(args_schema=GenerateImageInput)
@@ -107,13 +113,20 @@ async def generate_image(prompt: str, style: str = "", ref_image: str = "") -> s
     if free_style:
         final_prompt = f"{final_prompt}；风格：{free_style}"
 
+    # 参考图来源有两个，优先用模型显式给的 URL；
+    # 没给就看本轮用户有没有传图——「在我这张图上加个东西」这种说法，
+    # 模型不会也不该去猜上传 id，只能由这里兜住
+    explicit_ref = ref_image.strip()
+    attached = [] if explicit_ref else list(current_ref_images.get() or [])
+
     try:
         task = await service.submit(
             MediaRequest(
                 kind=MediaKind.IMAGE,
                 prompt=final_prompt,
                 style=template.key if template else (free_style or None),
-                ref_image=ref_image.strip() or None,
+                ref_image=explicit_ref or None,
+                ref_images=attached,
             )
         )
     except MediaError as exc:
@@ -139,8 +152,12 @@ async def generate_image(prompt: str, style: str = "", ref_image: str = "") -> s
     ]
     if template is not None:
         lines.append(f"已套用模板：{template.label}（{template.key}）")
-    if ref_image.strip():
-        lines.append(f"参考图：{ref_image.strip()}")
+    if explicit_ref:
+        lines.append(f"参考图：{explicit_ref}")
+    elif attached:
+        # 说出来，否则模型不知道自己刚才其实是在改用户的图，
+        # 回答里就会把它描述成"凭空生成的一张图"
+        lines.append(f"参考图：已使用用户本轮上传的图片（{len(attached)} 张）作为底图")
     lines.append(f"实际提示词：{final_prompt}")
     lines.append("")
     lines.append(

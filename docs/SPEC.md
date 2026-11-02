@@ -845,7 +845,12 @@ e) 上下文预算：MAX_CONTEXT_TOKENS 默认 4096；超出时滚动摘要压�
 **media 组（异步任务，见契约 2.2 媒体一节）** —— 已实现并实测
 - generate_image(prompt, style, ref_image)：**只提交任务并返回 task_id，不阻塞等待出图**
   （SPEC 2.2 要求慢任务不得占用聊天 SSE 流；在这个工具里 await 到底会让对话流卡几十秒）。
-  `style` 可为模板 key，也可直接写自由风格描述
+  `style` 可为模板 key，也可直接写自由风格描述。
+  提交后观察约 1 秒：上游当场拒绝（欠费/鉴权/内容审核）就直接返回错误码，不发 task_id
+- **参考图默认取本轮上传的图**：`ref_image` 留空时，工具从 `current_ref_images`
+  ContextVar 取本轮用户上传的图片（最多 2 张，已转 data URL）作为底图。
+  模型看不见 upload_id，也无法把图交给上游，这条链断了「在我这张图上加个东西」
+  就退化成「凭空画一张」——凭空画更容易撞版权审核
 - list_image_templates()：列出模板与适用场景，供模型选 style
 - generate_video(prompt, duration)           ← **不做**（产品决定）；未配置后端时 503
 - 发布约束：任务必须提交到**当前会话的 MediaService 实例**——经 `current_media`

@@ -45,6 +45,14 @@ current_media: ContextVar["MediaService | None"] = ContextVar(
     "current_media", default=None
 )
 
+# 本轮用户上传的图片，已经转成 data URL（见 uploads.image_block）。
+# 生图工具拿它当参考图：用户说「在我这张图上加个东西」时，
+# 模型看不见上传 id，也没法把图交给上游——只有这条路能接上。
+# 上限由写入方控制（chat.py 只放前两张），这里不做二次裁剪。
+current_ref_images: ContextVar["list[str] | None"] = ContextVar(
+    "current_ref_images", default=None
+)
+
 
 @dataclass
 class MediaTask:

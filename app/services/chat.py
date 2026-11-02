@@ -40,7 +40,7 @@ from app.core.context import compose_messages, make_summary, plan_fold
 from app.core.errors import ApiError
 from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
 from app.core.usage import TokenUsage, estimate_usage, usage_from_output
-from app.media.service import MediaService, current_media
+from app.media.service import MediaService, current_media, current_ref_images
 from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
 from app.services.profile import ProfileService
 from app.services.selfcheck import check_turn
@@ -51,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 # 每个会话保留最近多少轮对话（1 轮 = 一问一答）
 MAX_TURNS = 20
+# 单轮最多几张图能当生图参考图。实测上游接受两张的数组，
+# 再多只是把请求体撑大（一张 1280 的图 base64 后约 250KB）
+MAX_REF_IMAGES = 2
 # 工具名 → 契约中的 category
 _TOOL_CATEGORY = {
     "get_weather": "info",
@@ -229,10 +232,14 @@ class ChatService:
         return state
 
     async def stream_reply(
-        self, session_id: str, text: str, user_id: str = "default"
+        self,
+        session_id: str,
+        text: str,
+        user_id: str = "default",
+        attachments: list[str] | None = None,
     ) -> AsyncIterator[str]:
         """兼容旧调用：等价于 start_reply + subscribe(0)。"""
-        state = await self.start_reply(session_id, text, user_id)
+        state = await self.start_reply(session_id, text, user_id, attachments)
         async for frame in self.subscribe(state.stream_id, 0):
             yield frame
 
@@ -416,6 +423,10 @@ class ChatService:
             messages[-1] = HumanMessage(
                 content=[{"type": "text", "text": text or "请看这张图。"}, *blocks]
             )
+        # 同一批图片还要能给生图工具当底图：用户说「在我这张图上加个东西」时，
+        # 模型看不见上传 id，也没法把图交给上游，只能靠这里转成 data URL 递下去。
+        # 只取前两张——上游单次最多吃两张参考图，再多只是把请求体撑大
+        refs = [block["image_url"]["url"] for block in blocks][:MAX_REF_IMAGES]
 
         # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，生成器只从队列取。
         # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死。
@@ -429,6 +440,8 @@ class ChatService:
         # 必须在创建后台任务之前设置：ContextVar 由任务继承，
         # 工具层要靠它拿到**同一个** MediaService 实例（任务存在实例里）
         media_token = current_media.set(self._media)
+        # 同理：生图工具要拿本轮上传的原图当参考图，也靠任务继承
+        ref_token = current_ref_images.set(refs)
         # 同上：工具重试发生在后台任务里，统计要回到本轮
         retry_stats = RetryStats()
         retry_token = current_retry_stats.set(retry_stats)
@@ -595,6 +608,7 @@ class ChatService:
         finally:
             current_broker.reset(ctx_token)
             current_media.reset(media_token)
+            current_ref_images.reset(ref_token)
             current_retry_stats.reset(retry_token)
             current_tool_budget.reset(budget_token)
             current_taint.reset(taint_token)

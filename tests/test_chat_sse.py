@@ -147,9 +147,11 @@ async def test_stream_error_midway_keeps_delivered_events(monkeypatch):
     assert payloads[-1]["code"] == "STREAM_UNAVAILABLE"
 
 
-async def _frames(service: ChatService, session_id: str, text: str) -> list[dict]:
+async def _frames(
+    service: ChatService, session_id: str, text: str, attachments: list[str] | None = None
+) -> list[dict]:
     out: list[dict] = []
-    async for frame in service.stream_reply(session_id, text):
+    async for frame in service.stream_reply(session_id, text, attachments=attachments):
         if "data: " in frame:
             out.append(json.loads(frame.split("data: ", 1)[1]))
     return out
@@ -624,3 +626,42 @@ async def test_clarifying_reply_does_not_warn(monkeypatch):
     end = next(frame for frame in frames if frame["type"] == "end")
 
     assert end["warnings"] == []
+
+
+async def test_uploaded_image_is_handed_to_image_tool(monkeypatch, tmp_path):
+    """用户上传的图要能当生图底图。
+
+    模型看不见 upload_id，也没法把图交给上游。这条链断了，
+    「在我这张图上加个东西」就变成了「凭空画一张」——画出来的东西
+    更容易撞版权审核，这正是用户实际踩到的坑。
+    """
+    import io
+
+    from PIL import Image
+
+    from app.media.service import current_ref_images
+    from app.media.uploads import UploadStore
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (200, 120, 60)).save(buf, "JPEG")
+    uploads = UploadStore(tmp_path)
+    item = uploads.save_image(buf.getvalue(), "default", "desk.jpg")
+
+    seen: list[list[str]] = []
+
+    class _Recorder(FakeGraph):
+        async def astream_events(self, _input, version=None, config=None):
+            seen.append(list(current_ref_images.get() or []))
+            yield _final_message("好的。")
+
+    from app.core.config import load_settings
+
+    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (_Recorder([]), "native"))
+    service = ChatService(load_settings(), MemorySessionStore(), uploads=uploads, event_log=None)
+    session = await service.create_session()
+
+    await _frames(service, session.id, "把这张图改成水彩风", [item.id])
+
+    assert len(seen) == 1
+    assert seen[0], "上传的图没有传给生图工具"
+    assert seen[0][0].startswith("data:image/")

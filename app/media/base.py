@@ -57,6 +57,10 @@ class MediaRequest:
     prompt: str
     style: str | None = None
     ref_image: str | None = None
+    # 多张参考图（图生图/局部修改）。与 ref_image 合并使用：
+    # 单张走 ref_image，多张走这里。用户上传的原图要转成 data URL 才能给上游——
+    # 服务商取不到 127.0.0.1，也没有公网地址可给
+    ref_images: list[str] = field(default_factory=list)
     duration: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 

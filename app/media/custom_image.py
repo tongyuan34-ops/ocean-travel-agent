@@ -74,8 +74,14 @@ class CustomImageBackend(MediaBackend):
             # 必须显式传，否则用户会莫名拿到带水印的图。
             "watermark": self._watermark,
         }
-        if req.ref_image:
-            payload["image"] = req.ref_image
+        # 参考图：单张传字符串、多张传数组，实测上游两种形状都收。
+        # 多张时第一张是底图，后面的当风格/内容参考
+        images = [req.ref_image] if req.ref_image else []
+        images.extend(req.ref_images)
+        if len(images) == 1:
+            payload["image"] = images[0]
+        elif images:
+            payload["image"] = images
 
         headers = {
             "Authorization": self._token,

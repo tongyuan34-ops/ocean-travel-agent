@@ -402,3 +402,97 @@ def test_policy_rejection_tells_user_retry_is_pointless():
     assert "不会通过" in text
     # 要给出可执行的动作，而不是只说"失败了"
     assert "换" in text
+
+
+# ---------- 参考图：用户上传的图当底图 ----------
+
+_REF_A = "data:image/jpeg;base64,AAAA"
+_REF_B = "data:image/jpeg;base64,BBBB"
+
+
+async def test_generate_image_uses_uploaded_image_as_reference():
+    """用户传了图又让生图时，自动拿它当底图。
+
+    模型看不见 upload_id，也没法把图交给上游——「在我这张图上加个东西」
+    这句话要成立，只能由工具层把本轮上传的图递下去。
+    """
+    from app.media.service import current_ref_images
+
+    backend = StubImageBackend()
+    service = _service(backend)
+    token = current_media.set(service)
+    ref_token = current_ref_images.set([_REF_A])
+    try:
+        out = await generate_image.ainvoke({"prompt": "在桌面上加一只玩偶"})
+    finally:
+        current_ref_images.reset(ref_token)
+        current_media.reset(token)
+
+    assert backend.requests[0].ref_images == [_REF_A]
+    assert backend.requests[0].ref_image is None
+    # 必须告诉模型「你刚才是改图，不是凭空画」，否则它会描述成生成了一张新图
+    assert "已使用用户本轮上传的图片" in out
+
+
+async def test_explicit_ref_image_wins_over_upload():
+    """模型显式给了参考图 URL 时，不要被本轮上传的图顶掉。"""
+    from app.media.service import current_ref_images
+
+    backend = StubImageBackend()
+    service = _service(backend)
+    token = current_media.set(service)
+    ref_token = current_ref_images.set([_REF_A])
+    try:
+        await generate_image.ainvoke(
+            {"prompt": "同风格", "ref_image": "https://img.example/ref.jpg"}
+        )
+    finally:
+        current_ref_images.reset(ref_token)
+        current_media.reset(token)
+
+    assert backend.requests[0].ref_image == "https://img.example/ref.jpg"
+    assert backend.requests[0].ref_images == []
+
+
+async def test_generate_image_without_upload_has_no_reference():
+    """没传图就不该凭空塞参考图，否则等于强制图生图。"""
+    from app.media.service import current_ref_images
+
+    backend = StubImageBackend()
+    service = _service(backend)
+    token = current_media.set(service)
+    ref_token = current_ref_images.set([])
+    try:
+        await generate_image.ainvoke({"prompt": "海边日落"})
+    finally:
+        current_ref_images.reset(ref_token)
+        current_media.reset(token)
+
+    assert backend.requests[0].ref_image is None
+    assert backend.requests[0].ref_images == []
+
+
+async def test_custom_backend_sends_single_reference_as_string(settings, monkeypatch):
+    """单张参考图传字符串——数组形状上游也收，但没必要为一张图用数组。"""
+    from app.media import custom_image
+
+    monkeypatch.setattr(custom_image.httpx, "AsyncClient", _CaptureClient)
+    backend = custom_image.CustomImageBackend(
+        endpoint="https://ark.example/images", token="Bearer x", model="m"
+    )
+    await backend.generate(MediaRequest(kind=MediaKind.IMAGE, prompt="改图", ref_images=[_REF_A]))
+    assert _CaptureClient.captured["image"] == _REF_A
+
+
+async def test_custom_backend_sends_multiple_references_as_array(settings, monkeypatch):
+    """多张参考图传数组：上游实测接受，第一张当底图。"""
+    from app.media import custom_image
+
+    monkeypatch.setattr(custom_image.httpx, "AsyncClient", _CaptureClient)
+    backend = custom_image.CustomImageBackend(
+        endpoint="https://ark.example/images", token="Bearer x", model="m"
+    )
+    await backend.generate(
+        MediaRequest(kind=MediaKind.IMAGE, prompt="合成", ref_images=[_REF_A, _REF_B])
+    )
+    assert _CaptureClient.captured["image"] == [_REF_A, _REF_B]

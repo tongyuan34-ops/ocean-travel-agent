@@ -1106,7 +1106,7 @@
     root.appendChild(meta);
   }
 
-  function appendAssistantText(text, taskIds, usage, latencyMs, warnings) {
+  function appendAssistantText(text, taskIds, usage, latencyMs, warnings, retryText) {
     var root = document.createElement('div');
     root.className = 'msg msg-ai';
     var md = document.createElement('div');
@@ -1129,7 +1129,7 @@
       startInlineTask(holder, ids[k]);
     }
     /* 刷新后告警也得在：这一轮当时其实没成，翻记录时不能看着像成功了 */
-    appendWarnings(root, warnings);
+    appendWarnings(root, warnings, retryText);
     /* 刷新后用量也得在，否则「只有刚聊完那几条有数字」会让人以为是 bug */
     appendUsageMeta(root, latencyMs, usage);
     stickIfNeeded();
@@ -1160,8 +1160,10 @@
   }
 
   /* 本轮自检告警：模型声称做了但实际没做，或后端发现的其他不一致。
-     放在回答下方、用量之前——用户要先知道「这件事没发生」，再看花了多少钱 */
-  function appendWarnings(box, warnings) {
+     放在回答下方、用量之前——用户要先知道「这件事没发生」，再看花了多少钱。
+     retryText 是这一轮的用户原话，用来接「重试这一轮」按钮：
+     文案里说了「点下方重新生成」，就得真有一个按钮，否则等于又让用户自己想办法 */
+  function appendWarnings(box, warnings, retryText) {
     if (!warnings || !warnings.length) return;
     var wrap = document.createElement('div');
     wrap.className = 'turn-warn';
@@ -1172,9 +1174,17 @@
         '<b>' + esc(w.title || '本轮有异常') + '</b>' +
         '<span>' + esc(w.message || '') + '</span>' +
         (w.evidence ? '<i>' + esc(w.evidence) + '</i>' : '') +
+        (retryText ? '<div class="tw-actions"><button type="button" data-warn-retry="1">重试这一轮</button></div>' : '') +
       '</div>';
     }
     wrap.innerHTML = html;
+    var btn = wrap.querySelector('[data-warn-retry]');
+    if (btn && retryText) {
+      btn.onclick = function () {
+        if (state.streaming) return;
+        sendMessage(retryText);
+      };
+    }
     box.appendChild(wrap);
     stickIfNeeded();
   }
@@ -1205,16 +1215,22 @@
       applyPersona((data && data.persona) || state.personaDefault);
       var items = (data && data.items) || [];
       if (!items.length) { renderEmpty(); return; }
+      /* 记着上一条用户消息：告警卡片上的「重试这一轮」要用它 */
+      var lastUser = '';
       for (var i = 0; i < items.length; i++) {
-        if (items[i].role === 'user') appendUser(items[i].content || '', items[i].attachments || []);
-        else
+        if (items[i].role === 'user') {
+          lastUser = items[i].content || '';
+          appendUser(lastUser, items[i].attachments || []);
+        } else {
           appendAssistantText(
             items[i].content || '',
             items[i].media_task_ids || [],
             items[i].usage || null,
             items[i].latency_ms || 0,
-            items[i].warnings || []
+            items[i].warnings || [],
+            lastUser
           );
+        }
       }
       stickNow();
     });
@@ -1964,7 +1980,7 @@
       }
 
       /* 告警优先于用量：先让用户知道这轮其实没成，再谈花了多少 */
-      if (!errored) appendWarnings(shell.root, turnWarnings);
+      if (!errored) appendWarnings(shell.root, turnWarnings, text);
 
       if (!errored && finishReason === 'length') {
         appendNotice('回答已达长度上限，可能被截断');

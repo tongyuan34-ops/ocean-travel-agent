@@ -43,6 +43,12 @@ from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
 from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media, current_ref_images
 from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
+from app.services.facts import (
+    MediaFact,
+    build_turn_facts,
+    last_warnings,
+    recent_task_ids,
+)
 from app.services.profile import ProfileService
 from app.services.repair import Diagnosis, RepairPolicy, build_repair_policy
 from app.services.selfcheck import check_turn
@@ -452,7 +458,11 @@ class ChatService:
         await self._refresh_summary(session, system_text)
         await self._store.save(session)
         history = [(item.role, item.content) for item in session.messages]
-        messages = compose_messages(system_text, session.summary, history, session.summarized_count)
+        # 事实块**在摘要之后**才拼进去：摘要是对对话的压缩，不该把
+        # 「这一轮任务成功了几张」这种瞬时状态卷进长期记忆
+        facts = await self._turn_facts(session)
+        prompt_text = f"{system_text}\n\n{facts}" if facts else system_text
+        messages = compose_messages(prompt_text, session.summary, history, session.summarized_count)
 
         # 图片只挂**当前轮**。每轮重发会让 token 随轮数线性膨胀（一张 1280 的图约 1.5k token），
         # 而用户接着追问的多半还是同一张图——上一轮的回答里已经有模型对它的描述。
@@ -892,6 +902,34 @@ class ChatService:
             if self._graph is None:
                 self._graph, self._mode = build_agent_graph(self._settings)
             return self._graph, self._mode
+
+    async def _turn_facts(self, session: ChatSession) -> str:
+        """查证「模型看不到但真实发生了的事」，写成一段事实注入提示词。
+
+        这一步存在的理由是一次真实故障：模型连着三轮说「生图服务卡住了」，
+        而那几个任务全部 succeeded。它拿不到任务终态，只能从「用户说没看到图」
+        反推「任务失败」——推断在它的信息集里是合理的，只是事实是错的。
+        事实由系统查好喂给它，它就不需要猜了。
+
+        查询在这里、拼文字在 ``app/services/facts.py``：那边是纯函数，
+        可以被单测钉住，不需要 mock 一个 Redis 或生图服务。
+        """
+        media: list[MediaFact] = []
+        if self._media is not None:
+            for task_id in recent_task_ids(session.messages):
+                task = await self._media.get(task_id)
+                if task is None:
+                    # 任务过期或已被清理。不编一个状态出来，
+                    # 让它从列表里消失比说「状态未知」更诚实
+                    continue
+                media.append(
+                    MediaFact(
+                        task_id=task.id,
+                        status=task.status.value,
+                        error=task.error,
+                    )
+                )
+        return build_turn_facts(media, last_warnings(session.messages))
 
     async def _refresh_summary(self, session: ChatSession, system_prompt: str) -> None:
         """按预算决定是否把历史折叠进摘要。

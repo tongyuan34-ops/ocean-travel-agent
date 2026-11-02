@@ -88,6 +88,7 @@ def _service(
     channel: DecisionChannel | None = None,
     event_log: Any = None,
     repair: Any = None,
+    media: Any = None,
 ) -> ChatService:
     monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (graph, mode))
     from app.core.config import load_settings
@@ -98,6 +99,7 @@ def _service(
         decision_channel=channel,
         event_log=event_log,
         repair=repair,
+        media=media,
     )
 
 
@@ -831,3 +833,118 @@ async def test_successful_turn_is_not_retried(monkeypatch):
 
     assert graph.calls == 1
     assert "retry" not in _types(frames)
+
+
+# ---------- 事实回灌：让模型知道任务真的成功了 ----------
+
+_TASK_SUCCEEDED = "7e0684c9-1c4a-4a4f-9d0e-2b7d3f1a5c88"
+
+
+class _FakeMedia:
+    """只实现 get：事实回灌只查状态，不需要提交能力。"""
+
+    def __init__(self, tasks: dict[str, Any]) -> None:
+        self._tasks = tasks
+
+    async def get(self, task_id: str):
+        return self._tasks.get(task_id)
+
+
+class _Task:
+    def __init__(self, task_id: str, status: str, error: str | None = None) -> None:
+        from app.media.base import TaskStatus
+
+        self.id = task_id
+        self.status = TaskStatus(status)
+        self.error = error
+
+
+def _system_text(graph: ScriptedGraph, turn: int) -> str:
+    """取第 turn 趟送给模型的第一条消息（system）正文。"""
+    first = graph.inputs[turn][0]
+    return first.content if isinstance(first.content, str) else str(first.content)
+
+
+async def test_next_turn_learns_the_task_succeeded(monkeypatch):
+    """第一轮真提交了生图任务，第二轮必须知道它成功了。
+
+    这是 2026-11-02 那次故障的根因：模型连着三轮说「服务卡住了」，
+    而三个任务全部 succeeded。它拿不到终态，只能从「用户说没看到图」
+    反推「任务失败」——信息闭环断了，再聪明的模型也只能猜。
+    """
+    graph = ScriptedGraph([_TOOL_OK, [_final_message("图已经生成好了，刷新一下就能看到。")]])
+    media = _FakeMedia({_TASK_SUCCEEDED: _Task(_TASK_SUCCEEDED, "succeeded")})
+    service = _service(monkeypatch, graph, media=media)
+    session = await service.create_session()
+
+    await _frames(service, session.id, "帮我生成三张旅行图")
+    await _frames(service, session.id, "图在哪")
+
+    prompt = _system_text(graph, 1)
+    assert _TASK_SUCCEEDED[:8] in prompt
+    assert "已成功生成" in prompt
+    assert "问题在展示环节" in prompt
+
+
+async def test_failed_task_reason_reaches_the_next_turn(monkeypatch):
+    """失败也要如实回灌原因，否则模型只能说「不知道」，用户也拿不到可执行的信息。"""
+    graph = ScriptedGraph([_TOOL_OK, [_final_message("这次没成，原因是账号欠费。")]])
+    media = _FakeMedia(
+        {_TASK_SUCCEEDED: _Task(_TASK_SUCCEEDED, "failed", "生图账号欠费，图片没有生成")}
+    )
+    service = _service(monkeypatch, graph, media=media)
+    session = await service.create_session()
+
+    await _frames(service, session.id, "帮我生成三张旅行图")
+    await _frames(service, session.id, "图呢")
+
+    prompt = _system_text(graph, 1)
+    assert "欠费" in prompt
+
+
+async def test_expired_task_is_left_out_instead_of_guessed(monkeypatch):
+    """任务过期查不到时，宁可少说一句，也不要编一个状态。"""
+    graph = ScriptedGraph([_TOOL_OK, [_final_message("好。")]])
+    service = _service(monkeypatch, graph, media=_FakeMedia({}))
+    session = await service.create_session()
+
+    await _frames(service, session.id, "帮我生成三张旅行图")
+    await _frames(service, session.id, "图呢")
+
+    prompt = _system_text(graph, 1)
+    assert "系统提供的当前事实" not in prompt
+
+
+async def test_first_turn_has_no_facts_block(monkeypatch):
+    """首轮没有可查的历史，不该凭空出现一个「当前事实」标题。"""
+    graph = ScriptedGraph([[_final_message("你好。")]])
+    service = _service(monkeypatch, graph, media=_FakeMedia({}))
+    session = await service.create_session()
+
+    await _frames(service, session.id, "你好")
+
+    assert "系统提供的当前事实" not in _system_text(graph, 0)
+
+
+async def test_previous_warning_is_fed_back(monkeypatch):
+    """上一轮被自检标记过，下一轮必须告诉模型「那句话不是事实」。
+
+    否则它把自己编的「已提交」当事实读回去，越推越偏——
+    2026-11-02 那次就是这样：谎话成了它自己的证据。
+    """
+
+    class _Silent:
+        def instruction(self, diagnosis):
+            return None
+
+    claim = "三张图都提交生成好了。"
+    graph = ScriptedGraph([[_final_message(claim)], [_final_message("我重新提交。")]])
+    service = _service(monkeypatch, graph, repair=_Silent(), media=_FakeMedia({}))
+    session = await service.create_session()
+
+    await _frames(service, session.id, "帮我生成三张旅行图")
+    await _frames(service, session.id, "重试")
+
+    prompt = _system_text(graph, 1)
+    assert "CLAIMED_WITHOUT_ACTION" in prompt
+    assert "不是事实" in prompt

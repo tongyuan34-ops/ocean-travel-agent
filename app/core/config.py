@@ -7,13 +7,40 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+
+def _writable_root() -> Path:
+    """可写根目录：.env、media/、data/ 都落在这里。
+
+    打包成单文件程序后，``__file__`` 在 PyInstaller 的临时解包目录里
+    （``sys._MEIPASS``），进程一退就被删掉——把用户数据写进去等于每次重启
+    都丢会话、丢生成的图。所以冻结形态下改用 exe 所在目录。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def _resource_root() -> Path:
+    """只读资源根目录：前端静态文件这类**随程序分发**的东西。
+
+    冻结形态下它们在 ``_MEIPASS`` 里，不能和可写目录混为一谈——
+    混了就会出现「exe 旁边找不到 web/」或者「静态文件被写进临时目录」。
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        return Path(bundle)
+    return Path(__file__).resolve().parents[2]
+
+
 # app/core/config.py -> app/core -> app -> 项目根
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = _writable_root()
+RESOURCE_ROOT = _resource_root()
 ENV_FILE = PROJECT_ROOT / ".env"
 
 

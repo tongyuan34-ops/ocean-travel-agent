@@ -611,7 +611,7 @@ curl http://localhost:8000/api/v1/system/capabilities
 | `MAP_API_KEY` | 高德 Web 服务，路线 / POI / 天气共用 | `plan_route` 等返回 `TOOL_NOT_ENABLED` |
 | `WEATHER_API_KEY` | 和风 / OpenWeatherMap | 天气工具不可用 |
 | `BING_SEARCH_API_KEY` | 必应检索；留空回退抓 cn.bing.com HTML | 检索质量下降 |
-| `STORAGE_BACKEND` | `redis` / `memory` | 默认 memory，重启丢会话 |
+| `STORAGE_BACKEND` | `redis` / `file` / `memory` | 默认 memory，重启丢会话；桌面版用 `file` |
 | `ALLOWED_ROOTS` | 文件工具白名单，逗号分隔 | **留空 = 禁止所有文件操作** |
 | `IMAGE_BACKEND` | `custom` / `none` | 生图不可用 |
 | `ENABLE_SESSION_FETCH` | 社媒登录态采集，默认关 | 相关工具不可用 |
@@ -850,7 +850,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 521 passed, 1 skipped
+uv run pytest                        # 543 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -893,10 +893,11 @@ app/
 ├── core/            # 配置、上下文预算、错误、身份、网络、沙箱、日志、追踪
 ├── media/           # 生图/生视频后端、任务状态机、用户上传图片
 ├── services/        # 会话、偏好、事件流、行程导出、自检、自愈、事实回灌
-├── storage/         # 会话存储（memory / redis）
+├── storage/         # 会话存储（memory / redis / file）
+├── standalone.py    # 单端口入口：静态页 + API 同进程，带 Basic 鉴权
 └── main.py
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 521 个离线测试（不联网、不调模型）
+tests/               # 543 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）

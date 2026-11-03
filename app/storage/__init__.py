@@ -33,5 +33,13 @@ def build_session_store(settings: Settings) -> SessionStore:
         logger.info("会话存储：Redis（%s，TTL=%ss）", settings.redis_url, settings.session_ttl_sec)
         return RedisSessionStore(client, ttl_sec=settings.session_ttl_sec)
 
+    if settings.storage_backend == "file":
+        from app.core.config import PROJECT_ROOT
+        from app.storage.file import FileSessionStore
+
+        # 桌面版默认走这条：单用户单进程，一个 JSON 文件就够，
+        # 卸载时删掉 exe 所在目录即可，不留后门
+        return FileSessionStore(PROJECT_ROOT / "data" / "sessions.json")
+
     logger.info("会话存储：内存（进程重启后会话会丢失）")
     return MemorySessionStore()

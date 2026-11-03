@@ -57,6 +57,9 @@ TOOL_ERROR_PREFIXES: tuple[str, ...] = (
     "INVALID_REQUEST",
     "SEARCH_FAILED",
     "KNOWLEDGE_EMPTY",
+    # 外部 MCP 工具失败：前缀在这里而不在 client.py 里定义，
+    # 否则 SSE 的 tool_result 会把它记成 ok，前端显示成功、模型看到失败
+    "MCP_TOOL_FAILED",
     "LINK_PARSE_FAILED",
     "FETCH_FAILED",
     "URL_NOT_ALLOWED",

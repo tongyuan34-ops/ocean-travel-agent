@@ -213,3 +213,22 @@ async def test_broken_server_does_not_raise():
         assert tools == []
     finally:
         await shutdown()
+
+
+async def test_external_failure_is_recognised_as_error_by_sse_layer():
+    """外部工具失败必须被 SSE 的 tool_result 记成 error，而不是 ok。
+
+    这里真漏过一次：``MCP_TOOL_FAILED`` 只写在 client.py 的返回值里，
+    没进 ``TOOL_ERROR_PREFIXES``。后果是前端把一次失败渲染成绿色成功，
+    而模型拿到的是失败文本——两边对同一件事的判断不一致。
+    """
+    from app.core.errors import TOOL_ERROR_PREFIXES
+
+    client = _client("modern")
+    try:
+        await client.start()
+        tools = {item["name"]: item for item in await client.list_tools()}
+        output = await to_langchain_tool(client, tools["fail"]).ainvoke({})
+        assert output.startswith(TOOL_ERROR_PREFIXES)
+    finally:
+        await client.close()

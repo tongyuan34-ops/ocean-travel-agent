@@ -1,0 +1,181 @@
+# 检索回归集：一条 = 一个真实问法 + 期望命中的小节
+#
+# 标注粒度是「文件 › 小节」，不是「文件」——查询「末班船」命中 40-海岛与轮渡.md
+# 的「晕船」小节也算文件级成功，但对模型毫无用处。小节级才是诚实的目标。
+#
+# expect 是列表：同一问法可能合理地命中多个小节，任意一个命中都算对。
+# expect 为空列表 = 负例：知识库里没有相关内容，必须**返回空**，不能硬凑三条
+# 不相关的规则让模型当依据——这比「查不到」危险得多。
+#
+# 每条覆盖知识库的一个小节（23 个小节全覆盖），另加若干负例。
+# 加新文档后跑 `python -m evals.retrieval` 看有没有漏标的小节。
+
+cases:
+  # ---- 10-行程节奏.md ----
+  - id: pacing-count
+    query: 一天安排几个景点合适
+    expect: ["10-行程节奏.md › 单日景点数量"]
+
+  - id: pacing-overpacked
+    query: 景点排太满会怎么样
+    expect: ["10-行程节奏.md › 单日景点数量"]
+
+  - id: pacing-transfer-buffer
+    query: 景点之间要留多少路上的时间
+    expect: ["10-行程节奏.md › 通勤缓冲"]
+
+  - id: pacing-navigation-optimistic
+    query: 导航估的时间准不准
+    expect: ["10-行程节奏.md › 通勤缓冲"]
+
+  - id: pacing-arrival-day
+    query: 到达第一天怎么安排
+    expect: ["10-行程节奏.md › 首日与末日"]
+
+  - id: pacing-departure-day
+    query: 离开当天几点要从景点往回走
+    expect: ["10-行程节奏.md › 首日与末日"]
+
+  - id: pacing-blank
+    query: 三天的行程要不要留半天空白
+    expect: ["10-行程节奏.md › 留白"]
+
+  # ---- 20-预算口径.md ----
+  - id: budget-items
+    query: 预算应该分成哪几类
+    expect: ["20-预算口径.md › 预算包含哪几项"]
+
+  - id: budget-misc
+    query: 杂项预算留多少
+    expect: ["20-预算口径.md › 预算包含哪几项"]
+
+  - id: budget-per-person-vs-total
+    query: 一家人出去玩预算报人均还是报总价
+    expect: ["20-预算口径.md › 人均还是总价"]
+
+  - id: budget-hidden-fees
+    query: 景区门票之外还有什么隐性消费
+    expect: ["20-预算口径.md › 门票与区间车"]
+
+  - id: budget-shuttle-cable
+    query: 区间车和索道要不要单独列出来
+    expect: ["20-预算口径.md › 门票与区间车"]
+
+  - id: budget-price-source
+    query: 报价的时候要不要写清楚价格是哪天的
+    expect: ["20-预算口径.md › 价格必须标注来源与时间"]
+
+  # 已知未命中（检索器能力边界，不是标注错）：查询里的关键概念是**单字**
+  # 「省」，而二元组只会产出「省最」「里省」——和正文的「省钱」对不上。
+  # 换成「省钱有哪些方向」就能命中，但真实用户不会那样说话。
+  # 修法得给 CJK 加一层单字 term，实测会连负例一起打穿（5/5 → 0/5），
+  # 除非同时加覆盖度门槛，而那样 net 收益是 +1/−1，不值得。
+  - id: budget-save
+    query: 预算有限从哪里省最划算
+    expect: ["20-预算口径.md › 省钱的方向"]
+    known_fail: true
+
+  # ---- 30-亲子与长辈出行.md ----
+  - id: kids-count
+    query: 带两岁小孩一天能去几个景点
+    expect: ["30-亲子与长辈出行.md › 节奏比景点重要"]
+
+  # 已知未命中：同上，关键概念「住」是单字。目标小节的原文是
+  # 「住宿离核心景区近」，二元组「住景」「景区」都对不上查询的「要住」「住景」，
+  # 反而 40-海岛与轮渡.md 的「行李与体力」因为同时含「小孩」「附近」「住处」
+  # 拿了最高分——它讲的是岛上搬行李，和「住哪」不是一回事。
+  - id: kids-hotel-location
+    query: 带小孩要不要住景区附近
+    expect: ["30-亲子与长辈出行.md › 住宿位置是第一优先级"]
+    known_fail: true
+
+  - id: kids-precheck
+    query: 带孩子出门之前要确认什么
+    expect: ["30-亲子与长辈出行.md › 必须提前确认的三件事"]
+
+  - id: elder-avoid-hiking
+    query: 带老人能安排爬山吗
+    expect: ["30-亲子与长辈出行.md › 不要安排的项目"]
+
+  - id: kids-tired-fallback
+    query: 小孩子走累了行程怎么调整
+    expect: ["30-亲子与长辈出行.md › 弹性要写在行程里"]
+
+  - id: elder-general
+    query: 老人出行要注意什么
+    expect:
+      - "30-亲子与长辈出行.md › 节奏比景点重要"
+      - "30-亲子与长辈出行.md › 不要安排的项目"
+      - "30-亲子与长辈出行.md › 必须提前确认的三件事"
+
+  # 已知歧义：查询本身带「行程节奏」，会把 10-行程节奏.md 推到前面。
+  # 期望的其实是亲子文档，但这属于合理歧义，不是实现错误。
+  # 标成 known_fail 是为了让这条**留在基线里**：哪天它过了说明调参动对了，
+  # 哪天别的用例因为它变坏也能看见。
+  - id: kids-pacing-ambiguous
+    query: 带两岁小孩的行程节奏
+    expect: ["30-亲子与长辈出行.md › 节奏比景点重要"]
+    known_fail: true
+
+  # ---- 40-海岛与轮渡.md ----
+  - id: ferry-schedule-trust
+    query: 轮渡班次表靠谱吗
+    expect: ["40-海岛与轮渡.md › 班次必须以当天公告为准"]
+
+  - id: ferry-last-boat
+    query: 末班船赶不上怎么办
+    expect: ["40-海岛与轮渡.md › 末班船是硬约束"]
+
+  - id: ferry-last-boat-time
+    query: 岛上玩最晚几点要往码头走
+    expect: ["40-海岛与轮渡.md › 末班船是硬约束"]
+
+  - id: island-typhoon
+    query: 台风天海岛行程怎么安排
+    expect: ["40-海岛与轮渡.md › 天气影响比陆地大"]
+
+  - id: seasick
+    query: 晕船的人坐短途船要不要紧
+    expect: ["40-海岛与轮渡.md › 行李与体力"]
+
+  # ---- 50-雨天与备选方案.md ----
+  - id: rain-shower
+    query: 下午雷阵雨要改行程吗
+    expect: ["50-雨天与备选方案.md › 先判断雨的类型"]
+
+  - id: rain-backup-types
+    query: 下雨天的备选方案有哪些
+    expect: ["50-雨天与备选方案.md › 备选方案的三种类型"]
+
+  - id: rain-better
+    query: 雨天去哪里玩更合适
+    expect: ["50-雨天与备选方案.md › 哪些项目雨天反而更好"]
+
+  - id: rain-mountain-risk
+    query: 暴雨预警还能去山里吗
+    expect: ["50-雨天与备选方案.md › 必须提醒的风险"]
+
+  - id: rain-write-in-plan
+    query: 雨天备选方案要不要写进行程
+    expect: ["50-雨天与备选方案.md › 行程里怎么写"]
+
+  # ---- 负例：知识库里没有，必须返回空 ----
+  - id: neg-cook
+    query: 红烧肉怎么做
+    expect: []
+
+  - id: neg-weekly-report
+    query: 帮我写一份周报
+    expect: []
+
+  - id: neg-python-error
+    query: Python 报错怎么修
+    expect: []
+
+  - id: neg-laptop
+    query: 推荐几款笔记本
+    expect: []
+
+  - id: neg-stock
+    query: 今天股市怎么样
+    expect: []

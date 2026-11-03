@@ -76,7 +76,7 @@ def _call(params: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["modern", "legacy", "silent"], default="modern")
+    parser.add_argument("--mode", choices=["modern", "legacy", "silent", "crash"], default="modern")
     args = parser.parse_args()
 
     for line in sys.stdin:
@@ -123,6 +123,9 @@ def main() -> int:
         elif method == "tools/list":
             response = _result(request_id, {"resultType": "complete", "tools": TOOLS})
         elif method == "tools/call":
+            if args.mode == "crash":
+                # 收到调用就直接退出，模拟服务端算到一半崩掉
+                sys.exit(3)
             payload = _call(params)
             if payload is None:
                 response = _error(request_id, -32602, f"Unknown tool: {params.get('name')}")

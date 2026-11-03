@@ -106,42 +106,59 @@ class StdioMCPClient:
         self._version = protocol.PROTOCOL_VERSION
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL)
         self._tasks: list[asyncio.Task[None]] = []
+        # 子进程死掉后要能重连，而重连必须串行——并发两个调用同时发现「进程没了」
+        # 会各起一个子进程，其中一个永远没人用，还占着 stdin 管道
+        self._start_lock = asyncio.Lock()
 
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
-        if self._proc is not None:
-            return
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
-                self._command,
-                *self._args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=self._env,
-                cwd=self._cwd,
-            )
-        except (OSError, NotImplementedError) as exc:
-            raise MCPError(f"无法启动 MCP 服务端 {self.name}（{self._command}）：{exc}") from exc
+        async with self._start_lock:
+            if self._proc is not None and self._era is not None:
+                return
+            if self._proc is not None:
+                # 上次启动到一半就失败了，残留的进程先清掉
+                await self._terminate()
+            try:
+                self._proc = await asyncio.create_subprocess_exec(
+                    self._command,
+                    *self._args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=self._env,
+                    cwd=self._cwd,
+                )
+            except (OSError, NotImplementedError) as exc:
+                raise MCPError(
+                    f"无法启动 MCP 服务端 {self.name}（{self._command}）：{exc}"
+                ) from exc
 
-        self._tasks = [
-            asyncio.create_task(self._read_stdout(), name=f"mcp-{self.name}-stdout"),
-            asyncio.create_task(self._read_stderr(), name=f"mcp-{self.name}-stderr"),
-        ]
-        await self._negotiate()
+            self._tasks = [
+                asyncio.create_task(self._read_stdout(), name=f"mcp-{self.name}-stdout"),
+                asyncio.create_task(self._read_stderr(), name=f"mcp-{self.name}-stderr"),
+            ]
+            try:
+                await self._negotiate()
+            except BaseException:
+                # 协商失败就回到「没启动」的状态，否则下次 start() 会因为
+                # _proc 非空直接返回，然后带着 era=None 发请求
+                await self._terminate()
+                raise
 
     async def close(self) -> None:
+        self._fail_pending("客户端已关闭")
+        await self._terminate()
+
+    async def _terminate(self) -> None:
+        """取消读取任务并结束子进程。可重入：状态已经清过就直接返回。"""
         for task in self._tasks:
             task.cancel()
         self._tasks = []
-        for future in self._pending.values():
-            if not future.done():
-                future.set_exception(MCPError("客户端已关闭"))
-        self._pending.clear()
 
         proc = self._proc
         self._proc = None
+        self._era = None
         if proc is None:
             return
         if proc.stdin is not None and not proc.stdin.is_closing():
@@ -154,6 +171,21 @@ class StdioMCPClient:
             proc.kill()
             await proc.wait()
 
+    def _fail_pending(self, reason: str) -> None:
+        """把还挂着的请求全部失败掉。
+
+        子进程中途死掉时**必须**立刻这么做：不做的结果是这些请求要等满
+        ``call_timeout``（默认 120s）才报「没有响应」，真因是崩溃、报出来的是超时，
+        排障方向直接跑偏。
+        """
+        if not self._pending:
+            return
+        message = f"MCP 服务端 {self.name} {reason}：{self._diagnostics()}"
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(MCPError(message))
+        self._pending.clear()
+
     # ---------- IO ----------
 
     async def _read_stdout(self) -> None:
@@ -162,6 +194,11 @@ class StdioMCPClient:
         while True:
             line = await stream.readline()
             if not line:
+                # EOF = 子进程没了。这里不 cancel 自己的兄弟任务（stderr 读到 EOF
+                # 也会自己退出），只把状态清干净，让下一次调用重新拉起进程。
+                self._fail_pending("已退出")
+                self._proc = None
+                self._era = None
                 return
             text = line.decode("utf-8", "replace").strip()
             if not text:

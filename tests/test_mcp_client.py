@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -230,5 +232,46 @@ async def test_external_failure_is_recognised_as_error_by_sse_layer():
         tools = {item["name"]: item for item in await client.list_tools()}
         output = await to_langchain_tool(client, tools["fail"]).ainvoke({})
         assert output.startswith(TOOL_ERROR_PREFIXES)
+    finally:
+        await client.close()
+
+
+# ---------- 子进程中途死掉 ----------
+
+
+async def test_crash_mid_call_fails_fast_instead_of_waiting_for_timeout():
+    """服务端在 tools/call 里崩掉，报错必须是「已退出」而不是「超时」。
+
+    之前 stdout 读到 EOF 就直接 return，挂着的 future 没人管，调用方要等满
+    ``call_timeout``（线上是 120s）才拿到一句「在 120s 内没有响应」——
+    真因是崩溃，报出来的是超时，排障方向直接跑偏。
+    """
+    client = _client("crash", call_timeout=20.0)
+    try:
+        await client.start()
+        await client.list_tools()
+        started = time.monotonic()
+        with pytest.raises(MCPError) as excinfo:
+            await client.call_tool("echo", {"text": "x"})
+        elapsed = time.monotonic() - started
+        assert "已退出" in str(excinfo.value)
+        # 远小于 call_timeout 就说明是 EOF 立刻失败的，不是等超时
+        assert elapsed < 5.0
+    finally:
+        await client.close()
+
+
+async def test_crash_clears_state_so_next_call_can_reconnect():
+    """崩过一次之后状态要清干净，否则后续调用会一直撞在同一个死进程上。"""
+    client = _client("crash", call_timeout=20.0)
+    try:
+        await client.start()
+        await client.list_tools()
+        with pytest.raises(MCPError):
+            await client.call_tool("echo", {"text": "x"})
+        # 等 EOF 任务跑完
+        await asyncio.sleep(0)
+        assert client._proc is None
+        assert client._era is None
     finally:
         await client.close()

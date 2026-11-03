@@ -29,16 +29,35 @@ ROOT = Path(SPECPATH).resolve().parent
 WEB = ROOT / "web"
 KNOWLEDGE = ROOT / "knowledge"
 
-# 静态资源：逐个文件列，顺便把 .py / __pycache__ 排掉
-datas = [
-    (str(path), f"web/{path.relative_to(WEB).as_posix()}")
-    for path in WEB.rglob("*")
-    if path.is_file() and path.suffix not in (".py", ".pyc") and "__pycache__" not in path.parts
-]
-datas += [
-    (str(path), f"knowledge/{path.relative_to(KNOWLEDGE).as_posix()}")
-    for path in KNOWLEDGE.rglob("*.md")
-]
+
+def data_pairs(source: Path, target: str, suffixes: tuple[str, ...] | None = None):
+    """把目录下的文件映射成 PyInstaller 的 datas 条目。
+
+    **第二个元素是目标目录，不是目标文件路径。** 写成
+    ``(…/index.html, "web/index.html")`` 会得到
+    ``_internal/web/index.html/index.html`` —— 每个静态文件都被塞进一个同名
+    文件夹里，于是整个前端 404、知识库语料也读不到，而打包过程一声不响。
+
+    这个坑在第一次打包时就存在，直到有人真的打开窗口才被发现。所以
+    ``scripts/build_desktop.py`` 的冒烟现在会请求首页并检查 HTML。
+    """
+    pairs: list[tuple[str, str]] = []
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        if suffixes is not None and path.suffix not in suffixes:
+            continue
+        # web/ 里混着 serve.py 这类源码，随包发出去既没用又多一个可执行文本
+        if path.suffix in (".py", ".pyc") or "__pycache__" in path.parts:
+            continue
+        parent = path.parent.relative_to(source).as_posix()
+        folder = target if parent == "." else f"{target}/{parent}"
+        pairs.append((str(path), folder))
+    return pairs
+
+
+# 静态资源与知识库语料：都是只读、随版本走，放进 _MEIPASS
+datas = data_pairs(WEB, "web") + data_pairs(KNOWLEDGE, "knowledge", suffixes=(".md",))
 
 # uvicorn 按字符串动态导入 loop / protocol / lifespan 实现，静态分析看不到
 hiddenimports = collect_submodules("uvicorn")

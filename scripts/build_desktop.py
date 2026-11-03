@@ -195,12 +195,27 @@ def _health(port: int) -> bool:
         return False
 
 
+def _fetch(url: str, timeout: float = 5.0) -> tuple[int, str]:
+    """取一个地址，返回 (状态码, 正文)。4xx/5xx 不抛异常，交给调用方判断。"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+    except (urllib.error.URLError, OSError):
+        return 0, ""
+
+
 def smoke() -> None:
     """把打出来的 exe 真跑一遍。
 
     窗口程序没有标准流，所以这里只能靠它自己写出来的两样东西判断死活：
     ``data/instance.json``（说明服务起来了）和 ``logs/app.log``（说明文件
     日志生效了——这条路径在源码模式下永远走不到）。
+
+    **首页必须查**。健康检查只能说明 API 活着，说不了前端有没有打对位置：
+    静态文件错位的那一版，``/api/v1/health`` 一直是 200，而窗口里只有一个
+    ``{"detail":"Not Found"}``。用户看到的是白屏，我们这边全绿。
     """
     if not EXE.exists():
         raise SystemExit(f"没有产物：{EXE}")
@@ -238,6 +253,21 @@ def smoke() -> None:
         if not (APP_DIR / "config.json").exists():
             raise SystemExit("没有生成 config.json 模板")
         print("首次运行产物齐全：config.json")
+
+        # 首页：窗口里显示的就是它。这一条要是缺了，前面全绿也没意义
+        status, body = _fetch(f"http://127.0.0.1:{port}/")
+        if status != 200 or "<!doctype html" not in body[:200].lower():
+            raise SystemExit(
+                f"首页返回 {status}，前端没打进包（datas 的第二列必须是**目录**）"
+            )
+        print(f"首页正常：{len(body)} 字节 HTML")
+
+        # 知识库语料：静态文件错位时它同样会变成一堆空目录，检索会静默失效
+        corpus = APP_DIR / "_internal" / "knowledge"
+        docs = [path for path in corpus.glob("*.md") if path.is_file()]
+        if len(docs) < 3:
+            raise SystemExit(f"知识库语料没打进包：{corpus} 下只有 {len(docs)} 篇")
+        print(f"知识库正常：{len(docs)} 篇语料")
     finally:
         proc.terminate()
         try:

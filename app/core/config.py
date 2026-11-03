@@ -2,46 +2,33 @@
 
 注意：本环境未安装 pydantic-settings，故用 dotenv + dataclass 实现。
 后续如需强校验，可平滑替换为 pydantic-settings。
+
+**取值的三层回退**：环境变量 → 用户 ``config.json`` → 打包内置快照。
+实现和「为什么内置 key 不安全」都在 ``app/core/secrets.py``。
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.core import secrets
+from app.core.paths import PROJECT_ROOT
 
-def _writable_root() -> Path:
-    """可写根目录：.env、media/、data/ 都落在这里。
-
-    打包成单文件程序后，``__file__`` 在 PyInstaller 的临时解包目录里
-    （``sys._MEIPASS``），进程一退就被删掉——把用户数据写进去等于每次重启
-    都丢会话、丢生成的图。所以冻结形态下改用 exe 所在目录。
-    """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
-
-
-def _resource_root() -> Path:
-    """只读资源根目录：前端静态文件这类**随程序分发**的东西。
-
-    冻结形态下它们在 ``_MEIPASS`` 里，不能和可写目录混为一谈——
-    混了就会出现「exe 旁边找不到 web/」或者「静态文件被写进临时目录」。
-    """
-    bundle = getattr(sys, "_MEIPASS", None)
-    if bundle:
-        return Path(bundle)
-    return Path(__file__).resolve().parents[2]
-
-
-# app/core/config.py -> app/core -> app -> 项目根
-PROJECT_ROOT = _writable_root()
-RESOURCE_ROOT = _resource_root()
 ENV_FILE = PROJECT_ROOT / ".env"
+
+# 桌面版「装完就能用」靠的是这三层里的最后一层，启动时把来源打出来——
+# 用户报「用不了」时，第一件事就是看他的 key 是哪来的
+KEY_NAMES = (
+    "MODEL_API_KEY",
+    "MAP_API_KEY",
+    "WEATHER_API_KEY",
+    "BING_SEARCH_API_KEY",
+    "ARK_API_KEY",
+    "LITEAPI_KEY",
+)
 
 
 def _ensure_no_proxy() -> None:
@@ -57,7 +44,13 @@ def _ensure_no_proxy() -> None:
 
 
 def _get(key: str, default: str = "") -> str:
-    return (os.getenv(key) or default).strip()
+    """环境变量 → config.json → 打包内置 → 默认值。
+
+    空字符串算「没配」，继续往下找：用户在 config.json 里写
+    ``"MODEL_API_KEY": ""`` 的意思几乎一定是「我没填，用你的」，
+    而不是「故意把它清空」。
+    """
+    return (os.getenv(key) or secrets.value(key) or default).strip()
 
 
 def _get_int(key: str, default: int) -> int:
@@ -207,6 +200,8 @@ def load_settings() -> Settings:
     """加载 .env 并返回配置对象。"""
     load_dotenv(ENV_FILE, encoding="utf-8-sig", override=False)
     _ensure_no_proxy()
+    # 用户可能刚改过 config.json：读一次，之后同一次 load 里不重复 stat
+    secrets.refresh()
 
     return Settings(
         model_provider=_get("MODEL_PROVIDER", "openai_compatible"),
@@ -265,7 +260,7 @@ def load_settings() -> Settings:
         knowledge_topk=_get_int("KNOWLEDGE_TOPK", 4),
         mcp_servers=_get("MCP_SERVERS"),
         mcp_call_timeout_sec=_get_int("MCP_CALL_TIMEOUT_SEC", 120),
-        enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", False),
+        enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", True),
         cookie_dir=_get("COOKIE_DIR", "cookies"),
         mediacrawler_path=_get("MEDIACRAWLER_PATH", "D:/MediaCrawler"),
         mediacrawler_timeout=_get_int("MEDIACRAWLER_TIMEOUT", 200),

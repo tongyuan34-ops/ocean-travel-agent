@@ -12,7 +12,8 @@ from fastapi import APIRouter, Request
 
 from app.adapters import available_platforms
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS
-from app.core.config import Settings
+from app.core import secrets
+from app.core.config import KEY_NAMES, Settings
 from app.core.security import is_windows
 from app.version import __version__
 
@@ -41,6 +42,8 @@ async def capabilities(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     platforms = _platforms(settings)
     social_ready = [name for name in platforms if name in SOCIAL_PLATFORM_KEYS]
+    sources = secrets.describe(KEY_NAMES)
+    on_bundled = sorted(name for name, source in sources.items() if source == secrets.BUNDLED)
 
     return {
         "image_gen": media_caps["image_gen"],
@@ -63,6 +66,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "vision": request.app.state.uploads is not None,
         # 前端据此渲染来源筛选器，不得硬编码平台清单
         "platforms": platforms,
+        # key 是从哪来的：env / config / bundled / ""（没配）。**只有来源，没有值**。
+        # 用内置额度时前端该提示一句「额度用尽可自行填写」，否则用户会以为程序坏了
+        "key_sources": sources,
+        "using_bundled_keys": on_bundled,
     }
 
 

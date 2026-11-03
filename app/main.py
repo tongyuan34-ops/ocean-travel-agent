@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.permissions import build_decision_channel
 from app.api.routes import chat, media, memory, permissions, share, system, tools, trips
-from app.core.config import PROJECT_ROOT, load_settings
+from app.core import secrets
+from app.core.config import KEY_NAMES, PROJECT_ROOT, load_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.tracing import configure_tracing
@@ -38,6 +39,15 @@ def create_app() -> FastAPI:
     # 日志与追踪必须在任何业务代码之前配好，否则启动期的告警拿不到 trace_id
     configure_logging(settings.log_level)
     configure_tracing(settings)
+
+    # 只打来源不打值。用户报「用不了」时，第一件事就是看他的 key 是哪来的
+    _sources = secrets.describe(KEY_NAMES)
+    logger.info(
+        "key 来源：%s",
+        "，".join(f"{name}={source or '未配置'}" for name, source in _sources.items()),
+    )
+    if any(source == secrets.BUNDLED for source in _sources.values()):
+        logger.warning("正在使用**打包内置**的 key：额度用尽后请在 config.json 里填自己的")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -210,6 +210,73 @@ Infinite Canvas 保留作你手动创作的画布与工作台。
 
 ---
 
+## 第 7 步 · 桌面版分发：key 从哪来
+
+自己跑的时候 key 在 `.env` 里；**发给别人**时对方没有 `.env`。所以要决定
+「装完就能用」靠什么。
+
+### 三层回退
+
+取值顺序写死在 `app/core/secrets.py`，从高到低：
+
+| 顺序 | 来源 | 谁在用 |
+|---|---|---|
+| 1 | 环境变量（含 `.env`） | 开发机、高级用户 |
+| 2 | `config.json`（exe 旁边，或 `~/.ocean-travel-agent/config.json`） | 用户的逃生口 |
+| 3 | 打包内置 `app/core/_bundled_keys.py` | 开箱即用 |
+
+启动日志会打出每一项的来源（只打来源，不打值）：
+
+```
+key 来源：MODEL_API_KEY=bundled，MAP_API_KEY=bundled，WEATHER_API_KEY=未配置
+```
+
+`/api/v1/system/capabilities` 里也有同样的信息，字段是 `key_sources` 和
+`using_bundled_keys`，前端可以据此提示「额度用尽请自行填写」。
+
+### 出包：把 key 打进去
+
+```bash
+python scripts/make_bundled_keys.py --dry-run   # 先看会打包哪些项（不打印值）
+python scripts/make_bundled_keys.py             # 生成 app/core/_bundled_keys.py
+```
+
+生成物**已经在 `.gitignore` 里**，只在构建机上存在。没有这个文件时应用照常
+启动，退回 `.env`——所以开发机不需要它。
+
+脚本用**白名单**而不是黑名单：往 `.env` 里新加一个密钥，默认不会被打包，
+要显式加进 `INCLUDE`。`STORAGE_BACKEND` 这类由 `OVERRIDES` 强制覆盖
+（开发机上可能是 `redis`，用户机器上没有 Redis）。
+
+### 内置 key 的真实风险
+
+**base64 + 异或只挡随手翻包的人。** 盐就在同一个文件里，反混淆五行代码的事。
+别把它当加密。
+
+真正的对策全在服务商后台：
+
+1. **给内置 key 单独设低额度**，别和主账号共用
+2. **泄露了立刻换**——用户自己填的 key 不受影响，所以换 key 不需要发新版本
+3. 想让用户自己填，告诉他建一个 `config.json`：
+
+```json
+{
+  "MODEL_API_KEY": "sk-...",
+  "MAP_API_KEY": "..."
+}
+```
+
+改完重启生效（配置在启动时读一次，不做热加载）。
+
+### 还没有的东西
+
+- 首次启动向导（现在只能手写 `config.json`）
+- 额度用尽时的友好提示（后端只给数据，提示要前端做）
+- `ALLOWED_ROOTS` 的默认值：桌面版应该默认指向用户主目录，
+  否则 `filesystem` 能力是关的，`write_file` 一律被拒
+
+---
+
 ## 验证清单
 
 | 检查项 | 命令 / 方式 |

@@ -3,6 +3,13 @@
 .env.local
 .env.*.local
 
+# 出包时生成的内置配置快照，里面是明文（混淆后的）API key。
+# 由 scripts/make_bundled_keys.py 生成，只在构建机上存在。
+app/core/_bundled_keys.py
+
+# 用户自己的 key / 配置覆盖（桌面版：exe 旁边的 config.json）
+/config.json
+
 # 用户 Cookie（等于账号登录态，明文存储）
 cookies/
 

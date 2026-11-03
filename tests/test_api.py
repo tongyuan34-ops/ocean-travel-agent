@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS
 from app.agent.tools import ALL_TOOLS
+from app.core import secrets
+from app.core.config import KEY_NAMES
 
 _VALID_CATEGORIES = {
     "info",
@@ -27,6 +29,30 @@ def test_health(client):
     data = client.get("/api/v1/health").json()
     assert data["status"] == "ok"
     assert {"version", "model", "provider"} <= set(data)
+
+
+def test_capabilities_reports_key_sources_without_values(client):
+    """前端要知道 key 是哪来的，但**绝不能**知道 key 是什么。
+
+    桌面版用户看到「额度用尽」时，得能判断是自己没填还是内置的用完了。
+    """
+    data = client.get("/api/v1/system/capabilities").json()
+
+    sources = data["key_sources"]
+    assert set(sources) == set(KEY_NAMES)
+    assert all(source in {"env", "config", "bundled", ""} for source in sources.values())
+    assert isinstance(data["using_bundled_keys"], list)
+
+
+def test_using_bundled_keys_names_the_ones_in_use(client, monkeypatch):
+    """用内置额度的项要单独列出来，否则用户不知道该去填哪个。"""
+    monkeypatch.delenv("BING_SEARCH_API_KEY", raising=False)
+    monkeypatch.setattr(secrets, "bundled", lambda: {"BING_SEARCH_API_KEY": "placeholder"})
+
+    data = client.get("/api/v1/system/capabilities").json()
+
+    assert data["key_sources"]["BING_SEARCH_API_KEY"] == "bundled"
+    assert data["using_bundled_keys"] == ["BING_SEARCH_API_KEY"]
 
 
 def test_capabilities_shape_and_consistency(client):

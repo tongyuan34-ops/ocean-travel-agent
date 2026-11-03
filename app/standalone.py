@@ -45,7 +45,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 
-from app.core.config import RESOURCE_ROOT
+from app.core.paths import RESOURCE_ROOT
 from app.main import create_app
 
 logger = logging.getLogger(__name__)

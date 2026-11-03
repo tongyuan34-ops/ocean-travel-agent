@@ -24,6 +24,17 @@ _ASCII_WORD = re.compile(r"[a-z0-9][a-z0-9_\-]*")
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
+# 数词与量词。二元组里「数词 + 量词」的组合（「一份」「三个」「两种」）没有任何
+# 主题内容，但二元组切词会让它变成一个**独立可命中**的 term——领域外的问题
+# 「帮我写一份周报」就是靠「一份」命中了预算文档，返回一条不相关的规则。
+#
+# 只收真正没有主题含义的量词：天/元/点 不收（「三天」「预算多少元」「景点」
+# 都是主题词），收了会把正常查询切坏。
+_NUMERALS: frozenset[str] = frozenset("一二三四五六七八九十百千两半几")
+_MEASURES: frozenset[str] = frozenset("份个些种次位张条只件台辆批")
+_QUANTITY_CHARS = _NUMERALS | _MEASURES
+
+
 # 中文虚词与套话。小语料里这些词的 IDF 反而很高（因为出现文档少），
 # 会把真正的主题词压下去：搜「预算怎么分项」时，「怎么」赢过「预算」。
 # 只收高置信度的功能词，宁可少收——多收会误伤「怎么做预算」这类正常表达。
@@ -129,4 +140,13 @@ def tokenize(text: str) -> list[str]:
             flush()
             is_cjk = None
     flush()
-    return [token for token in tokens if token not in STOPWORDS]
+    return [token for token in tokens if token not in STOPWORDS and not _is_quantity_bigram(token)]
+
+
+def _is_quantity_bigram(token: str) -> bool:
+    """「一份」「三个」这类纯数量二元组：两个字符都在数量词表里。
+
+    要求**两个**字符都在表里，而不是「含一个就丢」：「几种」「两天」这种
+    带主题字的组合必须留着（「几天合适」「两天够不够」是真实问法）。
+    """
+    return len(token) == 2 and all(char in _QUANTITY_CHARS for char in token)

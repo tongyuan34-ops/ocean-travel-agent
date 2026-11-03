@@ -42,6 +42,29 @@ def test_stopwords_are_dropped():
     assert "预算" in tokenize("预算怎么分项")
 
 
+def test_quantity_bigrams_are_dropped():
+    """数词+量词的二元组没有主题内容，但能独立命中。
+
+    真踩过：领域外的问题「帮我写一份周报」靠「一份」命中了预算文档，
+    返回一条不相关的规则——工具说「查到了」，模型就拿它当依据。
+    """
+    assert "一份" not in tokenize("帮我写一份周报")
+    assert "三个" not in tokenize("三个景点怎么排")
+    assert "两种" not in tokenize("两种方案选哪个")
+
+
+def test_quantity_rule_only_drops_pure_quantity_pairs():
+    """只丢「两个字都是数量词」的组合。
+
+    「两天」「几天」带主题字（天数本身就是行程里的关键变量），
+    「几点」「多少元」里的 点/元 也不是量词——这些误伤会直接把正常查询切坏。
+    """
+    assert "两天" in tokenize("两天够不够")
+    assert "几天" in tokenize("去几天合适")
+    assert "几点" in tokenize("景点几点关门")
+    assert "少元" in tokenize("预算多少元")
+
+
 def test_fullwidth_is_normalized():
     assert tokenize("ＧＰＴ") == tokenize("gpt")
 
@@ -164,21 +187,16 @@ def test_cache_rebuilds_when_file_changes(tmp_path: Path):
 
 
 def test_repo_corpus_recall_at_three():
-    """仓库自带的语料要能覆盖这些真实问法。
+    """仓库自带的语料在 ``load_knowledge_base`` 这条公开路径上也能查准。
 
-    用 top-3 而不是 top-1：工具默认返回 3 条，用户和模型看到的是一组规则。
-    「带两岁小孩的行程节奏」是已知的失败案例——查询本身就叫「行程节奏」，
-    检索到节奏文档是合理歧义，不是实现错误。这条记在这里，防止以后有人
-    为了让 8/8 好看去调参把别的用例弄坏。
+    完整的检索回归集在 ``tests/test_rag_recall.py``（30 条正例 + 5 条负例，
+    小节级标注）。这里只留三条冒烟：它们走的是 ``load_knowledge_base`` 的
+    缓存路径，而回归集为了能换参数是自己建索引的——两条路径都得有人盯着。
     """
     cases = [
-        ("预算怎么分项", "20-预算口径.md"),
-        ("门票之外还有什么收费", "20-预算口径.md"),
-        ("老人走不动路怎么办", "30-亲子与长辈出行.md"),
-        ("末班船赶不上", "40-海岛与轮渡.md"),
-        ("停航了怎么办", "40-海岛与轮渡.md"),
-        ("雨天怎么改行程", "50-雨天与备选方案.md"),
         ("一天安排几个景点", "10-行程节奏.md"),
+        ("末班船赶不上", "40-海岛与轮渡.md"),
+        ("雨天怎么改行程", "50-雨天与备选方案.md"),
     ]
     reset_cache()
     base = load_knowledge_base(KNOWLEDGE_DIR)

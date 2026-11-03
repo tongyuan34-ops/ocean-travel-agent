@@ -18,6 +18,8 @@ from app.core.config import PROJECT_ROOT, load_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.tracing import configure_tracing
+from app.mcp.registry import load_from_settings
+from app.mcp.registry import shutdown as shutdown_mcp
 from app.media.service import build_media_service
 from app.media.uploads import UploadStore
 from app.services.chat import ChatService
@@ -58,6 +60,12 @@ def create_app() -> FastAPI:
             decision_channel=app.state.decisions,
         )
 
+        # 外部 MCP 工具：配置为空时什么都不做（返回 0），所以默认零成本。
+        # 连不上的服务端只记日志、不阻断启动——可选集成不该让整个应用起不来
+        external = await load_from_settings(settings)
+        if external:
+            logger.info("已接入 %d 个外部 MCP 工具", external)
+
         # 启动时把不可用原因打出来，避免"配了但没生效"这类静默问题
         for kind, reason in app.state.media.unavailable_reasons().items():
             logger.warning("媒体后端不可用 | %s: %s", kind, reason)
@@ -77,6 +85,8 @@ def create_app() -> FastAPI:
         await app.state.event_log.aclose()
         await app.state.decisions.aclose()
         await app.state.session_store.aclose()
+        # 外部 MCP 服务端是子进程，不显式断开就会留成孤儿进程
+        await shutdown_mcp()
 
     app = FastAPI(
         title="旅行规划助手后端",

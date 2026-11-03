@@ -71,6 +71,8 @@
   var CAT_TEXT = {
     info: '信息',
     search: '检索',
+    knowledge: '知识库',
+    mcp: 'MCP',
     plan: '规划',
     media: '生图',
     system: '系统',

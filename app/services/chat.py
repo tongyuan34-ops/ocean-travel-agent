@@ -38,7 +38,7 @@ from app.agent.resilience import (
 )
 from app.core.config import Settings
 from app.core.context import compose_messages, make_summary, plan_fold
-from app.core.errors import ApiError
+from app.core.errors import TOOL_ERROR_PREFIXES, ApiError
 from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
 from app.core.usage import TokenUsage, estimate_usage, usage_from_output
 from app.media.service import MediaService, current_media, current_ref_images
@@ -82,6 +82,7 @@ _TOOL_CATEGORY = {
     "create_dir": "system",
     "delete_path": "system",
     "set_wallpaper": "system",
+    "search_knowledge": "knowledge",
     "search_web": "search",
     "fetch_url": "search",
     "parse_shared_link": "plugin",
@@ -95,23 +96,6 @@ _TASK_ID_RE = re.compile(
     r"task_id[：:\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
-# 工具返回文本以这些错误码开头时，tool_result 记为 error
-_ERROR_PREFIXES = (
-    "TOOL_NOT_ENABLED",
-    "TOOL_FAILED",
-    "PATH_NOT_ALLOWED",
-    "PERMISSION_DENIED",
-    "INVALID_REQUEST",
-    "SEARCH_FAILED",
-    "LINK_PARSE_FAILED",
-    "FETCH_FAILED",
-    "URL_NOT_ALLOWED",
-    "MEDIA_BACKEND_MISSING",
-    "MEDIA_UPSTREAM_ERROR",
-    "MEDIA_UPSTREAM_TIMEOUT",
-)
-
-
 _OTHER_CATEGORY = "other"
 
 
@@ -833,7 +817,7 @@ class ChatService:
                     elif name == "on_tool_end":
                         output = event["data"].get("output")
                         summary = _summarize(output)
-                        status = "error" if summary.startswith(_ERROR_PREFIXES) else "ok"
+                        status = "error" if summary.startswith(TOOL_ERROR_PREFIXES) else "ok"
                         if event.get("name") == "generate_image" and status == "ok":
                             raw = _as_text(getattr(output, "content", output)) or str(output)
                             match = _TASK_ID_RE.search(raw)

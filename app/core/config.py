@@ -187,6 +187,14 @@ class Settings:
     tool_max_calls_per_tool: int
     tool_max_calls_total: int
 
+    # 知识库（RAG）：只放「规则与判断标准」，具体班次/票价仍走工具查
+    knowledge_dir: str
+    knowledge_topk: int
+
+    # MCP 外部服务端：JSON 数组文本，空表示不连接任何外部工具
+    mcp_servers: str
+    mcp_call_timeout_sec: int
+
     # 登录态采集（plugin 组 B，默认关闭，个人自用，不随核心开源发布）
     enable_session_fetch: bool
     cookie_dir: str
@@ -253,6 +261,10 @@ def load_settings() -> Settings:
         tool_retry_base_delay=_get_float("TOOL_RETRY_BASE_DELAY", 0.4),
         tool_max_calls_per_tool=_get_int("TOOL_MAX_CALLS_PER_TOOL", 4),
         tool_max_calls_total=_get_int("TOOL_MAX_CALLS_TOTAL", 12),
+        knowledge_dir=_get("KNOWLEDGE_DIR", "knowledge"),
+        knowledge_topk=_get_int("KNOWLEDGE_TOPK", 4),
+        mcp_servers=_get("MCP_SERVERS"),
+        mcp_call_timeout_sec=_get_int("MCP_CALL_TIMEOUT_SEC", 120),
         enable_session_fetch=_get_bool("ENABLE_SESSION_FETCH", False),
         cookie_dir=_get("COOKIE_DIR", "cookies"),
         mediacrawler_path=_get("MEDIACRAWLER_PATH", "D:/MediaCrawler"),

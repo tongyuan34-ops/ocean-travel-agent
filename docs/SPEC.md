@@ -247,7 +247,7 @@
 响应 200：
 ```json
 { "items": [ { "name": "get_weather",
-               "category": "info|search|plan|media|system|plugin",
+               "category": "info|search|knowledge|plan|media|system|plugin|mcp",
                "enabled": true,
                "requires_permission": false,
                "description": "中文说明" } ] }
@@ -814,6 +814,18 @@ e) 上下文预算：MAX_CONTEXT_TOKENS 默认 4096；超出时滚动摘要压�
    不做自动重试的原因：加城市前缀后「重庆李子坝轻轨站」会解析到**长寿区**
    （同城错区，约 70 公里）——城市校验会放行，总里程看着也合理，
    等于把「明显的错」换成「隐蔽的错」。让模型拿着提示重试一次，比工具自作主张安全。
+
+**knowledge 组（项目知识库检索，实现见 app/rag）**
+- search_knowledge(query, limit)          检索规则库：节奏、预算口径、亲子与长辈、
+  海岛轮渡、雨天备选
+
+  知识库**只放规则与判断标准**，不放班次、票价、天气、营业时间——
+  那些会变，写进去就是一份看起来很权威的过期信息，必须走 info / search 组去查。
+  与 search 组分开成组的原因：两者在提示词里承担不同的举证责任，
+  混在一起模型会拿规则替代事实。
+
+  返回首行给统计（语料片段数 / 命中条数），每条带 `来源 › 小节` 供引用；
+  检索不到时返回 `KNOWLEDGE_EMPTY`，并明确要求模型不得编造规则。
 
 **search 组（多源内容检索，实现见 4.7）**
 - search_web(query, limit)                 通用网页检索（bing_cn）

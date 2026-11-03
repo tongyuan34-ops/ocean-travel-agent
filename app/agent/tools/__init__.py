@@ -1,12 +1,13 @@
 """工具注册表。
 
-按 SPEC 第八节分组。已完成 info / plan / system / search / plugin（A+B）/ media 组。
+按 SPEC 第八节分组。已完成 info / plan / system / search / knowledge / plugin（A+B）/ media 组。
 生视频不在范围内（产品决定），故 media 组只注册生图相关工具。
 """
 
 from __future__ import annotations
 
 from app.agent.tools.info import get_weather, plan_route, search_poi
+from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.media import generate_image, list_image_templates
 from app.agent.tools.plan import estimate_budget, optimize_day_route
 from app.agent.tools.plugin import parse_shared_link
@@ -43,6 +44,9 @@ SYSTEM_TOOLS = [
     set_wallpaper,
 ]
 SEARCH_TOOLS = [search_web, fetch_url]
+# 知识库检索单独成组：它查的是「规则」，search 组查的是「实时事实」，
+# 两者在提示词里承担不同的举证责任，混在一组会让模型分不清
+KNOWLEDGE_TOOLS = [search_knowledge]
 PLUGIN_TOOLS = [parse_shared_link, search_social_session, generate_scraper]
 MEDIA_TOOLS = [generate_image, list_image_templates]
 
@@ -51,6 +55,7 @@ ALL_TOOLS = [
     *PLAN_TOOLS,
     *SYSTEM_TOOLS,
     *SEARCH_TOOLS,
+    *KNOWLEDGE_TOOLS,
     *PLUGIN_TOOLS,
     *MEDIA_TOOLS,
 ]
@@ -58,6 +63,7 @@ ALL_TOOLS = [
 __all__ = [
     "ALL_TOOLS",
     "INFO_TOOLS",
+    "KNOWLEDGE_TOOLS",
     "MEDIA_TOOLS",
     "PLAN_TOOLS",
     "PLUGIN_TOOLS",
@@ -80,6 +86,7 @@ __all__ = [
     "read_file",
     "recommend_stay",
     "recommend_transport",
+    "search_knowledge",
     "search_poi",
     "search_social_session",
     "search_web",

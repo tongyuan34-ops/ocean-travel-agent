@@ -8,7 +8,19 @@ from __future__ import annotations
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS
 from app.agent.tools import ALL_TOOLS
 
-_VALID_CATEGORIES = {"info", "search", "plan", "media", "system", "plugin", "other"}
+_VALID_CATEGORIES = {
+    "info",
+    "search",
+    # 知识库检索单独一类：它查的是规则，search 组查的是实时事实
+    "knowledge",
+    "plan",
+    "media",
+    "system",
+    "plugin",
+    # 外部 MCP 工具：能出现在清单里说明连接成功
+    "mcp",
+    "other",
+}
 
 
 def test_health(client):

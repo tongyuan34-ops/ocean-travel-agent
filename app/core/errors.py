@@ -46,6 +46,26 @@ CODE_TO_HTTP: dict[str, int] = {
 }
 
 
+# 工具返回文本以这些错误码开头时，说明这次调用是失败的。
+# chat.py 用它决定 SSE tool_result 的 status，MCP 服务端用它决定 isError——
+# 两处各写一份必然漂移，漂移的后果是「一边当成功、一边当失败」。
+TOOL_ERROR_PREFIXES: tuple[str, ...] = (
+    "TOOL_NOT_ENABLED",
+    "TOOL_FAILED",
+    "PATH_NOT_ALLOWED",
+    "PERMISSION_DENIED",
+    "INVALID_REQUEST",
+    "SEARCH_FAILED",
+    "KNOWLEDGE_EMPTY",
+    "LINK_PARSE_FAILED",
+    "FETCH_FAILED",
+    "URL_NOT_ALLOWED",
+    "MEDIA_BACKEND_MISSING",
+    "MEDIA_UPSTREAM_ERROR",
+    "MEDIA_UPSTREAM_TIMEOUT",
+)
+
+
 class ApiError(Exception):
     """业务异常，可直接指定错误码。"""
 

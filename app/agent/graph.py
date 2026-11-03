@@ -26,8 +26,8 @@ from app.agent.permissions import PermissionDenied
 from app.agent.prompts import build_system_prompt
 from app.agent.resilience import RetryPolicy, make_all_resilient
 from app.agent.state import AgentState
-from app.agent.tools import ALL_TOOLS
 from app.core.config import Settings
+from app.mcp.registry import all_tools
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,9 @@ def build_agent_graph(
     ``model`` 只给评测用：自测时注入脚本化模型，避免依赖真实 API。
     """
     chat_model = model if model is not None else build_chat_model(settings)
-    tool_list = tools if tools is not None else ALL_TOOLS
+    # 内置工具 + 运行时接入的 MCP 外部工具。没有配 MCP_SERVERS 时后者为空，
+    # 所以这个调用等价于原来的 ALL_TOOLS，但给「装一个服务端就多一批工具」留了口子
+    tool_list = tools if tools is not None else all_tools()
     # 统一套一层重试：工具抖动是可恢复的，不该直接甩给模型去猜
     resilient = make_all_resilient(
         tool_list,

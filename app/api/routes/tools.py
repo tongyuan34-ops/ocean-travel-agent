@@ -12,8 +12,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.agent.guard import DANGEROUS_TOOLS
-from app.agent.tools import ALL_TOOLS
 from app.core.config import load_settings
+from app.mcp.registry import all_tools
 from app.schemas.tools import ToolItem, ToolList
 from app.services.chat import tool_category
 
@@ -56,6 +56,12 @@ def _enabled(name: str, settings, media_caps: dict[str, Any]) -> bool:
         # 只反映"功能开关"；具体哪些平台可用由 capabilities 的 search_social 与
         # platforms 决定，避免这里出现"工具可用但一个平台都没配"的误导
         return settings.enable_session_fetch
+    if name == "search_knowledge":
+        # 语料随仓库分发，只要进程能起来就能查；语料为空时工具自己返回 KNOWLEDGE_EMPTY
+        return True
+    if name.startswith("mcp__"):
+        # 外部工具能出现在清单里，说明连接已经成功（注册表只注册连上的）
+        return True
     if name.startswith(("list_dir", "read_file")) or name in _PERMISSION_TOOLS:
         return bool(settings.allowed_roots)
     return True
@@ -81,6 +87,6 @@ async def list_tools(request: Request) -> ToolList:
             requires_permission=tool.name in _PERMISSION_TOOLS,
             description=_description(tool),
         )
-        for tool in ALL_TOOLS
+        for tool in all_tools()
     ]
     return ToolList(items=items)

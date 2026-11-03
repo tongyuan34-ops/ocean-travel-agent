@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.mcp.client import MCPError, StdioMCPClient, to_langchain_tool
+from app.mcp.client import MCPError, StdioMCPClient, _result_text, to_langchain_tool
 from app.mcp.registry import ServerSpec, all_tools, connect, parse_specs, shutdown
 
 FAKE = Path(__file__).resolve().parent / "fake_mcp_server.py"
@@ -275,3 +275,74 @@ async def test_crash_clears_state_so_next_call_can_reconnect():
         assert client._era is None
     finally:
         await client.close()
+
+
+# ---------- 服务端反过来发请求 ----------
+
+
+async def _wait_for_replies(client: StdioMCPClient, expected: int) -> list[str]:
+    """等子进程往 stderr 打出足够多的「客户端回复」记录。"""
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        replies = [line for line in client._stderr_tail if line.startswith("CLIENT_REPLIED")]
+        if len(replies) >= expected:
+            return replies
+        await asyncio.sleep(0.02)
+    return [line for line in client._stderr_tail if line.startswith("CLIENT_REPLIED")]
+
+
+async def test_client_answers_server_initiated_requests():
+    """服务端主动发来的请求必须回，否则对端会一直等到自己的超时。
+
+    ping 是双向的，回空结果；我们没声明 roots 能力，所以 roots/list 回 -32601
+    让服务端自己降级——装死比报错更糟，对端分不清「慢」和「不支持」。
+    """
+    client = _client("chatty")
+    try:
+        await client.start()
+        await client.list_tools()
+        replies = await _wait_for_replies(client, 2)
+
+        assert any('"id":9001' in line and '"result"' in line for line in replies), replies
+        assert any('"id":9002' in line and "-32601" in line for line in replies), replies
+    finally:
+        await client.close()
+
+
+# ---------- 非文本内容块 ----------
+
+
+def test_image_only_result_is_not_an_empty_string():
+    """服务端只返回一张图时，压成文本不能是空串。
+
+    空串的后果是模型看到「工具成功、返回空」，既不知道发生了什么也无从纠正。
+    """
+    text = _result_text(
+        {"content": [{"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}]}
+    )
+
+    assert text
+    assert "图片" in text
+    # base64 不能漏进上下文
+    assert "aGVsbG8=" not in text
+
+
+def test_mixed_result_keeps_text_and_notes_what_was_skipped():
+    text = _result_text(
+        {
+            "content": [
+                {"type": "text", "text": "前一句"},
+                {"type": "image", "data": "x"},
+                {"type": "audio", "data": "y"},
+            ]
+        }
+    )
+
+    assert text.startswith("前一句")
+    assert "2 个非文本内容块" in text
+    assert "图片" in text and "音频" in text
+
+
+def test_empty_text_block_stays_empty():
+    """纯空文本不该凭空造出一句占位——那是服务端真的没话说。"""
+    assert _result_text({"content": [{"type": "text", "text": ""}]}) == ""

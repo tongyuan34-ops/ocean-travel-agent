@@ -76,7 +76,11 @@ def _call(params: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["modern", "legacy", "silent", "crash"], default="modern")
+    parser.add_argument(
+        "--mode",
+        choices=["modern", "legacy", "silent", "crash", "chatty"],
+        default="modern",
+    )
     args = parser.parse_args()
 
     for line in sys.stdin:
@@ -91,6 +95,12 @@ def main() -> int:
             continue  # 通知不回
         if args.mode == "silent":
             # 读了但永不回复：用来验证客户端的超时与取消路径
+            continue
+        if "method" not in message:
+            # 没有 method 但有 id：这是客户端在回**我们主动发的请求**。
+            # 打到 stderr 上，用例从客户端的 stderr 尾巴里读它
+            sys.stderr.write("CLIENT_REPLIED " + line + "\n")
+            sys.stderr.flush()
             continue
 
         method = message.get("method")
@@ -110,6 +120,15 @@ def main() -> int:
                         "capabilities": {"tools": {}},
                     },
                 )
+            if args.mode == "chatty":
+                # 反过来向客户端发两个请求：ping 必须回空结果，
+                # 未实现的 roots/list 必须回 -32601 而不是装死
+                for extra in (
+                    {"jsonrpc": "2.0", "id": 9001, "method": "ping", "params": {}},
+                    {"jsonrpc": "2.0", "id": 9002, "method": "roots/list", "params": {}},
+                ):
+                    sys.stdout.write(json.dumps(extra) + "\n")
+                sys.stdout.flush()
         elif method == "initialize":
             version = params.get("protocolVersion", "2025-06-18")
             response = _result(

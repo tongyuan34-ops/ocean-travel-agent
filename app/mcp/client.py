@@ -21,11 +21,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import shutil
-from collections import deque
+from collections import Counter, deque
 from typing import Any, Protocol
 
 from langchain_core.tools import StructuredTool
@@ -109,6 +110,9 @@ class StdioMCPClient:
         # 子进程死掉后要能重连，而重连必须串行——并发两个调用同时发现「进程没了」
         # 会各起一个子进程，其中一个永远没人用，还占着 stdin 管道
         self._start_lock = asyncio.Lock()
+        # 写 stdin 的锁：读循环也会写（回应服务端发来的请求），
+        # 两个协程同时写会把一条消息切成两半，对端直接解析失败
+        self._write_lock = asyncio.Lock()
 
     # ---------- 生命周期 ----------
 
@@ -212,6 +216,14 @@ class StdioMCPClient:
                 continue
 
             request_id = message.get("id")
+            # 带 method 又带 id 的，是**服务端发来的请求**（ping / roots/list / sampling）。
+            # 不认的话它会一直等我们的回复，等到自己的超时——表现是「对方莫名其妙变慢」。
+            # 我们声明的 clientCapabilities 是空对象，所以除了 ping 之外的一律回
+            # -32601，让服务端自己降级，而不是干等。
+            if "method" in message and request_id is not None:
+                await self._answer_server_request(message)
+                continue
+
             future = self._pending.pop(request_id, None)
             if future is None:
                 # 通知（progress / log）或无法关联的响应，忽略但不报错
@@ -219,6 +231,21 @@ class StdioMCPClient:
                 continue
             if not future.done():
                 future.set_result(message)
+
+    async def _answer_server_request(self, message: dict[str, Any]) -> None:
+        """回应服务端主动发来的请求。发不出去只记日志，不能把读循环带崩。"""
+        method = message.get("method")
+        request_id = message.get("id")
+        if method == "ping":
+            reply = protocol.result_message(request_id, {})
+        else:
+            reply = protocol.error_message(
+                request_id, protocol.METHOD_NOT_FOUND, f"客户端不支持 {method}"
+            )
+        try:
+            await self._write(reply)
+        except MCPError as exc:
+            logger.debug("MCP %s 回应 %s 失败：%s", self.name, method, exc)
 
     async def _read_stderr(self) -> None:
         """常驻读 stderr。不读的话子进程会卡在写日志上，请求永远收不到回。"""
@@ -267,11 +294,10 @@ class StdioMCPClient:
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
-            proc.stdin.write((protocol.encode(payload) + "\n").encode("utf-8"))
-            await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+            await self._write(payload)
+        except MCPError:
             self._pending.pop(request_id, None)
-            raise MCPError(f"MCP 服务端 {self.name} 已退出：{self._diagnostics()}") from exc
+            raise
 
         try:
             message = await asyncio.wait_for(future, timeout=timeout)
@@ -294,11 +320,26 @@ class StdioMCPClient:
             raise MCPError(f"MCP 服务端 {self.name} 的 {method} 结果不是对象")
         return result
 
+    async def _write(self, message: dict[str, Any]) -> None:
+        """往子进程 stdin 写一行消息。
+
+        加锁的原因：读循环在收到服务端请求时也要写（回 ping），和 ``_request``
+        的写会撞在一起。一条消息被切成两半，对端只会解析失败。
+        """
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            raise MCPError(f"MCP 服务端 {self.name} 未启动")
+        async with self._write_lock:
+            if proc.stdin.is_closing():
+                raise MCPError(f"MCP 服务端 {self.name} 已退出：{self._diagnostics()}")
+            try:
+                proc.stdin.write((protocol.encode(message) + "\n").encode("utf-8"))
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                raise MCPError(f"MCP 服务端 {self.name} 已退出：{self._diagnostics()}") from exc
+
     async def _notify_cancelled(self, request_id: Any, modern: bool) -> None:
         """放弃请求后告诉服务端别算了。发不出去也不影响主流程。"""
-        proc = self._proc
-        if proc is None or proc.stdin is None or proc.stdin.is_closing():
-            return
         params: dict[str, Any] = {"requestId": request_id}
         if modern:
             params["_meta"] = self._meta()
@@ -307,11 +348,8 @@ class StdioMCPClient:
             "method": "notifications/cancelled",
             "params": params,
         }
-        try:
-            proc.stdin.write((protocol.encode(notification) + "\n").encode("utf-8"))
-            await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            logger.debug("MCP %s 取消失败（连接已断）", self.name)
+        with contextlib.suppress(MCPError):
+            await self._write(notification)
 
     def _diagnostics(self) -> str:
         if not self._stderr_tail:
@@ -373,11 +411,9 @@ class StdioMCPClient:
         self._era = "legacy"
 
         # 握手后按规范补一个 initialized 通知；不带 id，不需要等回复
-        proc = self._proc
-        if proc is not None and proc.stdin is not None:
-            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-            proc.stdin.write((protocol.encode(notification) + "\n").encode("utf-8"))
-            await proc.stdin.drain()
+        notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        with contextlib.suppress(MCPError):
+            await self._write(notification)
         logger.info("MCP %s 使用老版协议 %s（initialize 握手）", self.name, self._version)
 
     # ---------- 工具 ----------
@@ -508,19 +544,46 @@ def to_langchain_tool(
     )
 
 
+# 非文本内容块的中文名。占位符里用得上——模型看到「[已省略 1 个图片内容块]」
+# 就知道该换个工具或换个说法，看到空字符串只会以为工具坏了
+_BLOCK_LABELS = {
+    "image": "图片",
+    "audio": "音频",
+    "video": "视频",
+    "resource": "内嵌资源",
+    "resource_link": "资源链接",
+}
+
+
 def _result_text(result: dict[str, Any]) -> str:
     """把 MCP 的 content 块压成一段文本。
 
     只取 text 块：image / audio 是二进制，本地工具的输出契约是文本，
     混进 base64 会直接把上下文预算烧光。
+
+    但**不能静默丢掉**。服务端只返回一张图时，压完就是空字符串，
+    模型看到的是「工具成功、返回空」，既不知道发生了什么也无从纠正。
+    所以非文本块要留一句占位说明。
     """
     blocks = result.get("content")
     if not isinstance(blocks, list):
         structured = result.get("structuredContent")
         return json.dumps(structured, ensure_ascii=False) if structured is not None else ""
-    parts = [
-        str(block.get("text", ""))
-        for block in blocks
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    return "\n".join(part for part in parts if part)
+
+    parts: list[str] = []
+    skipped: Counter[str] = Counter()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "unknown")
+        if kind == "text":
+            text = str(block.get("text", ""))
+            if text:
+                parts.append(text)
+        else:
+            skipped[kind] += 1
+
+    if skipped:
+        detail = "、".join(f"{_BLOCK_LABELS.get(k, k)}×{n}" for k, n in skipped.items())
+        parts.append(f"[已省略 {sum(skipped.values())} 个非文本内容块：{detail}]")
+    return "\n".join(parts)

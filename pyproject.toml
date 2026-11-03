@@ -46,6 +46,12 @@ dev = [
 tracing = [
     "langsmith>=0.7,<1.0",
 ]
+# 桌面版：pywebview 提供原生窗口（Windows 走 WebView2），
+# pyinstaller 只在出包时需要，但放在同一个组里省得用户猜两次装什么
+desktop = [
+    "pywebview>=5,<7",
+    "pyinstaller>=6,<7",
+]
 
 [dependency-groups]
 # uv 的默认开发组：`uv sync` 会自动装上，无需 --extra
@@ -60,6 +66,10 @@ dev = [
 
 [project.urls]
 Documentation = "https://github.com/tongyuan34-ops/ocean-travel-agent/blob/main/docs/SPEC.md"
+
+[project.scripts]
+# 装好依赖后可以直接 `ocean-desktop`，不必记 `python -m app.desktop`
+ocean-desktop = "app.desktop:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

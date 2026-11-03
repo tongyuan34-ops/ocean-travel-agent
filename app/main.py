@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -128,4 +129,18 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+def __getattr__(name: str) -> Any:
+    """``uvicorn app.main:app`` 用字符串导入，走的是模块属性访问。
+
+    按需构建的理由和 ``app/standalone.py`` 里那条一样：这个模块的
+    ``create_app`` 会被别人 import（standalone 就是），如果这里在 import 时
+    也建一个，进程里就有两个应用——启动日志打两遍、``configure_tracing``
+    挂两套回调。后者不会报错，只会让追踪数据重复上报，查起来很费劲。
+
+    构建结果写回模块全局，之后每次取都拿到同一个对象。
+    """
+    if name != "app":
+        raise AttributeError(name)
+    built = create_app()
+    globals()["app"] = built
+    return built

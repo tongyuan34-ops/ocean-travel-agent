@@ -23,6 +23,12 @@ cookies/
 # 生成物落盘目录（app/media 是代码，根目录 media/ 是运行产物，别搞混）
 /media/
 
+# 运行日志。窗口模式下没有控制台，日志落在这里（见 app/core/logging.py）
+/logs/
+
+# 打包时从 web/assets/icon-512.png 生成的多尺寸图标
+/packaging/app.ico
+
 # 本地访问二维码里带着你的局域网/公网地址，不随仓库分发
 /mobile-access-qr.png
 /public-access-qr.png

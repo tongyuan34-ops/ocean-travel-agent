@@ -13,7 +13,6 @@ from fastapi import APIRouter, Request
 
 from app.agent.guard import DANGEROUS_TOOLS
 from app.core.config import load_settings
-from app.core.security import allowed_roots
 from app.mcp.registry import all_tools
 from app.schemas.tools import ToolItem, ToolList
 from app.services.chat import tool_category
@@ -64,9 +63,13 @@ def _enabled(name: str, settings, media_caps: dict[str, Any]) -> bool:
         # 外部工具能出现在清单里，说明连接已经成功（注册表只注册连上的）
         return True
     if name.startswith(("list_dir", "read_file")) or name in _PERMISSION_TOOLS:
-        # 配置里的白名单 + 用户在使用中授权过的目录。都为空时文件工具不可用，
-        # 但第一次真正需要时工具会自己弹授权，所以这里只是「当前是否已开」
-        return bool(allowed_roots(settings))
+        # 按需授权之后，文件工具**永远可用**。
+        #
+        # 这里原来按 ``allowed_roots`` 判空，装完的新机器上没有任何授权目录，
+        # 于是文件功能整体变灰——而用户根本没机会看到那个授权弹窗，因为他
+        # 连一个能触发它的入口都没有。没有授权目录只说明「第一次用会问」，
+        # 不说明「不能用」。
+        return True
     return True
 
 

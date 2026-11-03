@@ -49,8 +49,12 @@ async def capabilities(request: Request) -> dict[str, Any]:
     return {
         "image_gen": media_caps["image_gen"],
         "video_gen": media_caps["video_gen"],
-        # system 组：沙箱与壁纸
-        "filesystem": bool(roots),
+        # system 组：沙箱与壁纸。
+        # 恒为 true：文件工具本身永远可用，能不能写某个目录由**按需授权**在
+        # 那一次操作里问。按 allowed_roots 判空会让刚装好的机器显示「文件功能
+        # 不可用」，而实际上它只是还没被问过——下面 allowed_roots 给的是
+        # 「已经放开到哪儿」这个回执。
+        "filesystem": True,
         "wallpaper": is_windows(),
         # plugin 组 A：用户粘贴的分享链接解析，默认启用
         "link_parse": True,

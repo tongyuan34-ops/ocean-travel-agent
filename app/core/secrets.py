@@ -147,6 +147,15 @@ def value(name: str) -> str:
     return resolve(name)[0]
 
 
+def source(name: str) -> str:
+    """这个 key 现在从哪来：``env`` / ``config`` / ``bundled``，都没有时是空串。
+
+    额度报错时要靠它分岔：内置 key 用完让用户填自己的，自己填的用完让他去充值。
+    两句话说反了，用户会去点一个他根本没有的「控制台」。
+    """
+    return resolve(name)[1]
+
+
 def describe(names: list[str] | tuple[str, ...]) -> dict[str, str]:
     """``{名字: 来源}``，**不含值**。给 /system 和启动日志用。
 

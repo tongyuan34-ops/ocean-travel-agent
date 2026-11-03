@@ -36,6 +36,7 @@ from app.agent.resilience import (
     current_retry_stats,
     current_tool_budget,
 )
+from app.core import secrets
 from app.core.config import Settings
 from app.core.context import compose_messages, make_summary, plan_fold
 from app.core.errors import TOOL_ERROR_PREFIXES, ApiError
@@ -1022,6 +1023,32 @@ _QUOTA_HINTS = (
 # 上游鉴权失败：Key 写错、被吊销、没有该模型的权限
 _AUTH_HINTS = ("invalid api key", "incorrect api key", "unauthorized", "authentication")
 
+# key 来源 → 用户该去哪儿改。说错地方等于让他去一个不存在的页面
+_KEY_PLACES = {
+    secrets.CONFIG: "config.json（在程序目录里）",
+    secrets.ENV: ".env 或环境变量",
+    secrets.BUNDLED: "内置配置",
+}
+
+
+def _quota_message() -> str:
+    """额度用尽时该说什么，取决于这个 key 是谁的。
+
+    内置 key 的用户**没有服务商控制台可去**——那不是他的账号。他能做的
+    只有一件事：填自己的 key。这条分支不写，桌面版用户会一直点重试。
+    """
+    if secrets.source("MODEL_API_KEY") == secrets.BUNDLED:
+        return (
+            "内置额度已用完。在程序目录的 config.json 里把 MODEL_API_KEY "
+            "换成你自己的，重启就能继续用"
+        )
+    return "请到服务商控制台充值或补缴欠款后再试（重试不会恢复）"
+
+
+def _auth_message() -> str:
+    place = _KEY_PLACES.get(secrets.source("MODEL_API_KEY"), "配置")
+    return f"请检查 {place} 里的 MODEL_API_KEY 是否填错或被吊销"
+
 
 def _map_failure(exc: Exception) -> dict[str, str]:
     """把异常映射成契约错误码。
@@ -1036,16 +1063,10 @@ def _map_failure(exc: Exception) -> dict[str, str]:
     status = getattr(exc, "status_code", None)
 
     if any(hint in lowered for hint in _QUOTA_HINTS):
-        return {
-            "code": "MODEL_QUOTA_EXCEEDED",
-            "message": "请到服务商控制台充值或补缴欠款后再试（重试不会恢复）",
-        }
+        return {"code": "MODEL_QUOTA_EXCEEDED", "message": _quota_message()}
 
     if status in (401, 403) or any(hint in lowered for hint in _AUTH_HINTS):
-        return {
-            "code": "MODEL_AUTH_FAILED",
-            "message": "请检查 .env 里的 MODEL_API_KEY 是否填错或被吊销",
-        }
+        return {"code": "MODEL_AUTH_FAILED", "message": _auth_message()}
 
     # 「timed out」和「timeout」两种写法都要认：openai SDK 的异常名是
     # APITimeoutError，但有的网关只在正文里写 "Request timed out"

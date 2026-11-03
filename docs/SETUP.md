@@ -321,6 +321,84 @@ python scripts/make_bundled_keys.py             # 生成 app/core/_bundled_keys.
 
 ---
 
+## 第 9 步 · 打包成桌面版：一个窗口，不是一张网页
+
+```
+python scripts/build_desktop.py            # 出目录 + zip
+python scripts/build_desktop.py --installer # 顺带出 Inno Setup 安装包
+```
+
+产物：`dist/OceanTravelAgent/`（解压即用）和 `dist/OceanTravelAgent-0.1.0-win64.zip`。
+
+### 形态：pywebview 原生窗口
+
+双击出来的是一个窗口，不是一个浏览器标签页。关掉窗口等于退出进程——用户
+不需要理解「服务还在后台跑」这件事。
+
+窗口里装的还是那个 FastAPI 应用（`app/standalone.py`），只是**只绑
+127.0.0.1**。这一条决定了两件事：
+
+- 不需要访问密码。`WEB_AUTH_PASS` 在桌面版被**显式忽略**并打一条告警——
+  嵌在窗口里的浏览器没法先弹一次 Basic Auth，配了密码的结果就是用户看到
+  一个永远打不开的页面。要密码的场景是 `serve.py` / `standalone`（对外暴露端口）。
+- 局域网里的其它机器连不上。想用手机访问，那是 `serve.py` 的活。
+
+### 端口是随机的，所以启动要重试
+
+固定 8000/8080 在用户机器上迟早撞车。绑 0 让系统分配，代价是「刚才还空着」
+到「uvicorn 真绑上」之间有毫秒级窗口，所以 `boot()` 会换端口重试 3 次，
+而不是傻等 60 秒健康检查超时。
+
+### 为什么是文件夹，不是单文件 exe
+
+onefile 每次启动都要把整个包解到临时目录：解包几秒（白屏），而且每次解包
+都会被杀软重扫，误报概率明显更高。onedir 的代价只是「产物是一个文件夹」，
+zip 分发、解压即用，对用户没有任何区别。
+
+### 冒烟不是可选项
+
+PyInstaller「能生成」和「能启动」是两件事：漏一个动态导入的模块，打包过程
+一声不响，用户双击才炸。`build_desktop.py` 会真的把 exe 跑一遍，等它自己把
+端口写进 `data/instance.json`，再打健康检查。**没冒烟过的包不要发出去。**
+
+### 窗口模式没有控制台，日志落文件
+
+`console=False` 会把 `sys.stdout` / `sys.stderr` 置成 `None`，
+`StreamHandler(None)` 每次写日志都抛异常，现象是「双击没反应」且毫无线索。
+`app/core/logging.py` 因此改成：没有标准流就写 `logs/app.log`（滚动 3 份，
+单份 2 MB）。用户报问题时让他发这个文件。
+
+### 首次运行会生成三样东西
+
+| 文件 | 作用 |
+|---|---|
+| `config.json` | 空值模板。内置额度用完后，在这里填自己的 `MODEL_API_KEY` |
+| `使用说明.txt` | 一页纸：怎么用、额度没了怎么办、授权目录怎么收回 |
+| `logs/app.log` | 现场证据 |
+
+`config.json` 里的空字符串在解析链里等于「没配」，会继续落回内置 key——
+所以生成模板这个动作本身不会让程序变成「没 key 可用」。
+
+### 安装包：装到用户目录，不要 Program Files
+
+程序把 `config.json`、`grants.json`、`data/`、`logs/` 写在 exe 旁边。装进
+Program Files 之后那层目录不可写，换 key、授权、会话落盘全部失效，而且
+**不报错**，只是「设置不生效」。所以 `installer.iss` 用
+`PrivilegesRequired=lowest` + `{autopf}`：非管理员安装自动落到
+`%LOCALAPPDATA%\Programs`，写权限天然具备，还省一次 UAC。
+
+卸载只删 `logs/`。`data/` 和 `config.json` 一律留着——「卸载软件顺手删掉
+用户三个月前的行程」不可接受。
+
+### 发版前检查
+
+- [ ] 内置 key 在服务商后台设了**低额度**（等于公开发布，费用算你的）
+- [ ] 换过 key 之后不需要发新版本：用户填 `config.json` 就能覆盖
+- [ ] zip 里没有 `data/`、`logs/`、`config.json`、`grants.json`（脚本已排除）
+- [ ] 在**没装过 Python** 的机器上解压跑一次
+
+---
+
 ## 验证清单
 
 | 检查项 | 命令 / 方式 |

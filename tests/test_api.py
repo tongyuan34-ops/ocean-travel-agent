@@ -78,6 +78,31 @@ def test_capabilities_shape_and_consistency(client):
     assert data["search_social"] == bool(social_in_platforms)
 
 
+def test_file_tools_stay_enabled_before_any_grant(client, monkeypatch):
+    """一个授权目录都没有时，文件工具仍然要报**可用**。
+
+    按需授权的意思是「第一次用的时候问」，不是「没授权就不能用」。这里如果
+    按 ``allowed_roots`` 判空，刚装好的机器上文件功能整体变灰——用户连触发
+    授权弹窗的入口都没有，功能看起来就是坏的。
+
+    这里把 allowed_roots 打成空，模拟新装机器的状态。
+    """
+    import app.api.routes.system as system_route
+    import app.core.security as security
+
+    monkeypatch.setattr(security, "allowed_roots", lambda settings: [])
+    monkeypatch.setattr(system_route, "allowed_roots", lambda settings: [])
+
+    items = {item["name"]: item for item in client.get("/api/v1/tools").json()["items"]}
+    assert items["write_file"]["enabled"] is True
+    assert items["read_file"]["enabled"] is True
+
+    data = client.get("/api/v1/system/capabilities").json()
+    assert data["filesystem"] is True
+    # 回执仍然是空的：可用 ≠ 已经放开
+    assert data["allowed_roots"] == []
+
+
 def test_tools_list_matches_registry(client):
     items = client.get("/api/v1/tools").json()["items"]
 

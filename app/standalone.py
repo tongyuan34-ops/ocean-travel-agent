@@ -125,14 +125,22 @@ class BasicAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-def build_standalone_app() -> FastAPI:
+def build_standalone_app(require_auth: bool = True) -> FastAPI:
+    """组装单端口应用。
+
+    ``require_auth=False`` 给桌面版用：那边只监听 127.0.0.1，密码不是防线而是
+    一堵用户打不开的墙——``WEB_AUTH_PASS`` 是给「对外暴露一个端口」的场景准备的，
+    嵌在窗口里的浏览器没法先跟他要一次 Basic Auth。
+    """
     app = create_app()
     user, password = _credentials()
 
-    if password:
+    if require_auth and password:
         app.add_middleware(BasicAuthMiddleware, user=user, password=password)
-    else:
+    elif require_auth:
         logger.warning("WEB_AUTH_PASS 未配置：接口对外完全开放，任何人都会消耗模型额度")
+    elif password:
+        logger.warning("桌面版忽略 WEB_AUTH_PASS：服务只监听 127.0.0.1，不需要登录")
 
     # 挂载必须放在所有路由之后：Starlette 按注册顺序匹配，
     # /api/v1 和 /share 先注册就优先命中，剩下的才落到静态文件
@@ -140,4 +148,17 @@ def build_standalone_app() -> FastAPI:
     return app
 
 
-app = build_standalone_app()
+def __getattr__(name: str) -> Any:
+    """``uvicorn app.standalone:app`` 用字符串导入，走的是模块属性访问。
+
+    改成按需构建是为了桌面入口：它只要 ``build_standalone_app``，如果这里在
+    import 时就建一个应用，进程里会同时存在两个——启动日志打两遍「key 来源」，
+    ``configure_tracing`` 也会挂两套回调。重复初始化追踪比多打一行日志难查得多。
+
+    构建结果写回模块全局，uvicorn 之后每次取都拿到同一个对象。
+    """
+    if name != "app":
+        raise AttributeError(name)
+    built = build_standalone_app()
+    globals()["app"] = built
+    return built

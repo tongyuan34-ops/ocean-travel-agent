@@ -539,6 +539,44 @@ def test_failure_mapping_puts_billing_before_status_code(exc, expect):
     assert _map_failure(exc)["code"] == expect
 
 
+def test_quota_message_points_at_config_json_for_bundled_key(monkeypatch):
+    """内置 key 额度用尽时，不能让用户「去服务商控制台充值」。
+
+    那不是他的账号，他没有那个页面可去。桌面版用户唯一能做的动作是
+    填自己的 key，所以这句话必须指向 config.json——说错地方等于让他一直重试。
+    """
+    from app.core import secrets
+    from app.services.chat import _map_failure
+
+    monkeypatch.setattr(secrets, "source", lambda name: secrets.BUNDLED)
+    message = _map_failure(UpstreamError("insufficient_quota", 429))["message"]
+    assert "config.json" in message
+    assert "MODEL_API_KEY" in message
+    assert "充值" not in message
+
+
+def test_quota_message_points_at_console_for_own_key(monkeypatch):
+    """自己填的 key 才有「控制台」这个概念，这句话反过来也要成立。"""
+    from app.core import secrets
+    from app.services.chat import _map_failure
+
+    monkeypatch.setattr(secrets, "source", lambda name: secrets.ENV)
+    message = _map_failure(UpstreamError("insufficient_quota", 429))["message"]
+    assert "充值" in message
+    assert "config.json" not in message
+
+
+def test_auth_message_names_the_place_the_key_came_from(monkeypatch):
+    """「请检查 .env」对桌面版用户是句废话——他的 key 在 config.json 里。"""
+    from app.core import secrets
+    from app.services.chat import _map_failure
+
+    monkeypatch.setattr(secrets, "source", lambda name: secrets.CONFIG)
+    message = _map_failure(UpstreamError("Invalid API key", 401))["message"]
+    assert "config.json" in message
+    assert ".env" not in message
+
+
 async def test_overdue_account_surfaces_actionable_error(monkeypatch):
     """欠费要走完整链路：图里抛 → 映射 → SSE error 事件带新错误码。"""
 

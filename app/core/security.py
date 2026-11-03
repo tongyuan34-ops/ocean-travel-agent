@@ -1,9 +1,16 @@
-"""路径沙箱：所有文件操作必须落在 ALLOWED_ROOTS 白名单内。
+"""路径沙箱：所有文件操作必须落在白名单内。
 
 三条铁律：
 1. **先 resolve 再校验**：解析软链接与 `..`，否则 `白名单/../../etc` 能绕过去
 2. **按路径层级比较，不用字符串前缀**：否则 `/data-backup` 会被 `/data` 放行
 3. **白名单为空时一律拒绝**：宁可工具不可用，也不能默认放开
+
+**白名单从哪来**
+
+配置里的 ``ALLOWED_ROOTS``（用户手写）+ ``grants.json``（用户在使用过程中
+按需授权的目录，见 ``app/core/grants.py``）。两处相加，不互相覆盖——
+环境变量优先级最高，如果授权也写进 ``ALLOWED_ROOTS``，.env 里有一份就
+把授权盖掉了。
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ import os
 import platform
 from pathlib import Path
 
+from app.core import grants
 from app.core.config import PROJECT_ROOT, Settings
 
 # 单次读取上限，避免把大文件塞爆上下文
@@ -30,26 +38,113 @@ class PathNotAllowed(Exception):
         self.message = message
 
 
+class GrantNeeded(PathNotAllowed):
+    """越界了，但**可以**请用户授权——不是硬拒绝。
+
+    和父类的区别只有一个：``suggested_root`` 有值时，工具层可以弹一次
+    「允许访问 X 目录吗」；为 None 时（系统目录、盘根）连问都不该问。
+    """
+
+    def __init__(self, target: Path, suggested: Path | None) -> None:
+        if suggested is None:
+            super().__init__(f"这个位置不允许访问：{target}")
+        else:
+            super().__init__(f"需要先授权访问 {suggested} 才能操作 {target}")
+        self.target = target
+        self.suggested_root = suggested
+
+
 def is_windows() -> bool:
     return platform.system() == "Windows"
 
 
 def allowed_roots(settings: Settings) -> list[Path]:
-    """把配置里的白名单目录解析为绝对路径。"""
+    """配置里的白名单 + 用户在使用中授权过的目录。
+
+    授权是追加的，不是替换：用户手写的 ``ALLOWED_ROOTS`` 永远有效，
+    按需授权只是在它后面加一条。
+    """
     roots: list[Path] = []
     for raw in settings.allowed_roots:
         try:
-            roots.append(Path(raw).expanduser().resolve())
+            resolved = Path(raw).expanduser().resolve()
         except (OSError, RuntimeError):
             continue
+        if resolved not in roots:
+            roots.append(resolved)
+
+    for granted in grants.load():
+        if granted not in roots:
+            roots.append(granted)
     return roots
 
 
-def ensure_allowed(target: str, roots: list[Path]) -> Path:
-    """校验目标路径在白名单内，返回 resolve 后的路径。"""
-    if not roots:
-        raise PathNotAllowed("未配置 ALLOWED_ROOTS，文件操作已被禁用")
+def _volume_roots() -> list[Path]:
+    """盘符根。只能「整块」拒绝，不能「在里面就拒绝」——否则 C:\\ 会把 C:\\Users 也否掉。"""
+    if is_windows():
+        return [Path(f"{os.environ.get('SYSTEMDRIVE', 'C:')}\\")]
+    return [Path("/")]
 
+
+def _protected_trees() -> list[Path]:
+    """这些目录连问都不问：用户点「允许」也不该打开系统目录。"""
+    if is_windows():
+        drive = Path(f"{os.environ.get('SYSTEMDRIVE', 'C:')}\\")
+        return [
+            drive / "Windows",
+            drive / "Program Files",
+            drive / "Program Files (x86)",
+            drive / "ProgramData",
+            drive / "Recovery",
+        ]
+    return [Path(p) for p in ("/etc", "/usr", "/bin", "/sbin", "/System", "/Library", "/private")]
+
+
+def _is_protected(path: Path) -> bool:
+    if any(path == root for root in _volume_roots()):
+        return True
+    return any(path == root or _is_within(path, root) for root in _protected_trees())
+
+
+def _user_dirs() -> list[Path]:
+    """用户最可能想开放的那几个目录。存在才算——路径被改到别的盘时不硬猜。"""
+    home = Path.home()
+    names = ("Desktop", "Documents", "Downloads", "Pictures")
+    found = [home / name for name in names if (home / name).is_dir()]
+    return [*found, home]
+
+
+def suggest_grant_root(target: Path) -> Path | None:
+    """越界路径该请用户授权哪个目录。``None`` 表示这个位置不该开放。
+
+    优先给「桌面 / 文档 / 下载 / 图片」这类用户认得的一级目录，而不是文件的
+    父目录——授权一次能覆盖同目录下后续的所有操作，用户也不用判断
+    「授权这一层够不够」。
+    """
+    try:
+        resolved = target.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if _is_protected(resolved):
+        return None
+
+    for known in _user_dirs():
+        if _is_within(resolved, known):
+            return known
+
+    parent = resolved.parent
+    if parent == resolved or _is_protected(parent):
+        return None
+    return parent
+
+
+def ensure_allowed(target: str, roots: list[Path]) -> Path:
+    """校验目标路径在白名单内，返回 resolve 后的路径。
+
+    越界时抛 ``GrantNeeded``（``PathNotAllowed`` 的子类）：工具层可以据此
+    请用户授权一次。真正不该开放的位置 ``suggested_root`` 是 None。
+    """
     try:
         resolved = Path(target).expanduser().resolve()
     except (OSError, RuntimeError) as exc:
@@ -59,9 +154,7 @@ def ensure_allowed(target: str, roots: list[Path]) -> Path:
         if _is_within(resolved, root):
             return resolved
 
-    raise PathNotAllowed(
-        f"路径不在允许范围内：{resolved}。允许的目录：{'、'.join(str(r) for r in roots)}"
-    )
+    raise GrantNeeded(resolved, suggest_grant_root(resolved))
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -108,19 +201,32 @@ def read_text(target: str, roots: list[Path]) -> tuple[str, bool]:
     return raw.decode("utf-8", errors="replace"), truncated
 
 
-def build_write_preview(target: str, content: str, roots: list[Path]) -> dict[str, str]:
-    """写文件前的预览，供前端展示给用户确认。"""
-    file_path = ensure_allowed(target, roots)
+def describe_write(target: str, content: str) -> dict[str, str]:
+    """描述一次写入，**不校验白名单**。
+
+    单独拆出来是为了「授权 + 写入」能合并成一次确认：还没授权时也得先给用户
+    看清楚要写什么，否则用户是在盲批。真正落盘仍然走 ``write_text`` 的校验。
+    """
+    try:
+        file_path = Path(target).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise PathNotAllowed(f"路径无法解析：{exc}") from exc
+
     preview = content[:PREVIEW_LIMIT]
     if len(content) > PREVIEW_LIMIT:
         preview += f"\n…（预览截断，全文共 {len(content)} 字）"
-    exists = file_path.exists()
     return {
         "path": str(file_path),
-        "exists": "true" if exists else "false",
+        "exists": "true" if file_path.exists() else "false",
         "bytes": str(len(content.encode("utf-8"))),
         "preview": preview,
     }
+
+
+def build_write_preview(target: str, content: str, roots: list[Path]) -> dict[str, str]:
+    """写文件前的预览，供前端展示给用户确认。"""
+    file_path = ensure_allowed(target, roots)
+    return describe_write(str(file_path), content)
 
 
 def write_text(target: str, content: str, roots: list[Path]) -> str:

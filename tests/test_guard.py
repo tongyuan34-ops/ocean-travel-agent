@@ -62,8 +62,10 @@ def test_untrusted_and_dangerous_sets_are_disjoint():
 
 # ---------- 名单漂移：拼错一个名字等于闸门静默失效 ----------
 
-# 契约里预留、当前没有对应工具的动作名
-RESERVED_ACTIONS = frozenset({"run_script"})
+# 契约里预留、当前没有对应工具的动作名。
+# grant_dir 不是工具，是文件工具内部「申请目录授权」的那个动作——
+# 它不经过工具调用层，所以只能靠工具自己调 check_dangerous 来挡。
+RESERVED_ACTIONS = frozenset({"run_script", "grant_dir"})
 
 
 def test_untrusted_tool_names_all_exist():

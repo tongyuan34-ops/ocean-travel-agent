@@ -10,6 +10,10 @@ app/core/_bundled_keys.py
 # 用户自己的 key / 配置覆盖（桌面版：exe 旁边的 config.json）
 /config.json
 
+# 用户在使用中授权给程序的目录（app/core/grants.py 写入）。
+# 记录的是别人机器上的路径，不该跟着仓库走。
+/grants.json
+
 # 用户 Cookie（等于账号登录态，明文存储）
 cookies/
 

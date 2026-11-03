@@ -14,7 +14,7 @@ from app.adapters import available_platforms
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS
 from app.core import secrets
 from app.core.config import KEY_NAMES, Settings
-from app.core.security import is_windows
+from app.core.security import allowed_roots, is_windows
 from app.version import __version__
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -44,12 +44,13 @@ async def capabilities(request: Request) -> dict[str, Any]:
     social_ready = [name for name in platforms if name in SOCIAL_PLATFORM_KEYS]
     sources = secrets.describe(KEY_NAMES)
     on_bundled = sorted(name for name, source in sources.items() if source == secrets.BUNDLED)
+    roots = allowed_roots(settings)
 
     return {
         "image_gen": media_caps["image_gen"],
         "video_gen": media_caps["video_gen"],
         # system 组：沙箱与壁纸
-        "filesystem": bool(settings.allowed_roots),
+        "filesystem": bool(roots),
         "wallpaper": is_windows(),
         # plugin 组 A：用户粘贴的分享链接解析，默认启用
         "link_parse": True,
@@ -66,6 +67,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "vision": request.app.state.uploads is not None,
         # 前端据此渲染来源筛选器，不得硬编码平台清单
         "platforms": platforms,
+        # 当前允许访问的目录（配置里的 + 用户按需授权过的）。
+        # 报出来是为了让用户**看得见**范围——授权是渐进的，不给个回执的话
+        # 用户不知道自己到底放开了多少。
+        "allowed_roots": [str(root) for root in roots],
         # key 是从哪来的：env / config / bundled / ""（没配）。**只有来源，没有值**。
         # 用内置额度时前端该提示一句「额度用尽可自行填写」，否则用户会以为程序坏了
         "key_sources": sources,

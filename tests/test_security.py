@@ -7,17 +7,21 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+from pathlib import Path
 
 import pytest
 
 from app.core.net import UrlNotAllowed, ensure_safe_url
 from app.core.security import (
+    GrantNeeded,
     PathNotAllowed,
     build_write_preview,
     cookie_path,
     delete_path,
     ensure_allowed,
     read_cookie,
+    suggest_grant_root,
     write_text,
 )
 
@@ -45,6 +49,58 @@ def test_sibling_with_same_prefix_rejected(sandbox):
 def test_empty_whitelist_rejects_everything(sandbox):
     with pytest.raises(PathNotAllowed):
         ensure_allowed(str(sandbox / "x.txt"), [])
+
+
+# ---------- 按需授权：越界时该问哪个目录 ----------
+
+
+def test_out_of_range_offers_a_grant_instead_of_hard_refusal(sandbox):
+    """越界不等于「永远不行」：带上建议授权的目录，工具层才能问一次。"""
+    with pytest.raises(GrantNeeded) as info:
+        ensure_allowed(str(sandbox / "x.txt"), [])
+
+    assert info.value.suggested_root is not None
+    # 建议的目录必须真的能覆盖目标，否则用户点了允许还是写不进去
+    assert str(info.value.suggested_root) in str(sandbox.resolve())
+
+
+def test_suggest_grant_root_prefers_a_folder_the_user_recognises(tmp_path, monkeypatch):
+    """给「桌面」而不是给文件所在的深层目录。
+
+    授权一次要能覆盖同目录后续所有操作，用户也不用判断「授权这一层够不够」。
+    """
+    home = tmp_path / "home"
+    (home / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    target = home / "Desktop" / "旅行" / "行程.md"
+
+    assert suggest_grant_root(target) == (home / "Desktop").resolve()
+
+
+def test_suggest_grant_root_refuses_system_locations():
+    """系统目录不该出现在「允许访问」按钮后面。"""
+    if os.name == "nt":
+        drive = os.environ.get("SYSTEMDRIVE", "C:")
+        targets = [
+            Path(f"{drive}\\"),
+            Path(f"{drive}\\Windows\\System32\\cmd.exe"),
+            Path(f"{drive}\\Program Files\\app\\x.dll"),
+        ]
+    else:
+        targets = [Path("/"), Path("/etc/passwd"), Path("/usr/bin/env")]
+
+    for target in targets:
+        assert suggest_grant_root(target) is None, target
+
+
+def test_suggest_grant_root_falls_back_to_the_parent_folder(tmp_path, monkeypatch):
+    """不在桌面/文档下的自有目录，就授权它自己那一层。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    folder = tmp_path / "work" / "trips"
+    folder.mkdir(parents=True)
+
+    assert suggest_grant_root(folder / "a.md") == folder.resolve()
 
 
 def test_delete_refuses_non_empty_dir(sandbox):

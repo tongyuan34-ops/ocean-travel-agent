@@ -2140,6 +2140,10 @@
     return ACTION_TEXT[action] || action || '系统操作';
   }
 
+  /* 允许按钮的两种文案：带授权的那次，按下去是整个目录放开，不是「这一次」 */
+  var PERM_ALLOW_TEXT = '允许本次';
+  var PERM_ALLOW_GRANT_TEXT = '允许并记住这个目录';
+
   function showPermission(ev) {
     if (state.perm) {
       state.permQueue.push(ev);
@@ -2150,6 +2154,13 @@
     var detail = ev.detail || {};
     DOM.permPath.innerHTML = detail.path ? esc(detail.path) : '';
     DOM.permPath.hidden = !detail.path;
+    /* 越界不等于拒绝：后端会把「建议授权的目录」和一句话说明一起送来。
+       不显示的话，用户按「允许」时并不知道自己顺手放开了整个目录。 */
+    var grant = detail.grant_hint || '';
+    DOM.permGrant.innerHTML = grant ? esc(grant) : '';
+    DOM.permGrant.hidden = !grant;
+    DOM.permAllow.textContent = grant ? PERM_ALLOW_GRANT_TEXT : PERM_ALLOW_TEXT;
+    DOM.permRemember.hidden = !!grant;
     DOM.permPreview.innerHTML = detail.preview ? esc(detail.preview) : '（无预览）';
     DOM.permOverlay.hidden = false;
     startPermissionTimer();
@@ -3175,6 +3186,7 @@
     DOM.permOverlay = $('#permOverlay');
     DOM.permAction = $('#permAction');
     DOM.permPath = $('#permPath');
+    DOM.permGrant = $('#permGrant');
     DOM.permPreview = $('#permPreview');
     DOM.permCountdown = $('#permCountdown');
     DOM.permDeny = $('#permDeny');

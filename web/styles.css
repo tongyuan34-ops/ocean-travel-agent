@@ -1057,6 +1057,12 @@ img{display:block;max-width:100%}
   background:rgba(20,36,60,.05);border-radius:10px;padding:9px 11px;
   word-break:break-all;
 }
+/* 授权提示：一次「允许」会放开整个目录，得比路径更醒目一点 */
+.perm-grant{
+  margin:0 0 10px;font-size:12px;line-height:1.65;color:#7a4a12;
+  background:rgba(143,90,32,.09);border-radius:10px;padding:9px 11px;
+}
+.perm-grant[hidden]{display:none}
 .perm-preview{
   margin:0 0 12px;max-height:190px;overflow:auto;
   font-family:var(--mono);font-size:11.5px;line-height:1.65;

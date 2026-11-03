@@ -72,11 +72,33 @@ def _description(tool: BaseTool) -> str:
     return (getattr(tool, "description", "") or "").strip()
 
 
+# 不写环境、但也不是纯读的工具：generate_image 会提交任务、占额度、产出媒体文件。
+# 标成 readOnlyHint 的后果是客户端**自动批准**，等于把一次有副作用的调用变成静默执行。
+_NON_READONLY = frozenset({"generate_image"})
+
+
+def _annotations(tool: BaseTool) -> dict[str, Any]:
+    """工具的 ``annotations``。客户端据此决定要不要弹确认、能不能自动批准。
+
+    只给能确定的两个字段。``openWorldHint`` / ``idempotentHint`` 需要对每个工具
+    逐个判断「是否访问开放网络」「重复调用是否等价」，猜错比不填更糟——
+    规范里这几个字段本来就是可选的 hint。
+
+    ``destructiveHint`` 一律 false：会破坏数据的工具（写、删、改壁纸）根本不在
+    这个服务端的暴露列表里，能列出来的最坏也只是「产出文件」。
+    """
+    return {
+        "readOnlyHint": tool.name not in _NON_READONLY,
+        "destructiveHint": False,
+    }
+
+
 def _tool_descriptor(tool: BaseTool) -> dict[str, Any]:
     return {
         "name": tool.name,
         "description": _description(tool),
         "inputSchema": _input_schema(tool),
+        "annotations": _annotations(tool),
     }
 
 
@@ -109,6 +131,9 @@ class MCPServer:
         self._version = version
         self._instructions = instructions
         self._legacy = False
+        # 在飞请求：request_id → 正在跑它的 task。取消通知靠这张表找到要中止的那个。
+        # 只存能当字典键的 id（JSON-RPC 规定 id 是字符串或数字）
+        self._active: dict[Any, asyncio.Task[Any]] = {}
 
     # ---------- 协议入口 ----------
 
@@ -139,10 +164,20 @@ class MCPServer:
         if not isinstance(method, str):
             return protocol.error_message(request_id, protocol.INVALID_REQUEST, "缺少 method")
 
-        # 通知没有 id，规范要求不得回包
+        # 通知没有 id，规范要求不得回包。唯一的例外是取消：它本身不产生回包，
+        # 但要让正在跑的那个请求停下来——否则客户端以为不做了，工具还在烧额度
         if "id" not in message:
+            if method == "notifications/cancelled":
+                self._cancel(params.get("requestId"))
             return None
 
+        # 记下「谁在跑这个请求」，取消通知才能找到它。用 current_task 而不是另起
+        # task：取消要能穿透到工具内部，就得取消真正在 await 的那个 task
+        task = asyncio.current_task()
+        tracked = False
+        if task is not None and isinstance(request_id, (str, int)):
+            self._active[request_id] = task
+            tracked = True
         try:
             self._check_meta(method, params)
             result = await self._dispatch(method, params)
@@ -151,7 +186,25 @@ class MCPServer:
         except Exception:
             logger.exception("处理 %s 时出错", method)
             return protocol.error_message(request_id, protocol.INTERNAL_ERROR, "服务端内部错误")
+        finally:
+            if tracked:
+                self._active.pop(request_id, None)
         return protocol.result_message(request_id, result)
+
+    def _cancel(self, request_id: Any) -> bool:
+        """中止一个在飞请求。返回是否真的取消了（供测试与日志用）。
+
+        取消后**不回包**——规范要求被取消的请求不产生响应，
+        客户端那边是靠自己的超时/取消逻辑收尾的。
+        """
+        if not isinstance(request_id, (str, int)):
+            return False
+        task = self._active.get(request_id)
+        if task is None or task.done():
+            return False
+        logger.info("收到取消通知，中止请求 %s", request_id)
+        task.cancel()
+        return True
 
     def _check_meta(self, method: str, params: dict[str, Any]) -> None:
         """现代请求必须带元数据；legacy 会话（已 initialize）不要求。"""
@@ -260,6 +313,11 @@ def default_tools() -> list[BaseTool]:
     return [tool for tool in ALL_TOOLS if tool.name not in DANGEROUS_TOOLS]
 
 
+# stdin 关闭后给在飞请求留多久收尾。给短一点：stdin 一关基本就是客户端要退出了，
+# 卡在这里不走只会让「关掉程序」变成「等十几秒才关掉」
+_DRAIN_TIMEOUT_SEC = 2.0
+
+
 async def serve_stdio(
     server: MCPServer | None = None,
     *,
@@ -271,22 +329,54 @@ async def serve_stdio(
     规范的三条硬要求：一条消息一行、stdout 只能写 MCP 消息、stdin 关闭就退出。
     读用线程池包 ``readline``——Windows 上 asyncio 没有可用的 stdin 管道，
     这是唯一跨平台且不引入依赖的做法。
+
+    **每条消息一个 task，不是串行 await。** 串行的话一个慢工具（生图要十几秒）
+    会把后面所有请求堵在队列里，包括客户端发来的 ``ping``——客户端等不到 ping
+    的回复会判定连接挂了，实际只是我们在慢慢跑另一个工具。
+
+    代价是 stdout 写入要加锁：多个 task 同时写会交错，一条消息被切成两半，
+    对端直接解析失败。锁只包住「写一行 + flush」这一小段，不影响并发度。
     """
     instance = server if server is not None else MCPServer()
     input_stream = stdin if stdin is not None else sys.stdin
     output_stream = stdout if stdout is not None else sys.stdout
     loop = asyncio.get_running_loop()
 
+    write_lock = asyncio.Lock()
+    running: set[asyncio.Task[None]] = set()
+
+    async def serve_one(line: str) -> None:
+        response = await instance.handle_line(line)
+        if response is None:
+            return
+        async with write_lock:
+            output_stream.write(response + "\n")
+            output_stream.flush()
+
+    def reap(task: asyncio.Task[None]) -> None:
+        running.discard(task)
+        # 主动取一次异常：不取的话 task 结束时 asyncio 会打
+        # 「Task exception was never retrieved」，日志里全是噪音
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("请求任务异常：%s", task.exception())
+
     while True:
         line = await loop.run_in_executor(None, input_stream.readline)
         if not line:
-            logger.info("stdin 已关闭，退出")
-            return
-        response = await instance.handle_line(line)
-        if response is None:
-            continue
-        output_stream.write(response + "\n")
-        output_stream.flush()
+            break
+        task = asyncio.create_task(serve_one(line), name="mcp-serve-one")
+        running.add(task)
+        task.add_done_callback(reap)
+
+    logger.info("stdin 已关闭，等待 %d 个在飞请求收尾", len(running))
+    if not running:
+        return
+    _done, pending = await asyncio.wait(running, timeout=_DRAIN_TIMEOUT_SEC)
+    for task in pending:
+        task.cancel()
+    if pending:
+        logger.warning("%d 个请求未在收尾窗口内完成，已中止", len(pending))
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def main() -> int:

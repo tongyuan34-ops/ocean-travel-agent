@@ -134,26 +134,38 @@ def write_version_file(version: str) -> None:
     )
 
 
+def _remove_tree(path: Path) -> bool:
+    """删目录，删不掉返回 False。
+
+    **在子进程里删**：某些带文件系统钩子的环境（企业安全软件、沙箱）遇到
+    「一次删上百个文件」会直接终止发起删除的进程。如果在本进程里删，表现
+    就是「打包跑到一半莫名其妙退出」，连兜底代码都来不及执行。放到子进程，
+    最坏情况是子进程被杀，父进程还能走改名那条路。
+    """
+    code = "import shutil, sys; shutil.rmtree(sys.argv[1])"
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(path)], capture_output=True, check=False
+    )
+    return result.returncode == 0 and not path.exists()
+
+
 def clean_dist() -> None:
     """先自己把旧产物删干净。
 
     不删的话 PyInstaller 会在 ``--noconfirm`` 里自己动手，而它删大目录时
-    可能被外部的文件系统钩子拦下来，报一个跟打包毫无关系的错——排查方向
-    会被带偏。
+    可能被同样的钩子拦下来，报一个跟打包毫无关系的错——排查方向会被带偏。
 
-    删不掉（有进程占用、或者被某种批量删除保护拦下）就改名挪开：重命名是
-    一次原子操作，不会触发任何「一次删 N 个文件」的检查，而且挪到旁边的
-    东西用户随时能手动清。
+    删不掉就改名挪开：重命名是一次原子操作，不会触发任何「一次删 N 个文件」
+    的检查，而且挪到旁边的目录用户随时能手动清。
     """
     if not APP_DIR.exists():
         return
-    shutil.rmtree(APP_DIR, ignore_errors=True)
-    if APP_DIR.exists():
-        trash = APP_DIR.with_name(f"{APP_DIR.name}.old-{int(time.time())}")
-        APP_DIR.rename(trash)
-        print(f"旧产物删不掉，已挪到 {trash.name}（确认没用后可以手动删）")
-    else:
+    if _remove_tree(APP_DIR):
         print(f"已清理旧产物：{APP_DIR.name}")
+        return
+    trash = APP_DIR.with_name(f"{APP_DIR.name}.old-{int(time.time())}")
+    APP_DIR.rename(trash)
+    print(f"旧产物删不掉，已挪到 {trash.name}（确认没用后可以手动删）")
 
 
 def run_pyinstaller() -> None:
@@ -251,9 +263,30 @@ def make_zip(version: str) -> Path:
     return target
 
 
+def _find_iscc() -> str | None:
+    """找 Inno Setup 的命令行编译器。
+
+    先看 PATH，再看三个默认安装位置：Inno 的安装程序会写 PATH，但已经开着的
+    终端（包括这个脚本所在的进程）拿到的是旧环境，``shutil.which`` 会落空——
+    用户刚装完就打包时，报「没找到 Inno」会让人以为白装了。
+    """
+    found = shutil.which("iscc") or shutil.which("ISCC")
+    if found:
+        return found
+    candidates = [
+        Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"),
+        Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
+        Path.home() / "AppData" / "Local" / "Programs" / "Inno Setup 6" / "ISCC.exe",
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return None
+
+
 def build_installer(version: str) -> None:
     """有 Inno Setup 就顺手出安装包；没有就提示一句，不算失败。"""
-    iscc = shutil.which("iscc") or shutil.which("ISCC")
+    iscc = _find_iscc()
     if not iscc:
         print("没找到 Inno Setup（iscc），跳过安装包。装了之后重跑 --installer 即可。")
         return

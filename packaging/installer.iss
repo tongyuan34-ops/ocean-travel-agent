@@ -27,7 +27,16 @@ AppId={{8F3A6C21-4B7E-4C5A-9E10-6D2B7C9A1F30}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=Ocean
-DefaultDirName={autopf}\OceanTravelAgent
+; **目录钉死在用户目录，不用 {autopf}**
+;
+; {autopf} 会跟着提权状态走：安装程序被提权时它等于 Program Files，普通双击
+; 时等于 %LOCALAPPDATA%\Programs。而本程序必须往 exe 旁边写 config.json、
+; grants.json、data/、logs/ ——Program Files 那层不可写，实测普通权限进程
+; 建 data 目录直接「访问被拒绝」。后果不是报错，是「设置不生效、会话全丢」，
+; 用户只会说「这软件记不住东西」。
+;
+; 所以固定成 {localappdata}\Programs：不管以什么身份装，落点都可写。
+DefaultDirName={localappdata}\Programs\OceanTravelAgent
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
@@ -37,23 +46,35 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; 安装程序自己也用应用图标：用户双击 setup.exe 时看到的是同一个东西
+#if FileExists(AddBackslash(SourcePath) + "app.ico")
+SetupIconFile=app.ico
+#endif
 UninstallDisplayIcon={app}\{#MyAppExeName}
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
-; 中文语言包是 Inno 的非官方翻译，装在编译器 Languages 目录下才存在
-#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
+; 不提供「为所有用户安装」（没有 PrivilegesRequiredOverridesAllowed）：那会
+; 提权，而提权后的 {localappdata} 指向的可能是另一个管理员账户，程序就装到
+; 别人名下、当前用户找不到入口。这个软件本来就是「一个人的」，装给自己、
+; 不需要管理员，也就不用弹 UAC。
+
 [Languages]
-Name: "cn"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
-#endif
+; 这份中文语言包随仓库走（packaging/ChineseSimplified.isl，官方非官方翻译）。
+; 不依赖构建机的 Inno 目录里有没有它——换台机器打包不用先手动塞文件。
+; 没有 [Languages] 时会退回英文界面，中文用户看到英文向导就不像正经软件了。
+Name: "cn"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
 
 [Files]
-; 用户数据不随安装包走：data/ 是会话，config.json 是他的 key，
-; grants.json 是他授权过的目录。升级覆盖安装时必须原样保留。
-Source: "{#SourceDir}\*"; DestDir: "{app}"; \
-    Excludes: "\data\*,\logs\*,\config.json,\grants.json,使用说明.txt"; \
+; 只装程序本体：exe + _internal。
+;
+; 不用 `{SourceDir}\*` 配 Excludes——Excludes 的通配符不跨目录分隔符，
+; data\ 下面还有 uploads\ 这种子目录，很容易漏掉一两个文件，把上一个用户的
+; 会话记录装进下一个用户的机器。这里从来源上就排除了：
+; data/、logs/、config.json、grants.json 一个都不在下面两条里。
+Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\_internal\*"; DestDir: "{app}\_internal"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

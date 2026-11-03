@@ -383,12 +383,34 @@ PyInstaller「能生成」和「能启动」是两件事：漏一个动态导入
 
 程序把 `config.json`、`grants.json`、`data/`、`logs/` 写在 exe 旁边。装进
 Program Files 之后那层目录不可写，换 key、授权、会话落盘全部失效，而且
-**不报错**，只是「设置不生效」。所以 `installer.iss` 用
-`PrivilegesRequired=lowest` + `{autopf}`：非管理员安装自动落到
-`%LOCALAPPDATA%\Programs`，写权限天然具备，还省一次 UAC。
+**不报错**，只是「设置不生效」——用户只会说「这软件记不住东西」。
 
-卸载只删 `logs/`。`data/` 和 `config.json` 一律留着——「卸载软件顺手删掉
-用户三个月前的行程」不可接受。
+**不要用 `{autopf}`**。它会跟着提权状态走：安装程序被提权时等于 Program
+Files，普通双击时等于 `%LOCALAPPDATA%\Programs`。同一个安装包在不同身份下
+落到两个地方，其中一个是坏的。所以目录写死：
+
+```
+DefaultDirName={localappdata}\Programs\OceanTravelAgent
+PrivilegesRequired=lowest          ; 不提供「为所有用户安装」
+```
+
+实测（装完再卸）：落点 `%LOCALAPPDATA%\Programs\OceanTravelAgent`，桌面和
+开始菜单快捷方式都在，卸载删掉 `exe` / `_internal` / `logs`，**保留**
+`data/` 和 `config.json`。「卸载软件顺手删掉用户三个月前的行程」不可接受。
+
+### 安装界面是中文的
+
+`packaging/ChineseSimplified.isl` 随仓库走（官方社区翻译，6.5.0+），
+`[Languages]` 直接引用它。不依赖构建机的 Inno 目录里有没有这个文件——
+换台机器打包不用先手动塞语言包。少了它向导会退回英文，中文用户会觉得
+「这不是给我用的软件」。
+
+### 还没解决的：代码签名
+
+安装包和 exe 都没有签名，Windows 会显示「未知发布者」，SmartScreen 可能
+拦一道。用户要点「更多信息 → 仍要运行」。这需要买代码签名证书（约千元/年），
+不是代码能解决的。发出去之前自己先在一台干净机器上走一遍这个流程，知道
+弹窗长什么样，用户问起来能答。
 
 ### 发版前检查
 

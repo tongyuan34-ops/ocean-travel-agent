@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -41,6 +42,49 @@ logger = logging.getLogger(__name__)
 # 源外层超时比内层（MEDIACRAWLER_TIMEOUT）多出的余量。
 # SPEC 4.8 铁律：外层超时必须 ≥ 内层超时，否则子进程还没跑完就被提前杀掉。
 MEDIACRAWLER_OVERHEAD_SEC = 20
+
+# ---------- 结果缓存 ----------
+# 一次采集的固定成本很高：拉起浏览器 + 登录态校验 + MediaCrawler 内部多处
+# asyncio.sleep(2)，实测 9~10s，其中浏览器只占约 1s，压不下去。
+# 用户连续追问同一话题（「再找找三亚的」「刚才那个再说说」）会反复触发采集，
+# 所以这里按「平台 + 关键词 + 条数」做进程内缓存，命中即返回，0 秒。
+# 只缓存成功结果：降级占位不缓存，否则一次瞬时故障会连续 15 分钟返回假数据。
+_CACHE_TTL_SEC = 900.0
+_CACHE_MAX_ENTRIES = 128
+_cache: dict[tuple[str, str, int], tuple[float, list[Doc]]] = {}
+
+
+def _cache_key(platform: str, query: str, limit: int) -> tuple[str, str, int]:
+    return (platform, " ".join(query.lower().split()), max(1, limit))
+
+
+def _cache_get(key: tuple[str, str, int]) -> list[Doc] | None:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    saved_at, docs = entry
+    if time.time() - saved_at > _CACHE_TTL_SEC:
+        _cache.pop(key, None)
+        return None
+    # Doc 是可变的，返回深拷贝，避免调用方改写污染缓存
+    return copy.deepcopy(docs)
+
+
+def _cache_put(key: tuple[str, str, int], docs: list[Doc]) -> None:
+    if not docs or any(d.mock for d in docs):
+        return
+    if len(_cache) >= _CACHE_MAX_ENTRIES:
+        # 简单的容量控制：清掉最旧的一批，避免无限增长
+        oldest = sorted(_cache.items(), key=lambda kv: kv[1][0])[: _CACHE_MAX_ENTRIES // 4]
+        for stale_key, _ in oldest:
+            _cache.pop(stale_key, None)
+    _cache[key] = (time.time(), copy.deepcopy(docs))
+
+
+def clear_result_cache() -> None:
+    """清空采集缓存（测试与「重新采集」用）。"""
+    _cache.clear()
+
 
 # 平台注册表：(canonical 名, MediaCrawler 代码, 前端展示名)
 PLATFORM_SPECS: tuple[tuple[str, str, str], ...] = (
@@ -291,6 +335,17 @@ class MediaCrawlerAdapter(SourceAdapter):
             raise RuntimeError("未配置该平台 Cookie，拒绝以未登录态运行")
 
         started = time.time()
+        cache_key = _cache_key(self.name, query, limit)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info(
+                "检索源 %s | 命中缓存 | 关键词=%s | 命中 %d | 跳过采集",
+                self.name,
+                query,
+                len(cached),
+            )
+            return cached
+
         cmd = self._build_command(query, limit)
         run = await run_crawler_subprocess(
             cmd,
@@ -313,6 +368,8 @@ class MediaCrawlerAdapter(SourceAdapter):
             limit=max(1, limit),
             query=query,
         )
+        if docs:
+            _cache_put(cache_key, docs)
         if not docs and run.returncode != 0:
             raise RuntimeError(f"MediaCrawler 退出码 {run.returncode}：{run.tail() or '无输出'}")
         if not docs:

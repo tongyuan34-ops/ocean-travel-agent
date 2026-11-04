@@ -40,10 +40,13 @@ class SearchSocialInput(BaseModel):
 async def search_social_session(
     query: str, platforms: list[str] | None = None, limit: int = 5
 ) -> str:
-    """在**已配置登录态 Cookie** 的社媒平台按关键词检索内容（默认关闭的插件）。
+    """在**已配置登录态 Cookie** 的社媒平台按关键词检索内容。
 
-    只在用户明确要求检索社媒内容时调用。采集耗时长且存在平台风控风险，
-    未配置 Cookie 的平台会被跳过并说明原因。
+    涉及真实体验、攻略、种草、避坑、口碑、本地人推荐这类只有站内内容才有的问题时
+    默认调用，不必等用户点名平台；已配置 Cookie 的平台自动参与，未配置的自动跳过。
+    单次采集固定成本约 10 秒（要拉起浏览器），因此：
+    - 平台明显对口时只传该平台，不要全平台扫描
+    - 同一关键词 15 分钟内会命中缓存，可放心重试
     """
     settings = load_settings()
     if not settings.enable_session_fetch:

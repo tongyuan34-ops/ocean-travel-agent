@@ -165,8 +165,10 @@
     perm: null,
     permQueue: [],
     permTimer: null,
+    permReturn: null,
     media: null,
     sheet: '',
+    sheetReturn: null,
     stick: true,
     capReady: false,
     // 对话风格：personas 是后端给的选项，persona 是当前选中项。
@@ -2150,6 +2152,7 @@
       return;
     }
     state.perm = ev;
+    state.permReturn = document.activeElement;
     DOM.permAction.innerHTML = esc(actionLabel(ev.action));
     var detail = ev.detail || {};
     DOM.permPath.innerHTML = detail.path ? esc(detail.path) : '';
@@ -2163,6 +2166,7 @@
     DOM.permRemember.hidden = !!grant;
     DOM.permPreview.innerHTML = detail.preview ? esc(detail.preview) : '（无预览）';
     DOM.permOverlay.hidden = false;
+    moveFocus(DOM.permOverlay.querySelector('.modal'));
     startPermissionTimer();
   }
 
@@ -2189,6 +2193,9 @@
     if (state.permTimer) clearInterval(state.permTimer);
     state.permTimer = null;
     state.perm = null;
+    var back = state.permReturn;
+    state.permReturn = null;
+    restoreFocus(back);
   }
 
   function nextPermission() {
@@ -2212,11 +2219,63 @@
 
   /* ================= 弹层 ================= */
 
+  /* 焦点管理：弹层打开时把焦点移入、Tab 循环锁在弹层内、关闭后归还触发元素 */
+  var FOCUSABLE_SEL = 'a[href],button:not([disabled]),input:not([disabled]),' +
+    'textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+  function focusablesIn(root) {
+    if (!root || !root.querySelectorAll) return [];
+    var nodes = root.querySelectorAll(FOCUSABLE_SEL);
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.offsetWidth || el.offsetHeight || el.getClientRects().length) out.push(el);
+    }
+    return out;
+  }
+
+  function moveFocus(node) {
+    if (!node || !node.focus) return;
+    try { node.focus({ preventScroll: true }); } catch (e) { try { node.focus(); } catch (e2) { /* 忽略 */ } }
+  }
+
+  function restoreFocus(node) {
+    if (node && node.focus && document.contains(node)) moveFocus(node);
+  }
+
+  /* Tab / Shift+Tab 在弹层内循环；返回 true 表示已接管本次按键 */
+  function trapTab(root, e) {
+    if (!root) return false;
+    if (e.key !== 'Tab' && e.keyCode !== 9) return false;
+    var list = focusablesIn(root);
+    if (!list.length) return false;
+    var first = list[0];
+    var last = list[list.length - 1];
+    var active = document.activeElement;
+    var inside = root.contains(active);
+    if (e.shiftKey) {
+      if (!inside || active === first) { e.preventDefault(); moveFocus(last); return true; }
+    } else if (!inside || active === last) {
+      e.preventDefault();
+      moveFocus(first);
+      return true;
+    }
+    return false;
+  }
+
+  /* 当前打开的弹层容器（权限弹窗优先，其次侧滑面板） */
+  function activeDialog() {
+    if (DOM.permOverlay && !DOM.permOverlay.hidden) return DOM.permOverlay.querySelector('.modal');
+    if (DOM.sheetOverlay && !DOM.sheetOverlay.hidden) return DOM.sheet;
+    return null;
+  }
+
   var SHEETS = {};
 
   function openSheet(type, opts) {
     if (!SHEETS[type]) return;
     state.sheet = type;
+    state.sheetReturn = document.activeElement;
     var def = SHEETS[type];
     DOM.sheetKicker.innerHTML = esc(def.kicker || 'OCEAN');
     DOM.sheetTitle.innerHTML = esc(def.title);
@@ -2225,6 +2284,7 @@
     if (DOM.rail) DOM.rail.className = 'rail panel';
     if (DOM.railScrim) DOM.railScrim.className = 'rail-scrim';
     def.render(DOM.sheetBody, opts || {});
+    moveFocus(DOM.sheet);
   }
 
   function closeSheet() {
@@ -2234,6 +2294,9 @@
     if (state.sheet === 'media') state.media = null;
     DOM.sheetOverlay.hidden = true;
     state.sheet = '';
+    var back = state.sheetReturn;
+    state.sheetReturn = null;
+    restoreFocus(back);
   }
 
   SHEETS.discover = {
@@ -2774,17 +2837,48 @@
       url = value;
     }
     if (!url) return;
-    img.className = instant ? '' : 'is-out';
+    if (instant) {
+      img.className = '';
+      img.src = url;
+      detectTone(url);
+      return;
+    }
     var loader = new Image();
     loader.onload = function () {
-      img.src = url;
-      img.className = '';
+      crossfadeWallpaper(img, url);
       detectTone(url);
     };
     loader.onerror = function () {
       img.className = 'is-out'; /* 加载失败保留 CSS 渐变兜底 */
     };
     loader.src = url;
+  }
+
+  /* 双层交叉淡入：旧图作为临时图层盖在上面淡出，新图在其下方就位，
+     避免「先淡到全黑再亮起」的割裂感。旧图已在缓存里，不会二次下载。 */
+  function crossfadeWallpaper(img, url) {
+    var host = img.parentNode;
+    var prev = img.getAttribute('src') || '';
+    if (!host || !prev || prev === url) {
+      img.className = '';
+      img.src = url;
+      return;
+    }
+    var ghost = document.createElement('img');
+    ghost.className = 'wp-ghost';
+    ghost.setAttribute('alt', '');
+    ghost.setAttribute('aria-hidden', 'true');
+    ghost.src = prev;
+    host.insertBefore(ghost, img.nextSibling);
+    img.className = '';
+    img.src = url;
+    /* 下一帧再触发淡出，确保过渡生效 */
+    window.requestAnimationFrame(function () {
+      window.requestAnimationFrame(function () { ghost.className = 'wp-ghost is-out'; });
+    });
+    window.setTimeout(function () {
+      if (ghost.parentNode) ghost.parentNode.removeChild(ghost);
+    }, 900);
   }
 
   function renderSettings(body) {
@@ -3110,6 +3204,8 @@
     };
 
     document.onkeydown = function (e) {
+      var dlg = activeDialog();
+      if (dlg && trapTab(dlg, e)) return;
       if (e.keyCode === 27) {
         if (!DOM.permOverlay.hidden) { decidePermission(false, false); return; }
         if (!DOM.sheetOverlay.hidden) { closeSheet(); return; }

@@ -13,7 +13,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2316263f'/%3E%3Cpath d='M5 20c3-5.5 6-5.5 9 0s6 5.5 9 0' stroke='%23f6faff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="./styles.css?v=20261026e">
+<link rel="stylesheet" href="./styles.min.css?v=20261103h">
 <!-- 桌面壳（无边框窗口）专用，浏览器里不生效 -->
 <link rel="stylesheet" href="./window-chrome.css?v=20261104a">
 </head>
@@ -41,9 +41,9 @@
     </div>
 
     <nav class="main-nav" id="mainNav" aria-label="主导航">
-      <button type="button" data-sheet="discover">Discover</button>
-      <button type="button" data-sheet="story">Our story</button>
-      <button type="button" data-sheet="journal">Journal</button>
+      <button type="button" data-sheet="discover" aria-haspopup="dialog">Discover</button>
+      <button type="button" data-sheet="story" aria-haspopup="dialog">Our story</button>
+      <button type="button" data-sheet="journal" aria-haspopup="dialog">Journal</button>
     </nav>
 
     <div class="topbar-right">
@@ -108,7 +108,7 @@
         </div>
         <div class="rail-list" id="sessionList"></div>
         <div class="rail-foot">
-          <div class="conn" id="conn"><span class="dot"></span><span id="connText">正在连接…</span></div>
+          <div class="conn" id="conn" role="status" aria-live="polite"><span class="dot"></span><span id="connText">正在连接…</span></div>
           <button class="mini-link" id="railSettings" type="button">设置</button>
         </div>
       </aside>
@@ -141,11 +141,11 @@
           <div class="chips" id="sourceChips"></div>
         </header>
 
-        <div class="messages" id="messages"></div>
+        <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="对话消息"></div>
 
         <button class="to-bottom" id="toBottom" type="button" hidden>回到底部 ↓</button>
 
-        <form class="composer" id="composer" autocomplete="off">
+        <form class="composer" id="composer" autocomplete="off" novalidate>
           <div class="attach-strip" id="attachStrip" hidden></div>
           <button class="composer-tool" id="composerAttach" type="button" aria-label="从相册选择图片或视频" title="从相册选择图片或视频" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -153,7 +153,7 @@
           <button class="composer-tool" id="composerMedia" type="button" aria-label="生成旅行图片" title="生成旅行图片">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
           </button>
-          <textarea id="input" rows="1" placeholder="告诉我目的地、天数与预算…" aria-label="消息输入框"></textarea>
+          <textarea id="input" class="resize-none" rows="1" placeholder="告诉我目的地、天数与预算…" aria-label="消息输入框"></textarea>
           <button class="send" id="sendBtn" type="submit" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
           </button>
@@ -181,7 +181,7 @@
 
   <div class="overlay" id="sheetOverlay" hidden>
     <div class="scrim" id="sheetScrim"></div>
-    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1">
       <header class="sheet-head">
         <div>
           <p class="sheet-kicker" id="sheetKicker">OCEAN</p>
@@ -197,7 +197,7 @@
 
   <div class="overlay" id="permOverlay" hidden>
     <div class="scrim"></div>
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="permAction">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="permAction" tabindex="-1">
       <p class="modal-kicker">PERMISSION</p>
       <h3 class="modal-title" id="permAction">写入文件</h3>
       <p class="perm-path mono" id="permPath"></p>
@@ -212,9 +212,9 @@
     </section>
   </div>
 
-  <div class="toast" id="toast" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 </div>
 <script src="./window-chrome.js?v=20261104a" defer></script>
-<script src="./app.js?v=20261026e"></script>
+<script src="./app.min.js?v=20261103d"></script>
 </body>
 </html>

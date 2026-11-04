@@ -16,9 +16,80 @@
 
 ---
 
-## 先跑起来
+## 直接用：下载安装包，双击就行
 
-三步，不需要自己准备数据库，也不需要 Redis：
+不想碰 Python、Docker、Redis，也不想申请 API Key——下载安装包，双击，就能用。
+这是给「只想用它规划一次旅行」的人准备的路，下面那条「从源码跑」才是给开发者的。
+
+**[⬇ 下载 OceanTravelAgent-0.1.0-setup.exe](https://github.com/tongyuan34-ops/ocean-travel-agent/raw/main/releases/OceanTravelAgent-0.1.0-setup.exe)**（36 MB）
+· 文件说明见 [releases/README.md](releases/README.md)
+
+### 四步装好
+
+1. 点上面的链接下载（也可以进 [releases/](releases/) 目录点 Download）
+2. 双击 `OceanTravelAgent-0.1.0-setup.exe`
+3. 如果弹出蓝色窗口「Windows 已保护你的电脑」→ 点 **更多信息** → **仍要运行**
+4. 装完桌面出现「Ocean 旅行规划」，双击打开
+
+第 3 步要说清楚：**软件没有买代码签名证书**（约千元/年），所以 Windows 会提示
+「未知发布者」。这不是病毒，但**这一步会拦住不少人**——不知道要点「更多信息」的，
+到这儿就放弃了。
+
+不需要管理员权限，不弹 UAC，不装任何运行库。
+
+### 装完是什么样
+
+| | |
+|---|---|
+| 窗口 | 原生窗口（不是浏览器标签页），无边框，关掉就是退出进程 |
+| 模型 | 内置一份低额度 key，装完直接能对话 |
+| 工具 | 23 个全开：地图、天气、检索、图片生成、文件读写 |
+| 数据 | 全在本机，只有模型调用会出网 |
+
+### 装在哪，数据在哪
+
+```
+%LOCALAPPDATA%\Programs\OceanTravelAgent\
+├── OceanTravelAgent.exe     主程序
+├── _internal\               依赖，别删
+├── config.json              换自己的 key 就改这里
+├── 使用说明.txt
+└── data\  logs\             运行后生成
+```
+
+装在用户目录而不是 `Program Files`，因为程序要往 exe 旁边写配置和会话记录；
+`Program Files` 不可写，而且**不报错**，只表现为「设置不生效、会话全丢」。
+
+卸载只删 `logs\`。`data\`（会话记录、生成的行程）和 `config.json`（你的 key）
+一律保留——「卸载软件顺手删掉三个月前的行程」不可接受。
+
+### 内置额度用完了怎么办
+
+打开安装目录下的 `config.json`，把 `MODEL_API_KEY` 换成自己的（任何 OpenAI 兼容
+接口都行），关掉窗口重新打开。你填的值优先于内置 key，**换 key 不需要等新版本**。
+
+### 文件访问：等真要动文件时才问
+
+启动时不要求任何目录权限。只有当你让它写文件、读文件时，才会在**那一次**弹窗里问
+「是否允许访问某个目录」，允许一次之后同目录不再问。
+
+写文件时「授权目录」和「写入预览」合并成**一次**弹窗——分两次问的话，第二问的答案
+在一秒前刚给过。系统目录（`C:\Windows`、盘根）连问都不问，直接拒绝：用户点「允许」
+也不该把系统目录打开。
+
+授权记录在 `grants.json`，删掉就全部收回。
+
+### 系统要求
+
+Windows 10 / 11，**64 位**，需要联网（模型走 `api.deepseek.com`，国内直连）。
+32 位系统装不上，Windows 7 跑不起来。
+
+---
+
+## 从源码跑
+
+要改代码、跑测试、或者部署到服务器，用这条路。三步，不需要自己准备数据库，也不需要 Redis
+（前提是装了 Docker；没有的话用下面说的 `uv` / `pip` 本地起法）：
 
 ```bash
 git clone https://github.com/tongyuan34-ops/ocean-travel-agent.git

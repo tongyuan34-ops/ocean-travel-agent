@@ -66,6 +66,20 @@ Name: "cn"; MessagesFile: "ChineseSimplified.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
 
+[InstallDelete]
+; 装之前先把旧的程序目录整个清掉，只清 _internal 和 exe，用户数据一个不碰。
+;
+; 原因是实测踩到的：0.1.0 第一版把静态资源打错了层级，_internal\web\index.html
+; 是个**目录**。修好之后覆盖安装，Inno 发现目标位置是个同名目录，无法用文件
+; 覆盖目录，于是**静默跳过**——用户装完还是坏的，界面上没有任何提示，只能说
+; 「还是打不开」。这类「文件与目录同名」的冲突在升级路径里没有别的兜底手段，
+; 只能每次安装前把程序目录整个换掉。
+;
+; 不能只依赖 [Files] 的 ignoreversion：那个只比版本和时间戳，管不了类型冲突。
+; data/、logs/、config.json、grants.json 都不在这里，不会被删。
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\{#MyAppExeName}"
+
 [Files]
 ; 只装程序本体：exe + _internal。
 ;

@@ -244,3 +244,83 @@ def test_boot_honours_requested_port(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [12345]
     assert port == 12345
     assert url == "http://127.0.0.1:12345"
+
+
+class _FakeWindow:
+    """够用的假窗口：只记下被调了哪个动作。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def minimize(self) -> None:
+        self.calls.append("minimize")
+
+    def maximize(self) -> None:
+        self.calls.append("maximize")
+
+    def restore(self) -> None:
+        self.calls.append("restore")
+
+    def destroy(self) -> None:
+        self.calls.append("destroy")
+
+
+def test_window_chrome_toggles_between_maximize_and_restore() -> None:
+    """按钮要来回切，而且返回值必须反映**切换后**的状态。
+
+    前端靠这个返回值换图标。如果返回的是「切换前」，用户点两下会发现
+    图标和窗口对不上，然后开始怀疑按钮坏了。
+    """
+    chrome = desktop.WindowChrome()
+    window = _FakeWindow()
+    chrome._attach(window)
+
+    assert chrome.toggle_maximize() is True
+    assert chrome.toggle_maximize() is False
+    assert window.calls == ["maximize", "restore"]
+
+
+def test_window_chrome_is_harmless_before_attach() -> None:
+    """窗口还没挂上时调用不能崩——构造和 create_window 之间有个时间窗。"""
+    chrome = desktop.WindowChrome()
+    assert chrome.toggle_maximize() is False
+    chrome.minimize()
+    chrome.close()
+
+
+def test_window_chrome_hides_attach_from_javascript() -> None:
+    """``_attach`` 下划线开头，pywebview 不会把它暴露给前端。
+
+    这条用例锁住命名约定：改成公开方法，页面里就多出一个能乱改窗口的入口。
+    """
+    chrome = desktop.WindowChrome()
+    public = [name for name in dir(chrome) if not name.startswith("_")]
+    assert sorted(public) == ["close", "minimize", "toggle_maximize"]
+
+
+def test_open_window_asks_for_a_frameless_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无边框是产品要求，别在重构里悄悄丢回默认值。"""
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+    fake = types.ModuleType("webview")
+
+    def create_window(title: str, url: str, **kwargs: object) -> _FakeWindow:
+        seen["title"] = title
+        seen["url"] = url
+        seen.update(kwargs)
+        return _FakeWindow()
+
+    fake.create_window = create_window  # type: ignore[attr-defined]
+    fake.start = lambda: seen.setdefault("started", True)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    desktop.open_window("http://127.0.0.1:1/")
+
+    assert seen["frameless"] is True
+    # 整窗可拖会把「选中文字」变成「拖走窗口」
+    assert seen["easy_drag"] is False
+    assert isinstance(seen["js_api"], desktop.WindowChrome)
+    assert seen["started"] is True
+

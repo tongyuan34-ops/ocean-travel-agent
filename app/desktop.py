@@ -51,6 +51,8 @@ WINDOW_TITLE = "Ocean · 旅行规划"
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 860
 WINDOW_MIN = (960, 640)
+# 窗口底色跟页面主题同色，避免加载的那零点几秒闪一下白
+WINDOW_BG = "#16263f"
 
 HOST = "127.0.0.1"
 HEALTH_PATH = "/api/v1/health"
@@ -318,6 +320,49 @@ def boot(preferred: int = 0) -> tuple[Any, int, str]:
     raise RuntimeError(f"本地服务起不来：{last_error}")
 
 
+class WindowChrome:
+    """无边框窗口的窗口按钮。
+
+    ``frameless=True`` 之后系统标题栏就没了，最小化 / 最大化 / 关闭只能由
+    前端调用——不接这几个方法，用户会得到一个既不能拖也不能关的窗口，
+    只能去任务管理器结束进程。
+
+    窗口对象要 ``create_window`` 之后才拿得到，所以用 ``_attach`` 补挂。
+    下划线开头是有意的：pywebview 只把公开方法暴露给 JS，这个不该出现在
+    ``window.pywebview.api`` 里。
+    """
+
+    def __init__(self) -> None:
+        self._window: Any = None
+        self._maximized = False
+
+    def _attach(self, window: Any) -> None:
+        self._window = window
+
+    def minimize(self) -> None:
+        if self._window is not None:
+            self._window.minimize()
+
+    def toggle_maximize(self) -> bool:
+        """切换最大化，返回**切换后**的状态，前端据此换图标。
+
+        不用读 ``window.state``：那个值在 Windows 上是异步回填的，
+        连点两下会拿到过期结果，图标就跟窗口对不上。
+        """
+        if self._window is None:
+            return False
+        if self._maximized:
+            self._window.restore()
+        else:
+            self._window.maximize()
+        self._maximized = not self._maximized
+        return self._maximized
+
+    def close(self) -> None:
+        if self._window is not None:
+            self._window.destroy()
+
+
 def open_window(url: str) -> None:
     """开原生窗口，阻塞到窗口关闭。
 
@@ -332,13 +377,23 @@ def open_window(url: str) -> None:
         wait_for_interrupt()
         return
 
-    webview.create_window(
+    chrome = WindowChrome()
+    window = webview.create_window(
         WINDOW_TITLE,
         url,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         min_size=WINDOW_MIN,
+        # 无边框：去掉系统标题栏，窗口按钮由页面里的顶栏提供
+        frameless=True,
+        # 整窗可拖会让「选中一段文字」变成「拖走窗口」，只在顶栏拖
+        easy_drag=False,
+        # 无边框窗口本身没有边框阴影，靠 DWM 补一层，否则贴在桌面上像张图
+        shadow=True,
+        background_color=WINDOW_BG,
+        js_api=chrome,
     )
+    chrome._attach(window)
     webview.start()
 
 

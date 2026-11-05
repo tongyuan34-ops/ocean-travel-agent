@@ -113,4 +113,3 @@ def reset() -> None:
     for handler in list(root.handlers):
         handler.close()
     root.handlers.clear()
-

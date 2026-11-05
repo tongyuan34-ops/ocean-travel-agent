@@ -452,4 +452,3 @@ def test_open_window_reports_boot_failure_inside_the_window(
     assert "启动失败" in holder[0].loaded_html
     assert "端口被占" in holder[0].loaded_html
     assert "app.log" in holder[0].loaded_html
-

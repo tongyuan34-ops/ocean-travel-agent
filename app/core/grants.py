@@ -102,9 +102,7 @@ def load() -> list[Path]:
 def _write(roots: list[Path]) -> None:
     target = _writable()
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"roots": [str(root) for root in roots]}, ensure_ascii=False, indent=2
-    )
+    payload = json.dumps({"roots": [str(root) for root in roots]}, ensure_ascii=False, indent=2)
     temp = target.with_suffix(target.suffix + ".tmp")
     temp.write_text(payload + "\n", encoding="utf-8", newline="\n")
     os.replace(temp, target)

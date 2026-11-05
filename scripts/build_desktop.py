@@ -257,9 +257,7 @@ def smoke() -> None:
         # 首页：窗口里显示的就是它。这一条要是缺了，前面全绿也没意义
         status, body = _fetch(f"http://127.0.0.1:{port}/")
         if status != 200 or "<!doctype html" not in body[:200].lower():
-            raise SystemExit(
-                f"首页返回 {status}，前端没打进包（datas 的第二列必须是**目录**）"
-            )
+            raise SystemExit(f"首页返回 {status}，前端没打进包（datas 的第二列必须是**目录**）")
         print(f"首页正常：{len(body)} 字节 HTML")
 
         # 知识库语料：静态文件错位时它同样会变成一堆空目录，检索会静默失效

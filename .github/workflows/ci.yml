@@ -46,7 +46,15 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
       - name: mypy
-        run: uv run --frozen mypy app evals
+        # 把 mypy 的报错转成 GitHub 注解：日志要鉴权才能下载，而 Checks 页面上的
+        # 注解是公开可读的——排查「本地过、CI 挂」时不用再靠猜
+        run: |
+          set +e
+          uv run --frozen mypy app evals --show-error-codes > mypy.out 2>&1
+          code=$?
+          cat mypy.out
+          sed -n 's/^\([^:]*\):\([0-9]*\): error: \(.*\)$/::error file=\1,line=\2::\3/p' mypy.out | head -50
+          exit $code
 
   eval-harness:
     name: Eval harness (offline)
@@ -87,7 +95,10 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --frozen
-
+      - name: Install CJK font
+        # 导出 PDF 要中文字体，runner 上默认没有；缺了它这两个用例会跳过，
+        # 而 PDF 导出恰恰是最容易「Windows 过、Linux 挂」的地方，跳过等于没测
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
       - name: Run tests
         run: uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml
 
@@ -123,7 +134,12 @@ jobs:
             -e STORAGE_BACKEND=memory \
             -p 8000:8000 ocean-travel-agent:ci
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8000/api/v1/health; then
+            if body=$(curl -fsS http://localhost:8000/api/v1/health); then
+              echo "$body"
+              # 健康检查 200 只能说明进程活着。镜像漏 COPY knowledge/ 时
+              # 检索会静默返回「知识库为空」，接口本身一切正常
+              echo "$body" | grep -q '"knowledge_chunks":[[:space:]]*[1-9]' \
+                || { echo "知识库为空：镜像里没带 knowledge/ 或路径解析错了"; docker logs api; exit 1; }
               echo "healthy"; exit 0
             fi
             sleep 2

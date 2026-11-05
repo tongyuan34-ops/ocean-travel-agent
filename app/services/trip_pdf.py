@@ -29,7 +29,24 @@ from reportlab.platypus import (
 from app.schemas.trips import TripPlan
 
 FONT_NAME = "CJK"
-DEFAULT_FONT = "C:/Windows/Fonts/simhei.ttf"
+
+# 中文字体按平台找：桌面版在 Windows 上跑，CI 和 Docker 在 Linux 上跑，
+# 写死 C:/Windows/Fonts 的后果是「Windows 上一切正常，Linux 上导出 PDF 直接抛异常」——
+# 测试也会跟着红，而且报错信息（找不到字体）跟真正的病因（写死了路径）看起来没关系。
+FONT_CANDIDATES = (
+    # Linux：Noto CJK 是各发行版最通用的一套，Docker 里 apt 装 fonts-noto-cjk 即可
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    # Windows
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+)
 
 _MODE_TEXT = {"driving": "驾车", "walking": "步行", "bicycling": "骑行"}
 
@@ -61,12 +78,30 @@ NOTE = ParagraphStyle(
 )
 
 
+def find_font() -> Path | None:
+    """按 PDF_FONT_PATH → 各平台常见路径的顺序找一个可用的中文字体。"""
+    explicit = os.getenv("PDF_FONT_PATH")
+    if explicit:
+        wanted = Path(explicit)
+        # 显式指定的路径不给兜底：用户写了却找不到，多半是拼错了，静默换字体会更难查
+        return wanted if wanted.is_file() else None
+    for candidate in FONT_CANDIDATES:
+        found = Path(candidate)
+        if found.is_file():
+            return found
+    return None
+
+
 def _register_font() -> str:
-    path = os.getenv("PDF_FONT_PATH") or DEFAULT_FONT
-    if not Path(path).is_file():
-        raise RuntimeError(f"找不到中文字体：{path}。请设置 PDF_FONT_PATH 指向一个 .ttf 字体")
+    path = find_font()
+    if path is None:
+        tried = "、".join(FONT_CANDIDATES)
+        raise RuntimeError(
+            f"找不到中文字体。请设置 PDF_FONT_PATH 指向一个中文字体文件，"
+            f"或安装其中任意一套：{tried}"
+        )
     if FONT_NAME not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(FONT_NAME, path))
+        pdfmetrics.registerFont(TTFont(FONT_NAME, str(path)))
     return FONT_NAME
 
 

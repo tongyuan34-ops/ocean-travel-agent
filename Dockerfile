@@ -21,7 +21,16 @@ RUN uv sync --frozen --no-install-project --no-dev
 # 再装项目本身
 COPY app ./app
 COPY web ./web
+# 知识库语料随仓库分发，检索靠它。漏掉这一行不会报错，只会让
+# search_knowledge 永远返回「知识库为空」——打包版踩过一次，这里别再踩
+COPY knowledge ./knowledge
 RUN uv sync --frozen --no-dev
+
+# 中文字体：导出 PDF 行程单要用。slim 镜像里一个中文字体都没有，
+# 缺了它 /trips/export 会直接抛「找不到中文字体」，而接口其余部分全正常
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 
 # 运行期需要可写的目录：媒体产物与会话落盘
 RUN useradd --create-home --uid 10001 ocean \

@@ -14,7 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.tools.delivery import export_trip_pdf, render_trip_map
-from app.services import trip_export
+from app.services import trip_export, trip_pdf
+
+# PDF 里的中文要靠系统字体渲染。CI 装了 fonts-noto-cjk 所以会真渲染；
+# 裸 Linux 开发机上没有字体时跳过，而不是报一个「跟病因无关」的失败。
+_HAS_CJK_FONT = trip_pdf.find_font() is not None
+_NEEDS_FONT = pytest.mark.skipif(not _HAS_CJK_FONT, reason="运行环境没有中文字体")
 
 TRIP_ARGS = {
     "title": "三亚 3 天亲子",
@@ -39,6 +44,7 @@ def no_maps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(trip_export, "maps_for_plan", fake)
 
 
+@_NEEDS_FONT
 def test_export_trip_pdf_renders_a_real_file(
     monkeypatch: pytest.MonkeyPatch, no_maps: None, tmp_path
 ) -> None:
@@ -56,11 +62,39 @@ def test_export_trip_pdf_renders_a_real_file(
     assert "3 天" in out and "5 个地点" in out
 
 
+def test_font_lookup_respects_explicit_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """显式指定的字体找不到时返回 None，**不静默换成别的字体**。
+
+    写错路径却悄悄换一套字体渲染，用户拿到的是字形不对的 PDF，
+    而且没有任何地方提示过他配错了。
+    """
+    fake = tmp_path / "not-there.ttf"
+    monkeypatch.setenv("PDF_FONT_PATH", str(fake))
+    assert trip_pdf.find_font() is None
+
+    real = tmp_path / "real.ttf"
+    real.write_bytes(b"\x00")
+    monkeypatch.setenv("PDF_FONT_PATH", str(real))
+    assert trip_pdf.find_font() == real
+
+
+def test_font_candidates_cover_linux_and_windows() -> None:
+    """候选路径必须同时包含 Linux 和 Windows 的常见位置。
+
+    只写 C:/Windows/Fonts 的版本在 CI（Linux）上必然找不到字体，
+    导出 PDF 直接抛异常——这条用例就是防它退回去。
+    """
+    joined = " ".join(trip_pdf.FONT_CANDIDATES)
+    assert "/usr/share/fonts" in joined
+    assert "C:/Windows/Fonts" in joined
+
+
 def test_export_trip_pdf_rejects_empty_plan() -> None:
     out = asyncio.run(export_trip_pdf.ainvoke({"days": [{"stops": []}]}))
     assert out.startswith("INVALID_REQUEST")
 
 
+@_NEEDS_FONT
 def test_export_trip_pdf_reuses_the_same_file(
     monkeypatch: pytest.MonkeyPatch, no_maps: None, tmp_path
 ) -> None:

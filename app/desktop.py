@@ -167,6 +167,7 @@ def render_error(message: str) -> str:
         "__LOG__", escape(str(PROJECT_ROOT / "logs" / "app.log"))
     )
 
+
 HOST = "127.0.0.1"
 HEALTH_PATH = "/api/v1/health"
 
@@ -345,8 +346,7 @@ def bootstrap_config() -> Path | None:
     target = secrets.config_files()[0]
     template = dict.fromkeys(KEY_NAMES, "")
     template["_说明"] = (
-        "内置额度用完后，把 MODEL_API_KEY 换成你自己的 key 再重启即可。"
-        "这里填的值优先于内置 key。"
+        "内置额度用完后，把 MODEL_API_KEY 换成你自己的 key 再重启即可。这里填的值优先于内置 key。"
     )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -597,7 +597,6 @@ def open_window(boot_server: Callable[[], tuple[Any, int, str]]) -> None:
     server = state["server"]
     if server is not None:
         server.should_exit = True
-
 
 
 def wait_for_interrupt() -> None:

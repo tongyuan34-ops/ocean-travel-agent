@@ -157,9 +157,7 @@ async def _answer(broker, channel, seen, *, granted: bool, remember: bool = Fals
         while len(seen) > handled:
             request = seen[handled]
             handled += 1
-            await channel.decide(
-                request.request_id, Decision(granted=granted, remember=remember)
-            )
+            await channel.decide(request.request_id, Decision(granted=granted, remember=remember))
         await asyncio.sleep(TIMEOUT_POLL)
 
 

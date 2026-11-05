@@ -67,9 +67,7 @@ def wait_window(timeout: float) -> tuple[float, int] | None:
 
 def health_ok(port: int) -> bool:
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/api/v1/health", timeout=1
-        ) as resp:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/health", timeout=1) as resp:
             return resp.status == 200
     except OSError:
         return False

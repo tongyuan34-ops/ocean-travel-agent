@@ -174,7 +174,6 @@ async def _confirm_with_grant(
         grants.add(root)
 
 
-
 # ---------- 读操作（无需确认） ----------
 
 

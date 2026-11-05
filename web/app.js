@@ -21,7 +21,8 @@
    * 手机上传的大图会让首屏多等几百毫秒。 */
   var WALLPAPERS = [
     { key: 'sea', label: '海上日落', url: './assets/wallpaper-sea.jpg' },
-    { key: 'bay', label: '晨雾海湾', url: './assets/wallpaper-bay.jpg' },
+    { key: 'canyon', label: '雪峰峡谷', url: './assets/wallpaper-canyon.jpg' },
+    { key: 'london', label: '雨窗伦敦', url: './assets/wallpaper-london.jpg' },
     { key: 'night', label: '星空海面', url: './assets/wallpaper-night.jpg' },
     { key: 'fuji', label: '富士暮色', url: './assets/wallpaper-fuji.jpg' },
     { key: 'peak', label: '雪峰倒影', url: './assets/wallpaper-peak.jpg' }
@@ -2832,6 +2833,13 @@
       var key = value.slice(7);
       for (var i = 0; i < WALLPAPERS.length; i++) {
         if (WALLPAPERS[i].key === key) { url = WALLPAPERS[i].url; break; }
+      }
+      /* 预设被下架（比如这次去掉「晨雾海湾」）时，localStorage 里还留着旧 key。
+         不兜底的话这里直接 return，图片停在 HTML 里那张上，设置面板里也没有
+         任何一项是高亮的——看起来像坏了。退回第一张并把存的值改掉。 */
+      if (!url && WALLPAPERS.length) {
+        url = WALLPAPERS[0].url;
+        lsSet(STORE.wallpaper, 'preset:' + WALLPAPERS[0].key);
       }
     } else {
       url = value;

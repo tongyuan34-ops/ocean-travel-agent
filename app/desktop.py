@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,118 @@ WINDOW_HEIGHT = 860
 WINDOW_MIN = (960, 640)
 # 窗口底色跟页面主题同色，避免加载的那零点几秒闪一下白
 WINDOW_BG = "#16263f"
+
+# 启动画面。内联在这，不能引用 web/ 里的资源——那时候服务还没起来，
+# 任何外部请求都会失败，用户看到的会是「破图 + 转圈」。
+SPLASH_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Ocean</title>
+<style>
+  html,body{height:100%;margin:0;overflow:hidden}
+  body{
+    background:radial-gradient(120% 100% at 50% 0%,#1d3355 0%,#16263f 55%,#0f1b2e 100%);
+    color:#e8f0fb;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    -webkit-user-select:none;user-select:none;
+  }
+  .box{text-align:center;transform:translateY(-10px)}
+  .wave{width:92px;height:40px;margin:0 auto 18px;opacity:.9}
+  .wave path{fill:none;stroke:#8fb6e6;stroke-width:2;stroke-linecap:round;
+    stroke-dasharray:120;stroke-dashoffset:120;animation:draw 1.6s ease forwards}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  .name{font-size:15px;letter-spacing:.42em;color:#cfe0f5;margin:0 0 8px;font-weight:600}
+  .sub{font-size:12.5px;color:rgba(207,224,245,.62);margin:0 0 26px}
+  .bar{width:168px;height:2px;margin:0 auto;background:rgba(255,255,255,.12);
+    border-radius:2px;overflow:hidden}
+  .bar i{display:block;width:38%;height:100%;
+    background:linear-gradient(90deg,transparent,#8fb6e6,transparent);
+    animation:slide 1.25s ease-in-out infinite}
+  @keyframes slide{0%{transform:translateX(-110%)}100%{transform:translateX(370%)}}
+  .hint{font-size:11.5px;color:rgba(207,224,245,.42);margin:22px 0 0;min-height:16px}
+  .close{position:fixed;top:12px;right:14px;width:30px;height:30px;border:0;
+    border-radius:8px;background:transparent;color:rgba(232,240,251,.5);
+    font-size:14px;line-height:1;cursor:default;font-family:inherit}
+  .close:hover{background:rgba(255,255,255,.1);color:#fff}
+</style></head>
+<body class="pywebview-drag-region">
+<button class="close" id="x" aria-label="关闭">✕</button>
+<div class="box">
+  <svg class="wave" viewBox="0 0 46 20" aria-hidden="true">
+    <path d="M2 13c4.6-7.6 9.6-7.6 14.2 0s9.6 7.6 14.2 0 9.6-7.6 13.4-1.4"/>
+  </svg>
+  <p class="name">OCEAN</p>
+  <p class="sub">正在启动</p>
+  <div class="bar"><i></i></div>
+  <p class="hint" id="hint"></p>
+</div>
+<script>
+  var btn = document.getElementById('x');
+  // 整个 body 都是拖动区，按钮要自己截住 mousedown，否则点关闭变成拖窗口
+  btn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  btn.addEventListener('click', function () {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.close();
+  });
+  // 分两段给反馈：六秒说明「不是卡死」，二十秒说明「还没完，别急着重开」。
+  // 只有一段的话，超过那个时长之后界面又变成静止的，用户照样会怀疑。
+  [[6000, '第一次启动会慢一些，通常 10~20 秒'],
+   [22000, '还在启动…杀毒软件可能正在扫描文件，请再等等']].forEach(function (step) {
+    setTimeout(function () {
+      document.getElementById('hint').textContent = step[1];
+    }, step[0]);
+  });
+</script>
+</body></html>"""
+
+_ERROR_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Ocean</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{background:#16263f;color:#e8f0fb;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex;align-items:center;justify-content:center;padding:40px;box-sizing:border-box}
+  .box{max-width:560px}
+  h1{font-size:17px;margin:0 0 14px;font-weight:600}
+  p{font-size:13px;line-height:1.75;color:rgba(232,240,251,.72);margin:0 0 12px}
+  code{display:block;margin:16px 0;padding:12px 14px;border-radius:10px;
+    background:rgba(0,0,0,.28);color:#ffd9d9;font-size:12px;
+    word-break:break-all;white-space:pre-wrap}
+  .path{color:#9dc0ea;font-size:12px}
+  /* 无边框窗口没有系统 ✕，页面必须自己提供一个，否则只能去任务管理器结束进程 */
+  .close{position:fixed;top:12px;right:14px;width:30px;height:30px;border:0;
+    border-radius:8px;background:transparent;color:rgba(232,240,251,.5);
+    font-size:14px;line-height:1;cursor:default;font-family:inherit}
+  .close:hover{background:rgba(255,255,255,.1);color:#fff}
+</style></head>
+<body class="pywebview-drag-region">
+<button class="close" id="x" aria-label="关闭">✕</button>
+<div class="box">
+  <h1>启动失败</h1>
+  <p>本地服务没能起来，把下面这段发给开发者就能定位：</p>
+  <code>__MESSAGE__</code>
+  <p class="path">完整日志：__LOG__</p>
+  <p>点右上角 ✕ 关掉窗口，重新打开再试一次；如果一直失败，检查日志里最后几行。</p>
+</div>
+<script>
+  var btn = document.getElementById('x');
+  btn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  btn.addEventListener('click', function () {
+    if (window.pywebview && window.pywebview.api) window.pywebview.api.close();
+  });
+</script>
+</body></html>"""
+
+
+def render_error(message: str) -> str:
+    """把启动失败画在窗口里。
+
+    窗口模式没有控制台，``alert`` 也只能给一句话；用户截个图就能把错误
+    和日志路径一起发出来，比让他去翻日志现实。
+    """
+    from html import escape
+
+    # 不能用 %-格式化：模板里的 CSS 全是 100%、55% 这种，会撞上格式符。
+    # str.format 也不行——CSS 的 {} 同样会被当占位符。老老实实替换。
+    return _ERROR_HTML.replace("__MESSAGE__", escape(message)).replace(
+        "__LOG__", escape(str(PROJECT_ROOT / "logs" / "app.log"))
+    )
 
 HOST = "127.0.0.1"
 HEALTH_PATH = "/api/v1/health"
@@ -91,14 +204,18 @@ def wait_until_ready(url: str, timeout: float = READY_TIMEOUT) -> bool:
     慢的时候（机械盘 + 杀软扫描）固定等又不够。
     """
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if httpx.get(url, timeout=1.5).status_code == 200:
-                return True
-        except httpx.HTTPError:
-            # 端口还没监听，连接被拒是正常过程，不是错误
-            pass
-        time.sleep(0.15)
+    # trust_env=False：本机探活绝不能走系统代理。装过代理软件（Clash、公司网关）
+    # 的机器上，httpx 默认会把 127.0.0.1 也送进代理，拿回 502 然后一直重试到
+    # 超时——表现就是「点了没反应，很久才出窗口」，而服务其实早就起来了。
+    with httpx.Client(trust_env=False, timeout=1.5) as client:
+        while time.monotonic() < deadline:
+            try:
+                if client.get(url).status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                # 端口还没监听，连接被拒是正常过程，不是错误
+                pass
+            time.sleep(0.15)
     return False
 
 
@@ -363,24 +480,40 @@ class WindowChrome:
             self._window.destroy()
 
 
-def open_window(url: str) -> None:
-    """开原生窗口，阻塞到窗口关闭。
+def open_window(boot_server: Callable[[], tuple[Any, int, str]]) -> None:
+    """先开窗口摆出启动画面，服务起来之后再换成真正的页面。
 
-    没装 pywebview 时退回系统浏览器——少一个依赖就整个程序打不开，
-    是比「界面丑一点」严重得多的问题。
+    **为什么不等服务就绪再开窗口**
+
+    冻结形态下 ``import uvicorn`` + ``app.main`` 要拖进 fastapi、langchain
+    一大串东西，实测 15~20 秒。这段时间里用户双击完看到的是「什么都没发生」，
+    很容易以为没点开，然后再点一次——第二次会撞上单实例锁，弹一句「已经在运行了」，
+    体验上等于「这软件打不开」。
+
+    改成窗口先出来、启动画面先转，等待就从「怀疑没点上」变成「看得见在启动」。
+    服务就绪后 ``load_url`` 把页面换进来，中间那一跳用户基本察觉不到。
     """
     try:
         import webview
     except ImportError:
-        logger.warning("没装 pywebview，改用系统浏览器打开 %s", url)
+        # 少一个依赖就整个程序打不开，比「界面丑一点」严重得多，退回浏览器
+        logger.warning("没装 pywebview，改用系统浏览器打开")
+        server, port, url = boot_server()
+        write_port_file(port)
         webbrowser.open(url)
-        wait_for_interrupt()
+        try:
+            wait_for_interrupt()
+        finally:
+            server.should_exit = True
         return
 
     chrome = WindowChrome()
+    # 服务对象要活到窗口关闭，所以放在可变容器里而不是闭包变量
+    state: dict[str, Any] = {"server": None}
+
     window = webview.create_window(
         WINDOW_TITLE,
-        url,
+        html=SPLASH_HTML,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         min_size=WINDOW_MIN,
@@ -394,7 +527,51 @@ def open_window(url: str) -> None:
         js_api=chrome,
     )
     chrome._attach(window)
-    webview.start()
+
+    # create_window 的类型是 Window | None；真失败会抛异常，这里只是让类型检查
+    # 和「万一返回 None」都有明确行为，别在后面 load_url 时才炸
+    if window is None:
+        raise RuntimeError("窗口创建失败")
+
+    # 起服务和初始化 WebView2 是两件互不相干的事，让它们并行。
+    # 串行的话，窗口那 2 秒多的初始化就白等了——先点着火再装引擎。
+    boot_result: dict[str, Any] = {}
+    boot_done = threading.Event()
+
+    def run_boot() -> None:
+        try:
+            boot_result["value"] = boot_server()
+        except Exception as exc:  # noqa: BLE001 - 交给 worker 统一处理，这里只负责记录
+            boot_result["error"] = exc
+        finally:
+            boot_done.set()
+
+    threading.Thread(target=run_boot, name="boot", daemon=True).start()
+
+    def worker() -> None:
+        """等后台的 boot 完成，然后把启动画面换成真页面。
+
+        重活（import 一大堆库、建索引、绑端口）都在 ``run_boot`` 那个线程里，
+        这里只负责等待和换页，不能阻塞 GUI。
+        """
+        boot_done.wait()
+        if "error" in boot_result:
+            exc = boot_result["error"]
+            logger.error("启动失败", exc_info=exc)
+            window.load_html(render_error(str(exc)))
+            return
+        server, port, url = boot_result["value"]
+        state["server"] = server
+        write_port_file(port)
+        logger.info("本地服务已就绪：%s（版本 %s）", url, __version__)
+        window.load_url(url)
+
+    webview.start(worker)
+
+    server = state["server"]
+    if server is not None:
+        server.should_exit = True
+
 
 
 def wait_for_interrupt() -> None:
@@ -417,6 +594,50 @@ def alert(message: str) -> None:
         print(message, file=sys.stderr)
 
 
+def focus_existing_window() -> bool:
+    """把已经开着的那个窗口提到前台，成功返回 True。
+
+    **为什么要这个**
+
+    「点了没反应」的下一个动作永远是「再点一次」。如果第二次只弹一句
+    「程序已经在运行了」，用户看到的是一个错误提示，而不是他刚才那个
+    还在转圈的窗口——他会以为第一次真的失败了。
+
+    提到前台就不一样了：启动画面还在转，他立刻明白「哦，在启动」。
+
+    只有 Windows 能这么干；其它平台返回 False，走原来的提示。
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    handles: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        if buf.value == WINDOW_TITLE:
+            handles.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    if not handles:
+        return False
+    hwnd = handles[0]
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    # 前台锁：刚被用户点开的进程一般有权限，失败也不算错，任务栏会闪一下
+    return bool(user32.SetForegroundWindow(hwnd))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ocean-desktop", description="Ocean 旅行规划 · 桌面版")
     parser.add_argument("--no-window", action="store_true", help="只起服务不开窗口（调试用）")
@@ -428,6 +649,9 @@ def main(argv: list[str] | None = None) -> int:
 
     lock = InstanceLock()
     if not lock.acquire():
+        # 先试着把那个窗口提到前台——多半它正停在启动画面上转圈
+        if focus_existing_window():
+            return 0
         port = read_port_file()
         where = f"\n\n已经开着的那个在 {HOST}:{port}" if port else ""
         alert(f"程序已经在运行了，请到任务栏找一下那个窗口。{where}")
@@ -440,14 +664,16 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("已生成配置模板：%s", created)
         write_guide()
 
-        server, port, url = boot(args.port)
-        logger.info("本地服务已就绪：%s（版本 %s）", url, __version__)
-        write_port_file(port)
-
         if args.no_window:
+            # 调试用：只起服务，不开窗口，Ctrl+C 退出
+            server, port, url = boot(args.port)
+            logger.info("本地服务已就绪：%s（版本 %s）", url, __version__)
+            write_port_file(port)
             wait_for_interrupt()
         else:
-            open_window(url)
+            # 窗口先出来，服务在窗口内部的后台线程里起。这里**不能**先 boot()：
+            # 那等于把 15~20 秒的 import 挡在窗口前面，用户双击完看不到任何反应。
+            open_window(lambda: boot(args.port))
         return 0
     except Exception as exc:  # noqa: BLE001 - 桌面入口必须自己兜住，否则窗口都不弹
         # 窗口模式没有控制台，光说「启动失败」用户没法反馈。把日志路径带上，

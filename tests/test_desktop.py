@@ -184,6 +184,8 @@ def test_second_launch_does_not_start_a_server(monkeypatch: pytest.MonkeyPatch) 
             calls.append("release")
 
     monkeypatch.setattr(desktop, "InstanceLock", Busy)
+    # 假装找不到那个窗口，走到「弹提示」这条兜底路径
+    monkeypatch.setattr(desktop, "focus_existing_window", lambda: False)
     monkeypatch.setattr(desktop, "alert", lambda message: calls.append(message))
     monkeypatch.setattr(desktop, "boot", lambda: pytest.fail("不该起服务"))
     monkeypatch.setattr(desktop.multiprocessing, "freeze_support", lambda: None)
@@ -192,37 +194,72 @@ def test_second_launch_does_not_start_a_server(monkeypatch: pytest.MonkeyPatch) 
     assert any("已经在运行" in item for item in calls)
 
 
-def test_main_shuts_down_server_when_window_closes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """窗口关掉之后要让 uvicorn 走一遍 lifespan 关闭。
+def test_second_launch_focuses_existing_window_instead_of_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """能找到旧窗口就把它提到前台，不弹「已经在运行了」。
 
-    会话落盘、MCP 子进程收尾都在 lifespan 里。daemon 线程直接随进程死掉的话，
-    最后几条会话会丢——而且是「用户以为存了」的那种丢。
+    弹提示等于告诉用户「你刚才那下没成功」；而实际上那个窗口就开着，
+    可能正停在启动画面上转圈。用户再点一次图的是「让它出来」，不是听解释。
     """
-    stopped: list[bool] = []
+    calls: list[str] = []
+
+    class Busy:
+        def acquire(self) -> bool:
+            return False
+
+        def release(self) -> None:
+            calls.append("release")
+
+    monkeypatch.setattr(desktop, "InstanceLock", Busy)
+    monkeypatch.setattr(desktop, "focus_existing_window", lambda: True)
+    monkeypatch.setattr(desktop, "alert", lambda message: calls.append(message))
+    monkeypatch.setattr(desktop, "boot", lambda: pytest.fail("不该起服务"))
+    monkeypatch.setattr(desktop.multiprocessing, "freeze_support", lambda: None)
+
+    assert desktop.main([]) == 0
+    assert calls == []
+
+
+def test_main_hands_boot_to_window_instead_of_booting_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗口模式**不能**在开窗口之前 ``boot()``。
+
+    先 boot 等于把十几秒的 import 挡在窗口前面——用户双击完看不到任何反应，
+    很容易以为没点开，再点一次就撞上单实例锁，弹一句「已经在运行了」。
+    这条用例锁住「main 只把启动函数交给窗口，自己不抢先起服务」。
+    """
+    booted: list[str] = []
 
     class Server:
         should_exit = False
-
-    server = Server()
 
     class Free:
         def acquire(self) -> bool:
             return True
 
         def release(self) -> None:
-            stopped.append(True)
+            return None
+
+    def fake_boot(preferred: int = 0) -> tuple[Server, int, str]:
+        booted.append("boot")
+        return Server(), 12345, "http://127.0.0.1:12345"
+
+    handed: list[object] = []
 
     monkeypatch.setattr(desktop, "InstanceLock", Free)
     monkeypatch.setattr(desktop, "bootstrap_config", lambda: None)
     monkeypatch.setattr(desktop, "write_guide", lambda: None)
     monkeypatch.setattr(desktop, "write_port_file", lambda port: None)
-    monkeypatch.setattr(desktop, "boot", lambda preferred=0: (server, 12345, "http://127.0.0.1:12345"))
-    monkeypatch.setattr(desktop, "open_window", lambda url: None)
+    monkeypatch.setattr(desktop, "boot", fake_boot)
+    monkeypatch.setattr(desktop, "open_window", lambda boot_server: handed.append(boot_server))
     monkeypatch.setattr(desktop.multiprocessing, "freeze_support", lambda: None)
 
     assert desktop.main([]) == 0
-    assert server.should_exit is True
-    assert stopped == [True]
+    assert handed and callable(handed[0])
+    # 关键断言：main 自己一次都没起服务
+    assert booted == []
 
 
 def test_boot_honours_requested_port(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,6 +288,8 @@ class _FakeWindow:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.loaded_url = ""
+        self.loaded_html = ""
 
     def minimize(self) -> None:
         self.calls.append("minimize")
@@ -263,6 +302,14 @@ class _FakeWindow:
 
     def destroy(self) -> None:
         self.calls.append("destroy")
+
+    def load_url(self, url: str) -> None:
+        self.calls.append("load_url")
+        self.loaded_url = url
+
+    def load_html(self, html: str) -> None:
+        self.calls.append("load_html")
+        self.loaded_html = html
 
 
 def test_window_chrome_toggles_between_maximize_and_restore() -> None:
@@ -298,29 +345,103 @@ def test_window_chrome_hides_attach_from_javascript() -> None:
     assert sorted(public) == ["close", "minimize", "toggle_maximize"]
 
 
-def test_open_window_asks_for_a_frameless_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """无边框是产品要求，别在重构里悄悄丢回默认值。"""
+def test_open_window_shows_splash_then_loads_page_and_shuts_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗口先出来、服务后起、关窗后让 uvicorn 走 lifespan。
+
+    三件事一条用例锁住：
+    1. 创建窗口时给的是**内联启动画面**，不是页面 URL（页面那时还不存在）
+    2. 服务就绪后调 ``load_url`` 换成真页面
+    3. ``webview.start`` 返回（窗口关掉）之后置 ``should_exit``——会话落盘、
+       MCP 子进程收尾都在 lifespan 里，daemon 线程直接死掉会丢最后几条会话
+    """
     import sys
     import types
 
     seen: dict[str, object] = {}
     fake = types.ModuleType("webview")
 
-    def create_window(title: str, url: str, **kwargs: object) -> _FakeWindow:
+    class Server:
+        should_exit = False
+
+    server = Server()
+
+    def create_window(title: str, **kwargs: object) -> _FakeWindow:
         seen["title"] = title
-        seen["url"] = url
         seen.update(kwargs)
         return _FakeWindow()
 
+    def start(worker=None):
+        seen["started"] = True
+        assert callable(worker)
+        worker()  # 真的跑一遍后台任务
+
     fake.create_window = create_window  # type: ignore[attr-defined]
-    fake.start = lambda: seen.setdefault("started", True)  # type: ignore[attr-defined]
+    fake.start = start  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(desktop, "write_port_file", lambda port: None)
 
-    desktop.open_window("http://127.0.0.1:1/")
+    def fake_boot() -> tuple[Server, int, str]:
+        return server, 12345, "http://127.0.0.1:12345"
 
+    desktop.open_window(fake_boot)
+
+    assert seen["started"] is True
     assert seen["frameless"] is True
     # 整窗可拖会把「选中文字」变成「拖走窗口」
     assert seen["easy_drag"] is False
     assert isinstance(seen["js_api"], desktop.WindowChrome)
-    assert seen["started"] is True
+    # 初始内容是启动画面，不是页面
+    assert "html" in seen
+    assert "正在启动" in str(seen["html"])
+    assert "url" not in seen
+    # 服务起来之后换页，关窗之后让 uvicorn 收尾
+    assert server.should_exit is True
+
+
+def test_open_window_reports_boot_failure_inside_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """服务起不来时不能只是窗口卡在启动画面。
+
+    窗口模式没有控制台，用户唯一能反馈的就是截图——所以错误要画在窗口里，
+    并且带上日志路径。
+    """
+    import sys
+    import types
+
+    fake = types.ModuleType("webview")
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.loaded_html = ""
+            self.loaded_url = ""
+
+        def load_url(self, url: str) -> None:
+            self.loaded_url = url
+
+        def load_html(self, html: str) -> None:
+            self.loaded_html = html
+
+    holder: list[FakeWindow] = []
+
+    def create_window(title: str, **kwargs: object) -> FakeWindow:
+        window = FakeWindow()
+        holder.append(window)
+        return window
+
+    fake.create_window = create_window  # type: ignore[attr-defined]
+    fake.start = lambda worker=None: worker()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    def boom() -> tuple[object, int, str]:
+        raise RuntimeError("端口被占")
+
+    desktop.open_window(boom)
+
+    assert holder[0].loaded_url == ""
+    assert "启动失败" in holder[0].loaded_html
+    assert "端口被占" in holder[0].loaded_html
+    assert "app.log" in holder[0].loaded_html
 

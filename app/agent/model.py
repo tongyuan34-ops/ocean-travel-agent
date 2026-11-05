@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import StructuredTool
-from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from app.core.config import Settings
+
+if TYPE_CHECKING:
+    # 只给类型检查用。真正的导入放在 build_chat_model 里——见那里的说明。
+    from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +65,15 @@ def _needs_thinking_disabled(host: str) -> bool:
 
 
 def build_chat_model(settings: Settings) -> ChatOpenAI:
-    """按配置构造聊天模型。"""
+    """按配置构造聊天模型。
+
+    ``langchain_openai`` 在这里才导入，不在模块顶层——它连带拖进整个 openai
+    SDK（光 ``openai.types`` 就有两千多个模型），实测占 9.7 秒，是整个启动
+    里最贵的一笔。而它只在真正要发第一次对话时才需要；放在顶层，用户双击后
+    就得先等它十秒，页面才出得来。代价是首轮对话多花一两秒，值得。
+    """
+    from langchain_openai import ChatOpenAI
+
     if not settings.model_name or not settings.model_base_url:
         raise ValueError("MODEL_NAME / MODEL_BASE_URL 未配置，请在 .env 中填写")
 

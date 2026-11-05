@@ -99,12 +99,38 @@ def _city_matches(hint: str, resolved: str) -> bool:
     return left in right or right in left
 
 
+# 地名解析结果按 (地址, 城市) 缓存。出一次 PDF 要把同一批地点解析两遍
+# （总览图一遍、每日图又一遍），每次都打一次高德；9 个点的行程光这一项
+# 就要多花七八秒。地名不会天天变，进程内缓存足够。
+_GEOCODE_CACHE: dict[tuple[str, str], tuple[str, str] | None] = {}
+_GEOCODE_CACHE_MAX = 512
+
+
 async def _geocode(address: str, city: str | None = None) -> tuple[str, str] | None:
-    """把地名转成 "lng,lat"。
+    """把地名转成 "lng,lat"（带进程内缓存）。
 
     传入 city 可显著提高重名/模糊地名的解析准确度——
     否则「三亚市区」这类输入可能被匹配到全国任意同名地点。
+
+    **为什么缓存**：出一次 PDF 要把同一批地点解析两遍（总览图一遍、每日图
+    又一遍），9 个点的行程光这一项就多花七八秒。地名不会天天变。
+    只缓存**成功**的结果：失败可能是网络抖动，下次重试应该真的再打一次。
     """
+    key = (address, city or "")
+    cached = _GEOCODE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    resolved = await _geocode_uncached(address, city)
+    if resolved is not None:
+        if len(_GEOCODE_CACHE) >= _GEOCODE_CACHE_MAX:
+            # 行程用完就散，清空比维护 LRU 便宜
+            _GEOCODE_CACHE.clear()
+        _GEOCODE_CACHE[key] = resolved
+    return resolved
+
+
+async def _geocode_uncached(address: str, city: str | None = None) -> tuple[str, str] | None:
     params = {"key": _amap_key(), "address": address}
     if city:
         params["city"] = city

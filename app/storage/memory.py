@@ -35,5 +35,10 @@ class MemorySessionStore(SessionStore):
         async with self._lock:
             self._data.pop(session_id, None)
 
+    async def list(self) -> list[ChatSession]:
+        async with self._lock:
+            # 拷贝出去：调用方拿着列表遍历时，别的协程还在往里加会话
+            return [_copy(session) for session in self._data.values()]
+
     async def aclose(self) -> None:
         return None

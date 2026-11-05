@@ -372,8 +372,12 @@ def test_open_window_shows_splash_then_loads_page_and_shuts_down(
         seen.update(kwargs)
         return _FakeWindow()
 
-    def start(worker=None):
+    def start(worker=None, **kwargs: object):
         seen["started"] = True
+        # 关掉私有模式，localStorage 才会跨启动留存；这个参数丢了，
+        # 用户重开程序就看不到上次的会话和壁纸
+        seen["private_mode"] = kwargs.get("private_mode")
+        seen["storage_path"] = kwargs.get("storage_path")
         assert callable(worker)
         worker()  # 真的跑一遍后台任务
 
@@ -396,6 +400,10 @@ def test_open_window_shows_splash_then_loads_page_and_shuts_down(
     assert "html" in seen
     assert "正在启动" in str(seen["html"])
     assert "url" not in seen
+    # private_mode 默认 True 时 WebView2 用内存配置档，窗口一关 localStorage
+    # 就清空——会话列表、上次的会话、壁纸全部回到默认值
+    assert seen["private_mode"] is False
+    assert "webview" in str(seen["storage_path"])
     # 服务起来之后换页，关窗之后让 uvicorn 收尾
     assert server.should_exit is True
 
@@ -432,7 +440,7 @@ def test_open_window_reports_boot_failure_inside_the_window(
         return window
 
     fake.create_window = create_window  # type: ignore[attr-defined]
-    fake.start = lambda worker=None: worker()  # type: ignore[attr-defined]
+    fake.start = lambda worker=None, **kwargs: worker()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "webview", fake)
 
     def boom() -> tuple[object, int, str]:

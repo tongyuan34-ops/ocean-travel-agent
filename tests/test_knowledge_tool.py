@@ -46,6 +46,22 @@ async def test_empty_corpus_says_so_instead_of_inventing(tmp_path: Path, monkeyp
     assert output.startswith("KNOWLEDGE_EMPTY")
 
 
+async def test_relative_knowledge_dir_does_not_follow_cwd(tmp_path: Path, monkeypatch):
+    """默认配置 ``KNOWLEDGE_DIR=knowledge`` 是相对路径，不能跟着进程 CWD 走。
+
+    打包后双击 exe，CWD 是 exe 所在目录，而语料在 ``_internal/`` 里——解析
+    跟着 CWD 走的结果就是「语料明明打进了包，运行时一个片段都读不到」，
+    界面上显示「检索失败」，日志里只有一句目录不存在的 warning。
+    """
+    _point_at(monkeypatch, Path("knowledge"))
+    monkeypatch.chdir(tmp_path)
+
+    output = await search_knowledge.ainvoke({"query": "预算怎么分项"})
+
+    assert "KNOWLEDGE_EMPTY" not in output
+    assert "20-预算口径.md" in output
+
+
 async def test_hits_carry_citation_and_content(monkeypatch):
     _point_at(monkeypatch, KNOWLEDGE_DIR)
 

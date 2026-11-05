@@ -50,6 +50,29 @@ class RedisSessionStore(SessionStore):
     async def delete(self, session_id: str) -> None:
         await self._client.delete(self._key(session_id))
 
+    async def list(self) -> list[ChatSession]:
+        """扫前缀取全部会话。
+
+        ``KEYS`` 在大库上会阻塞 Redis，但会话 key 的数量级是「用户数 × 会话数」，
+        这里又是单用户桌面场景；真要上规模应该换 ``SCAN`` 并分页，届时接口形状
+        也要跟着变（现在是「一次拿全量」）。
+        """
+        keys = [key async for key in self._client.scan_iter(match=f"{self._prefix}*")]
+        if not keys:
+            return []
+        raw_items = await self._client.mget(keys)
+        sessions: list[ChatSession] = []
+        for raw in raw_items:
+            if raw is None:
+                continue
+            try:
+                data = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(data, dict):
+                sessions.append(ChatSession.from_dict(data))
+        return sessions
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

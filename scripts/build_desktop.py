@@ -267,7 +267,23 @@ def smoke() -> None:
         docs = [path for path in corpus.glob("*.md") if path.is_file()]
         if len(docs) < 3:
             raise SystemExit(f"知识库语料没打进包：{corpus} 下只有 {len(docs)} 篇")
-        print(f"知识库正常：{len(docs)} 篇语料")
+        print(f"知识库语料已入包：{len(docs)} 篇")
+
+        # 语料在包里 ≠ 运行时读得到。KNOWLEDGE_DIR 是相对路径，解析基准一旦
+        # 跟着进程 CWD 走（打包后是 exe 目录，语料却在 _internal/），检索就
+        # 静默返回 KNOWLEDGE_EMPTY——用户在界面上看到「检索失败」，而这里
+        # 只数文件的话全绿。所以必须问运行时的进程自己读到了多少片段。
+        status, body = _fetch(f"http://127.0.0.1:{port}/api/v1/health")
+        try:
+            chunks = int(json.loads(body).get("knowledge_chunks", 0))
+        except (ValueError, TypeError):
+            chunks = 0
+        if chunks <= 0:
+            raise SystemExit(
+                f"健康检查说知识库有 {chunks} 个片段：语料在包里但运行时读不到，"
+                f"多半是 KNOWLEDGE_DIR 的相对路径没按资源根解析"
+            )
+        print(f"知识库可检索：{chunks} 个片段")
     finally:
         proc.terminate()
         try:

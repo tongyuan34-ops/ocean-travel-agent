@@ -25,6 +25,9 @@ CODE_TO_HTTP: dict[str, int] = {
     "SESSION_NOT_FOUND": 404,
     "TASK_NOT_FOUND": 404,
     "UPLOAD_NOT_FOUND": 404,
+    # 通用 404：指代的对象不是会话/任务/上传这些有专门错误码的东西，
+    # 比如「按名字取生成好的文件」时文件已被清理
+    "NOT_FOUND": 404,
     "VALIDATION_ERROR": 422,
     "RATE_LIMITED": 429,
     "BUDGET_EXCEEDED": 429,

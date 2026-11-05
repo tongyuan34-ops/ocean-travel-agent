@@ -14,7 +14,9 @@ from app.adapters import available_platforms
 from app.adapters.mediacrawler import SOCIAL_PLATFORM_KEYS
 from app.core import secrets
 from app.core.config import KEY_NAMES, Settings
+from app.core.paths import resolve_resource
 from app.core.security import allowed_roots, is_windows
+from app.rag import get_knowledge_base
 from app.version import __version__
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -85,9 +87,14 @@ async def capabilities(request: Request) -> dict[str, Any]:
 @meta_router.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
+    # 语料片段数顺带报出来：打包版的语料在 _internal/ 里，路径解析错了会
+    # 静默变成空库（工具返回 KNOWLEDGE_EMPTY），只查「文件在不在包里」看不出来。
+    # 这里给一个运行时可验证的信号，冒烟测试据此断言。
+    chunks = get_knowledge_base(resolve_resource(settings.knowledge_dir)).size
     return {
         "status": "ok",
         "version": __version__,
         "model": settings.model_name,
         "provider": settings.model_provider,
+        "knowledge_chunks": chunks,
     }

@@ -186,12 +186,27 @@ GUIDE_NAME = "使用说明.txt"
 # ---------- 端口与健康检查 ----------
 
 
+# 优先用这个固定端口。**端口必须尽量稳定**：窗口里的页面是
+# ``http://127.0.0.1:<port>``，而 localStorage 按「源（含端口）」隔离——
+# 每次换端口，壁纸、上次的会话 id、接口地址这些设置就全部回到默认值。
+# 被别的程序占了就退回系统分配的临时端口（此时只是丢一次本地设置，
+# 会话本身存在后端，不受影响）。
+PREFERRED_PORT = 8756
+
+
 def pick_port() -> int:
-    """让系统分配一个当前空闲的回环端口。
+    """优先返回固定端口，被占用时让系统分配一个空闲的回环端口。
 
     ``bind`` 之后立刻 ``close``，所以拿到的端口只是「刚刚还空着」，
     不是预订。真正的占用发生在 uvicorn 绑定那一刻，失败由调用方重试。
     """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((HOST, PREFERRED_PORT))
+            return PREFERRED_PORT
+        except OSError:
+            # 端口被占（或权限不允许），退回临时端口
+            pass
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((HOST, 0))
         return int(sock.getsockname()[1])
@@ -566,7 +581,18 @@ def open_window(boot_server: Callable[[], tuple[Any, int, str]]) -> None:
         logger.info("本地服务已就绪：%s（版本 %s）", url, __version__)
         window.load_url(url)
 
-    webview.start(worker)
+    # private_mode 默认是 True：WebView2 用内存配置档，窗口一关 localStorage
+    # 全部清空——会话列表、上次的会话 id、壁纸都回到默认值，用户看到的就是
+    # 「关掉再打开，历史没了」。存到 exe 旁边的 data/webview，卸载时一起清掉。
+    profile_dir = PROJECT_ROOT / "data" / "webview"
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # 建不出来就退回私有模式：丢本地设置总比启动失败强
+        logger.warning("无法创建浏览器配置目录 %s：%s", profile_dir, exc)
+        webview.start(worker)
+    else:
+        webview.start(worker, private_mode=False, storage_path=str(profile_dir))
 
     server = state["server"]
     if server is not None:

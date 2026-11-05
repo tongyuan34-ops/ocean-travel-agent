@@ -1517,3 +1517,26 @@ button:disabled{cursor:not-allowed;opacity:.56;transform:none;box-shadow:none}
 }
 
 
+
+/* 交付卡片：助手把 PDF / 路线图做出来后，工具结果里是一条 /trips/files 链接。
+   光显示成一行文字，用户还得自己复制；这里渲染成能点的按钮或直接显示的图。 */
+.artifact-inline{margin:-2px 0 12px}
+.artifact-inline a{
+  display:inline-flex;align-items:center;
+  height:30px;padding:0 13px;
+  border-radius:999px;
+  border:1px solid rgba(20,36,60,.16);
+  background:rgba(255,255,255,.7);
+  color:var(--ink);font-size:11.5px;text-decoration:none;
+}
+.artifact-inline a:hover{border-color:rgba(20,36,60,.34)}
+.artifact-inline .artifact-map{
+  display:block;height:auto;padding:0;border:0;background:none;border-radius:14px;
+}
+.artifact-inline img{
+  display:block;width:100%;max-width:420px;border-radius:14px;
+  border:1px solid rgba(20,36,60,.12);
+}
+.artifact-inline .artifact-note{
+  display:block;margin-top:6px;font-size:11px;color:rgba(20,36,60,.55);
+}

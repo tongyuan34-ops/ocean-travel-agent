@@ -41,6 +41,7 @@
     MEDIA_UPSTREAM_ERROR: '生成服务返回异常，请稍后重试',
     MEDIA_UPSTREAM_TIMEOUT: '生成服务超时，请稍后重试',
     TASK_NOT_FOUND: '任务不存在或已过期',
+    NOT_FOUND: '文件不存在或已被清理，重新生成一次即可',
     RATE_LIMITED: '操作过于频繁，请稍后重试',
     BUDGET_EXCEEDED: '本会话额度已用完，请新建会话继续',
     SESSION_NOT_FOUND: '会话不存在或已过期',
@@ -251,6 +252,14 @@
 
   function pad2(n) {
     return n < 10 ? '0' + n : String(n);
+  }
+
+  /* 后端时间一律是 ISO 字符串，而 timeText 吃的是毫秒数。
+     解析失败返回 0（列表里就显示空时间），不能让 NaN 漏进页面。 */
+  function isoMs(text) {
+    if (!text) return 0;
+    var ms = Date.parse(text);
+    return isNaN(ms) ? 0 : ms;
   }
 
   function timeText(ts) {
@@ -785,6 +794,32 @@
     lsSet(STORE.sessions, JSON.stringify(state.sessions));
   }
 
+  /* localStorage 里的会话列表只能当缓存用。
+     桌面版每次启动端口都是随机的，而 localStorage 按「源（含端口）」隔离——
+     重开程序等于换了个新源，这份缓存必然是空的。用户看到的是「历史消息全
+     没了」，其实后端 data/sessions.json 里一直都在。列表以后端为准。 */
+  function loadSessions(done) {
+    request('GET', '/chat/sessions', null, function (err, data) {
+      if (err || !data) { if (done) done(err); return; }
+      var items = (data && data.items) || [];
+      var list = [];
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i] || {};
+        if (!item.id) continue;
+        list.push({
+          id: item.id,
+          title: item.title || '新的旅程',
+          createdAt: isoMs(item.created_at),
+          updatedAt: isoMs(item.updated_at) || isoMs(item.created_at)
+        });
+      }
+      state.sessions = list;
+      saveSessions();
+      renderSessions();
+      if (done) done(null);
+    });
+  }
+
   function renderSessions() {
     var box = DOM.sessionList;
     if (!box) return;
@@ -919,15 +954,18 @@
     );
   }
 
+  function sessionTitleOf(id) {
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === id) return state.sessions[i].title || '新的旅程';
+    }
+    return '新的旅程';
+  }
+
   function useSession(id) {
     if (!id) return;
     state.sessionId = id;
     lsSet(STORE.active, id);
-    var meta = null;
-    for (var i = 0; i < state.sessions.length; i++) {
-      if (state.sessions[i].id === id) { meta = state.sessions[i]; break; }
-    }
-    setChatTitle(meta ? meta.title : '新的旅程');
+    setChatTitle(sessionTitleOf(id));
     renderSessions();
     loadHistory(id);
     closeRail();
@@ -1385,6 +1423,38 @@
     return match ? match[1] : '';
   }
 
+  /* 交付类工具（export_trip_pdf / render_trip_map）在结果里给一条
+     /trips/files/xxx 链接。只把它当文字显示，用户还得自己复制粘贴；
+     这里直接渲染成能点的按钮、或者干脆把路线图显示出来。 */
+  var ARTIFACT_RE = /\/trips\/files\/[a-z]+-[0-9a-f]{16}\.(?:pdf|png)/;
+
+  function extractArtifact(text) {
+    var match = ARTIFACT_RE.exec(String(text || ''));
+    return match ? match[0] : '';
+  }
+
+  function renderArtifact(card, url) {
+    if (!card.parentNode || card.getAttribute('data-artifact') === '1') return;
+    card.setAttribute('data-artifact', '1');
+    var href = API_BASE + url;
+    var holder = document.createElement('div');
+    holder.className = 'artifact-inline';
+    /* 不用 target="_blank"：窗口里的 WebView2 对「打开新窗口」支持不一致，
+       点了可能什么也不发生。服务端这两个文件都带 Content-Disposition，
+       直接点就是下载，行为最稳。 */
+    if (/\.pdf$/.test(url)) {
+      holder.innerHTML =
+        '<a href="' + esc(href) + '">下载 PDF 行程单</a>' +
+        '<span class="artifact-note">A4 排版，含总览图与每日地图</span>';
+    } else {
+      holder.innerHTML =
+        '<img alt="行程路线图" src="' + esc(href) + '">' +
+        '<a href="' + esc(href) + '">保存这张路线图</a>' +
+        '<span class="artifact-note">按顺序编号，起点为「起」</span>';
+    }
+    card.parentNode.insertBefore(holder, card.nextSibling);
+  }
+
   function argsText(args) {
     if (!args) return '（无参数）';
     if (typeof args === 'string') return args;
@@ -1463,6 +1533,9 @@
         };
       }
     }
+    /* 交付类工具：结果里有文件链接就直接给卡片 */
+    var artifact = extractArtifact(ev.summary);
+    if (artifact) renderArtifact(card, artifact);
     /* 生图任务：从摘要里取出 task_id，直接在对话里出图并轮询 */
     if (card.getAttribute('data-tool') === 'generate_image') {
       var taskId = extractTaskId(ev.summary);
@@ -3329,8 +3402,37 @@
     refreshComposer();
     checkSendable();
 
-    /* 首屏：不自动进入会话，保持与参考视频一致的 landing 观感 */
+    /* 首屏：先按 landing 摆好，等后端列表回来再决定要不要直接进上次的会话 */
     DOM.hero.hidden = false;
+
+    /* 会话列表以后端为准。
+       桌面版每次启动端口随机，localStorage 按源（含端口）隔离，重开程序后
+       本地记的列表和 active 都是空的——所以「上次聊到哪」也得从后端找：
+       列表按最后一条消息倒序，第一条就是最近更新过的那个会话。 */
+    loadSessions(function () {
+      var target = state.sessionId;
+      var exists = false;
+      for (var j = 0; j < state.sessions.length; j++) {
+        if (state.sessions[j].id === target) { exists = true; break; }
+      }
+      if (!exists) {
+        target = state.sessions.length ? state.sessions[0].id : '';
+        if (state.sessionId && !exists) {
+          // 上次的会话已经被删了（或者数据被清理过），别留个指向空气的 id
+          state.sessionId = '';
+          lsDel(STORE.active);
+          setChatTitle('新的旅程');
+        }
+      }
+      if (!target) return;
+      state.sessionId = target;
+      lsSet(STORE.active, target);
+      setChatTitle(sessionTitleOf(target));
+      renderSessions();
+      /* 直接进上次的会话，而不是停在 landing：
+         用户关窗口再打开，期望的是「接着说」，不是「从头找」。 */
+      openAssistant();
+    });
   }
 
   if (document.readyState === 'loading') {

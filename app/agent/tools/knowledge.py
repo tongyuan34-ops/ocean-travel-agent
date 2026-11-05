@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import load_settings
 from app.core.context import truncate_tool_output
+from app.core.paths import resolve_resource
 from app.rag import get_knowledge_base
 
 _MAX_LIMIT = 6
@@ -48,7 +49,9 @@ async def search_knowledge(query: str, limit: int = 3) -> str:
         return "INVALID_REQUEST：检索主题不能为空"
 
     settings = load_settings()
-    base = get_knowledge_base(settings.knowledge_dir)
+    # 按资源根解析，不跟进程 CWD——打包后 CWD 是 exe 目录，语料在 _internal/ 里，
+    # 相对路径会解析成空库，检索静默失效（见 resolve_resource 的注释）
+    base = get_knowledge_base(resolve_resource(settings.knowledge_dir))
     if base.size == 0:
         return (
             "KNOWLEDGE_EMPTY：知识库为空（未找到语料文件）。"

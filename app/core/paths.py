@@ -38,3 +38,16 @@ def _resource_root() -> Path:
 # app/core/paths.py -> app/core -> app -> 项目根
 PROJECT_ROOT = _writable_root()
 RESOURCE_ROOT = _resource_root()
+
+
+def resolve_resource(path: str | Path) -> Path:
+    """把配置里的**只读资源**路径解析成绝对路径。
+
+    相对路径一律按 ``RESOURCE_ROOT`` 算，不能留给 ``Path(...)`` 去跟进程 CWD：
+    源码运行时 CWD 通常就是项目根，看起来没问题；但打包后双击 exe，CWD 是
+    exe 所在目录，而语料在 ``_internal/`` 里——于是「文件明明打进了包」和
+    「运行时一个都读不到」同时成立，检索静默返回空。绝对路径（用户自己指定
+    的目录）原样返回。
+    """
+    raw = Path(path).expanduser()
+    return raw if raw.is_absolute() else RESOURCE_ROOT / raw

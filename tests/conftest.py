@@ -18,6 +18,21 @@ if str(ROOT) not in sys.path:
 from app.core.config import Settings, load_settings  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clear_geocode_cache():
+    """地名解析带进程内缓存，用例之间必须清掉。
+
+    不清的话，上一个用例用打桩的高德客户端解析出的坐标会留在缓存里，
+    下一个用例改成「解析必然失败」时仍然拿到旧结果——测出来的通过与否
+    取决于用例执行顺序，这种失败最难查。
+    """
+    from app.agent.tools.info import _GEOCODE_CACHE
+
+    _GEOCODE_CACHE.clear()
+    yield
+    _GEOCODE_CACHE.clear()
+
+
 @pytest.fixture
 def settings() -> Settings:
     """真实配置（读 .env）。"""

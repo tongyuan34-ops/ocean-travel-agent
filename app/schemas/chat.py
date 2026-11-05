@@ -21,6 +21,24 @@ class SessionCreated(BaseModel):
     created_at: str
 
 
+class SessionItem(BaseModel):
+    """会话列表里的一行。
+
+    标题由后端从首条用户消息里截，不在前端拼：前端只看得见 localStorage 里
+    自己记的那份，换端口/换设备就空了，标题会退化成「新的旅程」。
+    """
+
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+class SessionList(BaseModel):
+    items: list[SessionItem]
+
+
 class MessageItem(BaseModel):
     id: str
     role: str

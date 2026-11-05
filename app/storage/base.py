@@ -34,6 +34,15 @@ class SessionStore(abc.ABC):
         """删除会话。"""
 
     @abc.abstractmethod
+    async def list(self) -> list[ChatSession]:
+        """列出全部会话。
+
+        会话列表原先只存在浏览器 localStorage 里，桌面版每次启动端口不同、
+        源（含端口）也就不同，localStorage 是空的——用户重开程序发现「历史
+        全没了」，其实数据一直在盘上，只是没人问后端要。列表必须来自后端。
+        """
+
+    @abc.abstractmethod
     async def aclose(self) -> None:
         """释放连接等资源。"""
 

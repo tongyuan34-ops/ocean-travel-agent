@@ -17,6 +17,8 @@ from app.schemas.chat import (
     PersonaOut,
     PersonaUpdate,
     SessionCreated,
+    SessionItem,
+    SessionList,
     UsageOut,
 )
 from app.services.chat import ChatService
@@ -46,6 +48,18 @@ async def create_session(request: Request) -> SessionCreated:
     """创建会话。"""
     session = await _service(request).create_session()
     return SessionCreated(session_id=session.id, created_at=session.created_at)
+
+
+@router.get("/sessions", response_model=SessionList)
+async def list_sessions(request: Request) -> SessionList:
+    """列出全部会话，最近的排前面。
+
+    会话列表必须由后端给：桌面版每次启动的端口是随机的，localStorage 按
+    源（含端口）隔离，重开程序后前端自己记的列表是空的——用户会以为历史
+    消息丢了，实际数据一直在 ``data/sessions.json`` 里。
+    """
+    items = await _service(request).list_sessions()
+    return SessionList(items=[SessionItem(**item) for item in items])
 
 
 @router.delete("/sessions/{session_id}", status_code=204)

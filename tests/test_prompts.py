@@ -96,6 +96,20 @@ def test_travel_personas_get_travel_rules():
         assert TRAVEL_RULES in prompt, f"{key} 应该带领域规则"
 
 
+def test_delivery_rules_ask_before_generating():
+    """交付规则必须写清「先问再做」，否则模型会一上来就甩附件。
+
+    用户要的是先听方案：行程还没讲完就把 PDF 生成出来，等于把答案和
+    附件一起塞给他，还得自己判断哪份是最终的。
+    """
+    assert "export_trip_pdf" in TRAVEL_RULES
+    assert "render_trip_map" in TRAVEL_RULES
+    assert "同意之前就调用工具" in TRAVEL_RULES
+    # 「做完一个再问另一个」是这个流程的收尾条件，漏了就会一直问下去
+    assert "另一个要不要" in TRAVEL_RULES
+    assert "两个都做完了就不再问" in TRAVEL_RULES
+
+
 def test_all_personas_keep_safety_rules():
     """安全规则（注入防护、不编造、权限确认）属于核心，任何风格都不能丢。"""
     for key in PERSONA_KEYS:

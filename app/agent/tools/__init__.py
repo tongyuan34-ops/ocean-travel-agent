@@ -1,11 +1,13 @@
 """工具注册表。
 
-按 SPEC 第八节分组。已完成 info / plan / system / search / knowledge / plugin（A+B）/ media 组。
+按 SPEC 第八节分组。已完成 info / plan / system / search / knowledge / plugin（A+B）/
+media / delivery 组。
 生视频不在范围内（产品决定），故 media 组只注册生图相关工具。
 """
 
 from __future__ import annotations
 
+from app.agent.tools.delivery import DELIVERY_TOOLS, export_trip_pdf, render_trip_map
 from app.agent.tools.info import get_weather, plan_route, search_poi
 from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.media import generate_image, list_image_templates
@@ -51,6 +53,7 @@ PLUGIN_TOOLS = [parse_shared_link, search_social_session, generate_scraper]
 MEDIA_TOOLS = [generate_image, list_image_templates]
 
 ALL_TOOLS = [
+    *DELIVERY_TOOLS,
     *INFO_TOOLS,
     *PLAN_TOOLS,
     *SYSTEM_TOOLS,
@@ -62,6 +65,7 @@ ALL_TOOLS = [
 
 __all__ = [
     "ALL_TOOLS",
+    "DELIVERY_TOOLS",
     "INFO_TOOLS",
     "KNOWLEDGE_TOOLS",
     "MEDIA_TOOLS",
@@ -72,6 +76,7 @@ __all__ = [
     "create_dir",
     "delete_path",
     "estimate_budget",
+    "export_trip_pdf",
     "fetch_url",
     "generate_image",
     "generate_scraper",
@@ -86,6 +91,7 @@ __all__ = [
     "read_file",
     "recommend_stay",
     "recommend_transport",
+    "render_trip_map",
     "search_knowledge",
     "search_poi",
     "search_social_session",

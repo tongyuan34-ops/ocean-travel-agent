@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -76,6 +76,8 @@ _TOOL_CATEGORY = {
     "recommend_stay": "plan",
     "recommend_transport": "plan",
     "plan_trip": "plan",
+    "export_trip_pdf": "plan",
+    "render_trip_map": "plan",
     "list_dir": "system",
     "read_file": "system",
     "open_file": "system",
@@ -107,6 +109,44 @@ def tool_category(tool_name: str) -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# 会话列表里的一行。用 TypedDict 而不是 dict[str, Any]：排序要按 updated_at，
+# 键写成 Any 的话 mypy 认不出它是可比较的字符串
+class _SessionRow(TypedDict):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+# 会话列表里的标题长度。和前端发送后立刻显示的那版保持一致（20 字 + 省略号），
+# 否则重开程序后同一个会话的标题会突然变长，看着像出了 bug
+_TITLE_LIMIT = 20
+
+
+def _session_title(session: ChatSession) -> str:
+    """会话标题：取首条用户消息的第一行。
+
+    不单独存一个 title 字段：用户改不了它，存下来只会和首条消息漂移
+    （重试、编辑首条消息之后就对不上了）。
+    """
+    for message in session.messages:
+        if message.role != "user":
+            continue
+        text = " ".join((message.content or "").split())
+        if text:
+            return text if len(text) <= _TITLE_LIMIT else f"{text[:_TITLE_LIMIT]}…"
+    return "新的旅程"
+
+
+def _session_updated_at(session: ChatSession) -> str:
+    """最后一条消息的时间；没有消息就退回创建时间。"""
+    for message in reversed(session.messages):
+        if message.created_at:
+            return message.created_at
+    return session.created_at
 
 
 @dataclass
@@ -194,6 +234,29 @@ class ChatService:
 
     async def delete_session(self, session_id: str) -> None:
         await self._store.delete(session_id)
+
+    async def list_sessions(self) -> list[_SessionRow]:
+        """列出全部会话，最近的排前面。
+
+        **为什么要后端出这份列表**：桌面版每次启动端口随机，而 localStorage
+        按「源（含端口）」隔离——重开程序等于换了一个新源，前端记的会话列表
+        是空的。用户看到「历史消息全没了」，其实数据一直在 ``data/sessions.json``
+        里，只是没人问后端要。列表改由后端给，跟端口、跟浏览器缓存都无关。
+        """
+        sessions = await self._store.list()
+        items: list[_SessionRow] = [
+            {
+                "id": session.id,
+                "title": _session_title(session),
+                "created_at": session.created_at,
+                "updated_at": _session_updated_at(session),
+                "message_count": len(session.messages),
+            }
+            for session in sessions
+        ]
+        # 按最后一条消息的时间倒序；空会话退回创建时间，不至于沉到列表底部
+        items.sort(key=lambda item: item["updated_at"], reverse=True)
+        return items
 
     async def get_usage(self, session_id: str) -> dict[str, Any]:
         """会话累计用量。前端用来展示「本会话花了多少」。"""

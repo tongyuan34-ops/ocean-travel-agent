@@ -16,6 +16,7 @@ import httpx
 from app.agent.tools.info import _amap_key, _geocode
 from app.agent.tools.plan import _parse_location
 from app.core.config import PROJECT_ROOT
+from app.schemas.trips import TripPlan
 
 MAP_WIDTH = 1024
 MAP_HEIGHT = 640
@@ -143,3 +144,38 @@ async def build_map(
 
     target.write_bytes(resp.content)
     return target
+
+
+async def maps_for_plan(
+    plan: TripPlan,
+) -> tuple[Path | None, list[Path | None]]:
+    """总览图 + 每天一张图；单张失败不影响其它。
+
+    放在服务层而不是路由里，是因为 PDF 有两个入口：HTTP 导出接口，和
+    助手侧的 ``export_trip_pdf`` 工具。两边都要这套图，各写一份迟早会不一致。
+    """
+    overview: Path | None = None
+    stops = [stop.name for day in plan.days for stop in day.stops]
+    if stops:
+        try:
+            overview = await build_map(stops=stops, city=plan.city, origin=plan.origin)
+        except TripMapError:
+            overview = None
+
+    day_maps: list[Path | None] = []
+    for index, day in enumerate(plan.days):
+        names = [stop.name for stop in day.stops]
+        if not names:
+            day_maps.append(None)
+            continue
+        try:
+            day_maps.append(
+                await build_map(
+                    stops=names,
+                    city=plan.city,
+                    origin=plan.origin if index == 0 else "",
+                )
+            )
+        except TripMapError:
+            day_maps.append(None)
+    return overview, day_maps

@@ -1,6 +1,6 @@
 # Ocean · 旅行规划 Agent
 
-> 一个可落地的旅行规划智能体后端：23 个工具 + MCP 双向接入、双模式 Agent 循环、可续传的 SSE 流、默认拒绝的权限网关。
+> 一个可落地的旅行规划智能体后端：25 个工具 + MCP 双向接入、双模式 Agent 循环、可续传的 SSE 流、默认拒绝的权限网关。
 > 目标不是演示 Demo，而是把 Agent 从「能跑」推到「敢让它碰文件和钱包」的那一步。
 
 [![CI](https://github.com/tongyuan34-ops/ocean-travel-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tongyuan34-ops/ocean-travel-agent/actions/workflows/ci.yml)
@@ -43,7 +43,7 @@
 |---|---|
 | 窗口 | 原生窗口（不是浏览器标签页），无边框，关掉就是退出进程 |
 | 模型 | 内置一份低额度 key，装完直接能对话 |
-| 工具 | 23 个全开：地图、天气、检索、图片生成、文件读写 |
+| 工具 | 25 个全开：地图、天气、检索、行程交付（PDF / 路线图）、图片生成、文件读写 |
 | 数据 | 全在本机，只有模型调用会出网 |
 
 ### 装在哪，数据在哪
@@ -121,7 +121,7 @@ MODEL_UNAVAILABLE：MODEL_NAME / MODEL_BASE_URL 未配置，请在 .env 中填�
 
 | 硬伤 | 做法 |
 |---|---|
-| 编造天气、距离、开放时间 | 22 个工具全部走真实数据源（高德 / 和风 / 必应），System Prompt 强制「先调工具、查不到就说查不到」，工具返回带 `SEARCH_FAILED` 时不允许用常识补足 |
+| 编造天气、距离、开放时间 | 涉及外部数据的工具全部走真实数据源（高德 / 和风 / 必应），System Prompt 强制「先调工具、查不到就说查不到」，工具返回带 `SEARCH_FAILED` 时不允许用常识补足 |
 | 行程不可执行 | `plan_trip` 逐段调用高德路线接口算真实里程与耗时，不是估算；支持顺序优化（能省 20% 以上才提示）、单日在途超 5 小时告警、导出 PDF / ICS 日历 |
 | 结果没法协作 | 只读分享页（`/share/{token}`，无会话标识、`noindex`）、会话持久化、断线续传、用户可随时中止 |
 
@@ -161,13 +161,14 @@ flowchart TB
         S[structured<br/>JSON 决策]
     end
 
-    subgraph tools["工具层 · 23 个"]
+    subgraph tools["工具层 · 25 个"]
         T1[info 3]
-        T2[plan 5]
+        T2[plan 7]
         T3[system 7]
         T4[search 2]
         T5[plugin 3]
         T6[media 2]
+        T7[knowledge 1]
     end
 
     subgraph adapters["适配器层"]
@@ -308,7 +309,7 @@ Agent 的成本是**多轮工具往返**堆出来的：一轮对话可能调用�
 同时 `logger.exception` 留痕，`CancelledError` 照旧立即生效。
 这条是评测跑出来的：`set_wallpaper` 的形参写成 `image_path` 而 `args_schema` 声明的是 `path`，
 模型照着 schema 传参必然 `TypeError`。ruff 和 mypy 都看不出来，现在由 `tests/test_tool_contract.py`
-对全部 23 个工具统一校验「schema 声明的字段函数收得下、函数的必填参数 schema 里有」。
+对全部 25 个工具统一校验「schema 声明的字段函数收得下、函数的必填参数 schema 里有」。
 
 ### 7. 间接提示注入防护
 
@@ -541,7 +542,7 @@ history = [(item.role, item.content) for item in session.messages]
 
 MCP 是模型和外部工具之间的标准协议。这个项目**两个方向都做了**：
 
-- **服务端**：把 23 个工具里的只读部分暴露出去，Claude Desktop / Cursor 直接能用
+- **服务端**：把 25 个工具里的只读部分暴露出去，Claude Desktop / Cursor 直接能用
 - **客户端**：连别人的 MCP 服务端，把它们的工具变成 Agent 可调用的工具
 
 一个方向只能证明「我的工具能被别人用」，另一个只能证明「我能用别人的工具」。两个都做，
@@ -655,7 +656,7 @@ python -c "import asyncio,sys; from app.mcp.client import StdioMCPClient; ..."
 
 语料是几十篇短文档、随仓库分发、随时可读。这个规模下 BM25 和向量检索的召回差距很小，
 而代价差一个量级：向量要额外装 embedding 依赖、要建索引文件、要在测试里 mock 网络。
-这个项目的 618 条测试**全部离线可跑**，加一个需要联网建索引的组件会破坏这个性质。
+这个项目的 725 条测试**全部离线可跑**，加一个需要联网建索引的组件会破坏这个性质。
 
 三个具体的技术选择：
 
@@ -727,14 +728,21 @@ LangGraph 有一行就能起 agent 的 `create_react_agent`，但它只认原生
 决策、代码再派发。代价是多维护一套图，两套的行为差异要靠 `--mode native/structured`
 分别跑评测兜住。
 
-### 不做 RAG，也不建向量库
+### 有 RAG，但不建向量库
 
-简历上的 Agent 项目几乎都有「RAG + 向量库」，这里没有，是刻意的：
-**旅行信息的时效性让向量库变成负债**。机票、天气、景区开放时间每周都在变，
+简历上的 Agent 项目几乎都有「RAG + 向量库」，这里只做前一半。
+**旅行信息的时效性让向量库变成负债**：机票、天气、景区开放时间每周都在变，
 而向量库检索的是灌库那一刻的快照。用户问「明天杭州下雨吗」，
-RAG 会从三周前的文档里捞出一段很像答案的话，模型照着说——比「查不到」糟得多。
-所以时效性信息一律走实时工具（高德、天气、搜索），历史人文交给模型参数，
-并在 prompt 里要求不确定就说不确定。代价是没有「企业知识库」这个卖点可写。
+向量库会从三周前的游记里捞出一段很像答案的话，模型照着说——比「查不到」糟得多。
+
+所以知识库只装**不会过期的规则**：单日塞几个点、预算怎么分项、带老人小孩的节奏、
+雨天怎么备选。时效性信息一律走实时工具（高德、天气、搜索），
+并在 prompt 里要求不确定就说不确定。规则由人写、可审核，边界也写进了工具描述——
+模型只看得到描述，看不到代码注释（见第 13 节）。
+
+检索用 BM25 而不是 embedding：几十篇短文档的规模下，两者召回差距很小，成本却差一个
+量级——向量要额外装 embedding 依赖、要建索引文件、要在测试里 mock 网络。
+代价是没有「企业知识库 + 向量召回」这个卖点可写。细节见第 13 节。
 
 ### 前端不用框架，也没有构建步骤
 
@@ -1097,7 +1105,7 @@ optimize_day_route  把一天要去的多个地点排成少走回头路的顺序
 ## 测试
 
 ```bash
-uv run pytest                        # 618 passed, 1 skipped
+uv run pytest                        # 725 passed, 1 skipped
 uv run pytest --cov=app              # 覆盖率
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app evals
@@ -1147,7 +1155,7 @@ app/
 └── main.py
 knowledge/           # 知识库语料：规则与判断标准（不含班次票价这类实时事实）
 web/                 # 原生 JS PWA + 本地反代服务器
-tests/               # 618 个离线测试（不联网、不调模型）
+tests/               # 725 个离线测试（不联网、不调模型）
 evals/               # 41 条评测用例 + 判分框架（验模型表现，与 tests 分工）
 docs/                # SPEC（接口契约）、SETUP（部署手册）、POSTMORTEM（工程复盘）
 docs/samples/        # 真实抓取产物（社媒采集跑通的证据，不是编的示例）

@@ -8,6 +8,7 @@ Excel 的空单元格是 None、表格内容不在 paragraphs 里。mock 掉这�
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -901,7 +902,7 @@ def test_save_target_accepts_dir_file_and_bare_name(tmp_path: Path):
     desktop.mkdir()
 
     assert _save_target(str(desktop), "汇总", ".xlsx") == desktop / "汇总.xlsx"
-    assert _save_target(str(desktop) + "\\", "汇总", ".xlsx") == desktop / "汇总.xlsx"
+    assert _save_target(str(desktop) + os.sep, "汇总", ".xlsx") == desktop / "汇总.xlsx"
     assert _save_target(str(desktop / "我的表.xlsx"), "汇总", ".xlsx") == desktop / "我的表.xlsx"
     # 只给个名字时落到桌面：落到程序目录等于用户永远找不到
     bare = _save_target("我的表", "汇总", ".xlsx")

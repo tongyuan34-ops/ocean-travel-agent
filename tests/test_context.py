@@ -96,16 +96,16 @@ def test_plan_fold_respects_token_budget():
 
 
 def test_as_text_handles_content_blocks():
-    """_extract_answer 依赖把 list content 拼成文本（OpenAI 风格分块）。"""
-    from app.services.chat import _as_text
+    """extract_answer 依赖把 list content 拼成文本（OpenAI 风格分块）。"""
+    from app.services.turn_events import as_text
 
-    assert _as_text("纯文本") == "纯文本"
-    assert _as_text([{"type": "text", "text": "片段"}]) == "片段"
-    assert _as_text(None) == ""
+    assert as_text("纯文本") == "纯文本"
+    assert as_text([{"type": "text", "text": "片段"}]) == "片段"
+    assert as_text(None) == ""
 
 
-def test_extract_answer_prefers_final_ai_message():
-    from app.services.chat import _extract_answer
+def testextract_answer_prefers_final_ai_message():
+    from app.services.turn_events import extract_answer
 
     state = {
         "messages": [
@@ -113,6 +113,6 @@ def test_extract_answer_prefers_final_ai_message():
             AIMessage(content="最终回答"),
         ]
     }
-    answer, reason = _extract_answer(state, "流式内容")
+    answer, reason = extract_answer(state, "流式内容")
     assert answer == "最终回答"
     assert reason == "stop"

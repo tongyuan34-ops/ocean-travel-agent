@@ -34,8 +34,11 @@ class SessionStore(abc.ABC):
         """删除会话。"""
 
     @abc.abstractmethod
-    async def list(self) -> list[ChatSession]:
-        """列出全部会话。
+    async def list(self, tenant: str | None = None) -> list[ChatSession]:
+        """列出会话，最近的由上层排序。
+
+        ``tenant`` 为 None 时返回全部（脚本、运维用）；传了就只返回该租户的——
+        路由层永远传，否则一个人的会话列表里会出现别人的会话。
 
         会话列表原先只存在浏览器 localStorage 里，桌面版每次启动端口不同、
         源（含端口）也就不同，localStorage 是空的——用户重开程序发现「历史

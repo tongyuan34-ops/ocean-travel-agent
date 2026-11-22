@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from app.agent.tools.delivery import export_trip_pdf, render_trip_map
 from app.services import trip_export, trip_pdf
 
-# PDF 里的中文要靠系统字体渲染。CI 装了 fonts-noto-cjk 所以会真渲染；
+# PDF 里的中文要靠系统字体渲染。CI 装了 fonts-wqy-zenhei 所以会真渲染；
 # 裸 Linux 开发机上没有字体时跳过，而不是报一个「跟病因无关」的失败。
 _HAS_CJK_FONT = trip_pdf.find_font() is not None
 _NEEDS_FONT = pytest.mark.skipif(not _HAS_CJK_FONT, reason="运行环境没有中文字体")

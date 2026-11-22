@@ -246,7 +246,7 @@ async def test_list_image_templates_tool():
 
 def test_media_tools_registered_with_media_category():
     from app.agent.tools import ALL_TOOLS, MEDIA_TOOLS
-    from app.services.chat import tool_category
+    from app.services.turn_events import tool_category
 
     names = {tool.name for tool in MEDIA_TOOLS}
     assert names == {"generate_image", "list_image_templates"}

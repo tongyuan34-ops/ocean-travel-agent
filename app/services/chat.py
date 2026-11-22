@@ -7,21 +7,17 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
-from app.agent.graph import MAX_STEPS, build_agent_graph
+from app.agent.graph import build_agent_graph
 from app.agent.guard import TaintState, current_taint
-from app.agent.model import build_chat_model
 from app.agent.permissions import (
     DecisionChannel,
     LocalDecisionChannel,
@@ -29,164 +25,100 @@ from app.agent.permissions import (
     PermissionRequest,
     current_broker,
 )
-from app.agent.prompts import build_system_prompt, get_persona
 from app.agent.resilience import (
     RetryStats,
     ToolBudget,
     current_retry_stats,
     current_tool_budget,
 )
-from app.core import secrets
+from app.agent.toolset import bind_active, route, tools_for
 from app.core.config import Settings
-from app.core.context import compose_messages, make_summary, plan_fold
-from app.core.errors import TOOL_ERROR_PREFIXES, ApiError
-from app.core.tracing import new_trace_id, reset_trace, set_trace, trace_config
-from app.core.usage import TokenUsage, estimate_usage, usage_from_output
+from app.core.errors import ApiError
+from app.core.metrics import metrics
+from app.core.tracing import new_trace_id, reset_trace, set_trace
+from app.core.usage import TokenUsage, estimate_usage
+from app.mcp.registry import all_tools
 from app.media.service import MediaService, current_media, current_ref_images
-from app.media.uploads import MAX_ATTACHMENTS, UploadStore, image_block, mime_of
-from app.services.facts import (
-    MediaFact,
-    build_turn_facts,
-    last_warnings,
-    recent_task_ids,
-)
+from app.media.uploads import UploadStore
 from app.services.profile import ProfileService
 from app.services.repair import Diagnosis, RepairPolicy, build_repair_policy
 from app.services.selfcheck import check_turn
-from app.services.streams import CANCEL_POLL_SEC, EventLog, MemoryEventLog, StreamState
-from app.storage import ChatMessage, ChatSession, SessionStore
+from app.services.sessions import SessionService, now_iso
+from app.services.streams import EventLog, MemoryEventLog, StreamState
+from app.services.turn_context import TurnContext
+from app.services.turn_events import extract_answer, sse
+from app.services.turn_runtime import TurnRun, run_attempt
+from app.skills import (
+    bind_active_skills,
+    get_skill,
+    match_skills,
+    split_command,
+    tools_for_skills,
+)
+from app.storage import ChatMessage, ChatSession
 
 logger = logging.getLogger(__name__)
 
-# 每个会话保留最近多少轮对话（1 轮 = 一问一答）
-MAX_TURNS = 20
-# 单轮最多几张图能当生图参考图。实测上游接受两张的数组，
-# 再多只是把请求体撑大（一张 1280 的图 base64 后约 250KB）
-MAX_REF_IMAGES = 2
 # 一轮最多跑几次模型。1 次正常 + 1 次自愈重试，再多就是在拿用户的钱试错：
 # 同一句纠正话术重复第三遍，模型大概率还是同样的行为
 MAX_REPAIR_ATTEMPTS = 2
-# 工具名 → 契约中的 category
-_TOOL_CATEGORY = {
-    "get_weather": "info",
-    "plan_route": "info",
-    "search_poi": "info",
-    "estimate_budget": "plan",
-    "optimize_day_route": "plan",
-    "recommend_stay": "plan",
-    "recommend_transport": "plan",
-    "plan_trip": "plan",
-    "export_trip_pdf": "plan",
-    "render_trip_map": "plan",
-    "list_dir": "system",
-    "read_file": "system",
-    "open_file": "system",
-    "write_file": "system",
-    "create_dir": "system",
-    "delete_path": "system",
-    "set_wallpaper": "system",
-    "search_knowledge": "knowledge",
-    "search_web": "search",
-    "fetch_url": "search",
-    "parse_shared_link": "plugin",
-    "search_social_session": "plugin",
-    "generate_scraper": "plugin",
-    "generate_image": "media",
-    "list_image_templates": "media",
-}
-_SUMMARY_LIMIT = 200
-_TASK_ID_RE = re.compile(
-    r"task_id[：:\s]*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
-)
-_OTHER_CATEGORY = "other"
-
-
-def tool_category(tool_name: str) -> str:
-    """工具名 → 契约里的 category。工具清单与 SSE 事件共用，避免两边不一致。"""
-    return _TOOL_CATEGORY.get(tool_name, _OTHER_CATEGORY)
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-# 会话列表里的一行。用 TypedDict 而不是 dict[str, Any]：排序要按 updated_at，
-# 键写成 Any 的话 mypy 认不出它是可比较的字符串
-class _SessionRow(TypedDict):
-    id: str
-    title: str
-    created_at: str
-    updated_at: str
-    message_count: int
-
-
-# 会话列表里的标题长度。和前端发送后立刻显示的那版保持一致（20 字 + 省略号），
-# 否则重开程序后同一个会话的标题会突然变长，看着像出了 bug
-_TITLE_LIMIT = 20
-
-
-def _session_title(session: ChatSession) -> str:
-    """会话标题：取首条用户消息的第一行。
-
-    不单独存一个 title 字段：用户改不了它，存下来只会和首条消息漂移
-    （重试、编辑首条消息之后就对不上了）。
-    """
-    for message in session.messages:
-        if message.role != "user":
-            continue
-        text = " ".join((message.content or "").split())
-        if text:
-            return text if len(text) <= _TITLE_LIMIT else f"{text[:_TITLE_LIMIT]}…"
-    return "新的旅程"
-
-
-def _session_updated_at(session: ChatSession) -> str:
-    """最后一条消息的时间；没有消息就退回创建时间。"""
-    for message in reversed(session.messages):
-        if message.created_at:
-            return message.created_at
-    return session.created_at
+# 空回答自动重试次数。上游偶发「HTTP 200 + content 为空」，原样重跑一次基本就正常；
+# 只重试一次——第二次还是空，说明不是抖动，继续跑只会让用户白等、白花钱
+MAX_EMPTY_RETRIES = 1
+# 进程内最多缓存多少张 agent 图（按本轮工具集合区分）。换话题才会新建，
+# 4 张足够覆盖「行程 / 文档 / 文件 / 闲聊」这几种来回切换，再多就是长尾泄漏
+_MAX_GRAPHS = 4
+# 一轮最多额外绑多少个技能工具。技能是用户可扩展的，不设上限的话，
+# 一个装了很多技能的目录会把每轮的工具 schema 重新撑爆
+MAX_SKILL_TOOLS = 4
 
 
 @dataclass
-class _Attempt:
-    """一趟模型循环的结果。默认值让「什么都没发生」也是合法状态。"""
+class _TurnSetup:
+    """准备阶段产出、跑图与收尾都要用的东西。"""
 
-    streamed: str = ""
-    final_state: dict[str, Any] | None = None
+    session: ChatSession
+    ctx: TurnRun
+    broker: PermissionBroker
+    # (ContextVar, token)：由 _generate 的 finally 统一复位
+    tokens: list[tuple[Any, Any]]
+    model_text: str
+    explicit_skill: str
+    active_box: set[str]
+    skill_box: set[str]
+    system_text: str
+    history: list[tuple[str, str]]
+    messages: list[Any]
+    tool_budget: ToolBudget
+    taint: TaintState
+    retry_stats: RetryStats
+    mode: str
+
+
+@dataclass
+class _TurnOutcome:
+    """跑图的结果。默认值让「什么都没发生」也是合法状态。"""
+
+    answer: str = ""
+    finish_reason: str = ""
     failed: dict[str, Any] | None = None
+    warnings: list[dict[str, str]] = field(default_factory=list)
     media_task_ids: list[str] = field(default_factory=list)
     tool_calls: int = 0
     called_tools: set[str] = field(default_factory=set)
 
 
-@dataclass(frozen=True)
-class _TurnRun:
-    """多趟尝试之间不变的东西。
-
-    打包传参而不是排七个位置参数：自愈重跑时调用处只写
-    ``_run_attempt(ctx, messages)``，不会因为参数顺序记错而把
-    trace_id 传成 session_id。
-    """
-
-    state: StreamState
-    graph: Any
-    mode: str
-    queue: asyncio.Queue
-    trace_id: str
-    session_id: str
-    user_id: str
-    turn_usage: TokenUsage
-
-
 class ChatService:
-    """会话与对话服务。持久化交给注入的 SessionStore，与后端实现无关。"""
+    """一轮对话的编排：流生命周期、agent 循环、事件与用量结算。
+
+    会话的增删查交给 ``SessionService``（app/services/sessions.py），
+    这里只在编排中读取/保存它们。
+    """
 
     def __init__(
         self,
         settings: Settings,
-        store: SessionStore,
+        sessions: SessionService,
         media: MediaService | None = None,
         profile: ProfileService | None = None,
         uploads: UploadStore | None = None,
@@ -195,17 +127,38 @@ class ChatService:
         repair: RepairPolicy | None = None,
     ) -> None:
         self._settings = settings
-        self._store = store
+        self._sessions = sessions
         self._media = media
         self._profile = profile
         self._uploads = uploads
+        # 上下文装配单独成类：提示词、历史、附件、摘要折叠都在里面，
+        # 这里只负责在编排时调用它
+        self._context = TurnContext(settings, uploads=uploads, profile=profile, media=media)
         # 自愈策略是注入的：主流程不认识具体规则，测试可以换成
         # 「永远说不用修」的空策略，从而把重试路径单独关掉
         self._repair: RepairPolicy = repair if repair is not None else build_repair_policy()
-        self._graph: Any = None
+        # 图按「本轮绑定的工具集合」缓存。工具是按轮路由的（app/agent/toolset.py），
+        # 不同轮次的工具子集不同，而 ``bind_tools`` 是构图时固定的——所以不能只存一张图。
+        # key 用工具名的 frozenset：同话题的多轮会命中同一张，重新构图只在换话题时发生。
+        self._graphs: dict[frozenset[str], Any] = {}
         self._mode: str = ""
-        self._summarizer: Any = None
         self._graph_lock = asyncio.Lock()
+        # 正在生成中的会话：session_id → stream_id。
+        #
+        # 没有这个表时，同一会话的两轮会并发跑：两边各自 ``get`` 一份会话副本，
+        # 各自 append 一条用户消息，各自 ``save``——后写的覆盖先写的，
+        # 其中一条消息和它的回答就这么没了。用户看到的是「我刚发的那条不见了」，
+        # 而日志里两轮都成功。
+        #
+        # 选择「拒绝」而不是「排队」：同一会话上并发的两轮几乎一定是误触
+        # （连点发送、两个标签页），排队会让用户等一份他并不想要的结果。
+        self._busy_sessions: dict[str, str] = {}
+        # 租户级的在跑轮数：只用来做配额判断，真正的占用状态仍在 _busy_sessions。
+        # 单独记账而不是每次去数会话，是因为统计要经过存储，而它在别的进程里
+        self._busy_tenants: dict[str, int] = {}
+        # stream_id → tenant。释放时靠它把租户计数减回去，
+        # 否则取消/异常那条路径会漏减，配额就永远还不上了
+        self._stream_tenant: dict[str, str] = {}
         # 事件流与权限裁决都放在可替换的后端后面：单进程用内存，
         # 多进程用 Redis。默认给内存实现，测试和脚本不必配 Redis。
         self._log: EventLog = event_log if event_log is not None else MemoryEventLog()
@@ -219,85 +172,11 @@ class ChatService:
         # 任务可能在跑完前被 GC 回收（CPython 文档明确警告过这一点）
         self._background: set[asyncio.Task[Any]] = set()
 
-    # ---------- 会话管理 ----------
-
-    async def create_session(self) -> ChatSession:
-        session = ChatSession(id=str(uuid4()), created_at=_now())
-        await self._store.create(session)
-        return session
-
-    async def get_session(self, session_id: str) -> ChatSession:
-        session = await self._store.get(session_id)
-        if session is None:
-            raise ApiError("SESSION_NOT_FOUND", f"会话不存在：{session_id}")
-        return session
-
-    async def delete_session(self, session_id: str) -> None:
-        await self._store.delete(session_id)
-
-    async def list_sessions(self) -> list[_SessionRow]:
-        """列出全部会话，最近的排前面。
-
-        **为什么要后端出这份列表**：桌面版每次启动端口随机，而 localStorage
-        按「源（含端口）」隔离——重开程序等于换了一个新源，前端记的会话列表
-        是空的。用户看到「历史消息全没了」，其实数据一直在 ``data/sessions.json``
-        里，只是没人问后端要。列表改由后端给，跟端口、跟浏览器缓存都无关。
-        """
-        sessions = await self._store.list()
-        items: list[_SessionRow] = [
-            {
-                "id": session.id,
-                "title": _session_title(session),
-                "created_at": session.created_at,
-                "updated_at": _session_updated_at(session),
-                "message_count": len(session.messages),
-            }
-            for session in sessions
-        ]
-        # 按最后一条消息的时间倒序；空会话退回创建时间，不至于沉到列表底部
-        items.sort(key=lambda item: item["updated_at"], reverse=True)
-        return items
-
-    async def get_usage(self, session_id: str) -> dict[str, Any]:
-        """会话累计用量。前端用来展示「本会话花了多少」。"""
-        session = await self.get_session(session_id)
-        return dict(session.usage)
-
-    async def set_persona(self, session_id: str, persona: str) -> str:
-        """切换对话风格，返回实际生效的 key。
-
-        未知 key 不报错而是回落默认（见 ``get_persona``）：前端选项来自
-        ``GET /personas``，正常不会传错；真传错了，让整轮对话 500 也没好处。
-
-        切换只影响**后续轮次**的 system prompt，不改历史消息——
-        已经聊过的内容按当时的风格生成，这是事实，不该被追溯修改。
-        """
-        session = await self.get_session(session_id)
-        resolved = get_persona(persona)
-        session.persona = resolved.key
-        await self._store.save(session)
-        return resolved.key
-
-    def _image_blocks(self, attachments: list[str]) -> list[dict[str, Any]]:
-        """把 upload_id 变成多模态内容块。取不到的附件跳过并记日志。
-
-        跳过而不是报错：一张图在传输过程中被删掉（用户点了移除、或者磁盘被清理），
-        不该让整轮对话失败——其余几张还能用，模型也会照常回答。
-        """
-        if not attachments or self._uploads is None:
-            return []
-        blocks: list[dict[str, Any]] = []
-        for upload_id in attachments[:MAX_ATTACHMENTS]:
-            item = self._uploads.get(upload_id)
-            if item is None:
-                logger.warning("附件不存在，已跳过 | id=%s", upload_id)
-                continue
-            path = self._uploads.path_of(item)
-            if not path.is_file():
-                logger.warning("附件文件已丢失，已跳过 | id=%s", upload_id)
-                continue
-            blocks.append(image_block(path, mime_of(item)))
-        return blocks
+    def attachment_meta(
+        self, ids: list[str], user_id: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """历史消息的附件元数据。实现在 TurnContext，路由只认这一个入口。"""
+        return self._context.attachment_meta(ids, user_id)
 
     # ---------- 对话 ----------
 
@@ -307,13 +186,39 @@ class ChatService:
         text: str,
         user_id: str = "default",
         attachments: list[str] | None = None,
+        *,
+        tenant: str | None = None,
     ) -> StreamState:
         """创建事件流并**在后台**开始生成。
 
         生成任务不挂在 HTTP 请求上：客户端断开只会停止订阅，
         回答继续跑完并落库，之后可用 Last-Event-ID 续传。
         """
-        await self.get_session(session_id)  # 先校验，避免流开始后才报错
+        # 先校验归属：越权的会话必须在流开始之前就被挡住，
+        # 一旦开始流式返回，HTTP 状态码就无法再改了
+        session = await self._sessions.get(session_id, tenant)
+        tenant_key = session.tenant
+
+        # 并发闸门。三处都要卡：同一个会话上重复发（会丢消息）、
+        # 整体并发过多、以及单个租户吃光全局额度（每一轮都是真金白银的模型调用）。
+        # 放在 ``create_task`` 之前，这样被拒的请求连后台任务都不会建。
+        if session_id in self._busy_sessions:
+            raise ApiError("RATE_LIMITED", "这个会话上一条回答还在生成，等它结束或先点停止")
+        limit = self._settings.max_concurrent_replies
+        if limit > 0 and len(self._busy_sessions) >= limit:
+            raise ApiError(
+                "RATE_LIMITED",
+                f"同时进行的对话已达上限 {limit} 轮，等其中一轮结束再发",
+            )
+        # 租户级配额单独算：全局上限是「整个服务最多 N 轮」，一个租户开 N 个会话
+        # 就能把它吃光，其他租户全部 429。这不是资源问题，是可用性问题
+        per_tenant = self._settings.max_concurrent_replies_per_tenant
+        if per_tenant > 0 and self._busy_tenants.get(tenant_key, 0) >= per_tenant:
+            raise ApiError(
+                "RATE_LIMITED",
+                f"该租户同时进行的对话已达上限 {per_tenant} 轮，等其中一轮结束再发",
+            )
+
         stream_id = uuid4().hex
         await self._log.create(stream_id, session_id)
         state = StreamState(stream_id=stream_id, session_id=session_id, log=self._log)
@@ -322,7 +227,18 @@ class ChatService:
         )
         state.task = task
         self._tasks[stream_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(stream_id, None))
+        self._busy_sessions[session_id] = stream_id
+        self._busy_tenants[tenant_key] = self._busy_tenants.get(tenant_key, 0) + 1
+        self._stream_tenant[stream_id] = tenant_key
+
+        def _release(_: asyncio.Task[Any]) -> None:
+            # 正常收尾时 ``_run_reply`` 已经放过了，这里是兜底：
+            # 任务在建起来之前就被取消、或者异常发生在 finally 之外时，
+            # 只剩这一条路径能清掉，否则那个会话永远发不出新消息。
+            self._tasks.pop(stream_id, None)
+            self._release_slot(session_id, stream_id)
+
+        task.add_done_callback(_release)
         return state
 
     async def stream_reply(
@@ -365,7 +281,7 @@ class ChatService:
         """
         try:
             if await self._log.meta(stream_id) is None:
-                yield _sse(
+                yield sse(
                     {
                         "type": "error",
                         "code": "STREAM_NOT_FOUND",
@@ -379,10 +295,10 @@ class ChatService:
                     yield ": ping\n\n"
                     continue
                 seq, payload = item
-                yield f"id: {seq}\n{_sse(payload)}"
+                yield f"id: {seq}\n{sse(payload)}"
         except Exception as exc:  # 任何存储异常都要转成可读事件
             logger.warning("事件流中断 | stream=%s err=%r", stream_id, exc, exc_info=True)
-            yield _sse(
+            yield sse(
                 {
                     "type": "error",
                     "code": "STREAM_UNAVAILABLE",
@@ -420,7 +336,23 @@ class ChatService:
                 state.cancelled,
             )
             reset_trace(token)
+            # 先放闸再收流：``finish()`` 一关，客户端立刻就能发下一条，
+            # 而 done_callback 要等这一帧事件循环跑完才执行——中间那个空隙里
+            # 用户看到的是「刚答完就发不出去」。
+            self._release_slot(session_id, state.stream_id)
             await state.finish()
+
+    def _release_slot(self, session_id: str, stream_id: str) -> None:
+        """释放会话与租户的并发闸门。重复调用安全，正常收尾和 done_callback 都调。"""
+        if self._busy_sessions.get(session_id) == stream_id:
+            self._busy_sessions.pop(session_id, None)
+        tenant = self._stream_tenant.pop(stream_id, None)
+        if tenant is not None:
+            left = self._busy_tenants.get(tenant, 0) - 1
+            if left > 0:
+                self._busy_tenants[tenant] = left
+            else:
+                self._busy_tenants.pop(tenant, None)
 
     async def _generate(
         self,
@@ -434,11 +366,45 @@ class ChatService:
     ) -> None:
         """把一轮问答写入事件流。
 
+        三段式：准备（校验/路由/装配）、跑图（含空回答重试与自愈重跑）、
+        收尾（用量、指标、落库、end 事件）。
+
         ``started`` 是 ``stream()`` 里的 ``perf_counter()`` 起点。传进来而不是
         在这里重新计时，是为了让前端显示的耗时和日志里的「耗时=」对得上——
         两个数字不一致时，人第一反应是怀疑统计口径，而不是去查真正的慢在哪。
+
+        ContextVar 在准备阶段设置，必须由**这一层**统一复位：放进任何一段里，
+        异常路径都会漏掉 reset，下一轮就会继承上一轮的工具预算和污点状态。
         """
-        session = await self.get_session(session_id)
+        setup = await self._prepare_turn(
+            state, session_id, text, user_id, trace_id, attachments or []
+        )
+        if setup is None:
+            # 准备阶段已经发过 error 事件（预算/视觉/构图失败）
+            return
+        try:
+            outcome = await self._converse(setup)
+        finally:
+            for var, token in setup.tokens:
+                var.reset(token)
+            await setup.broker.cancel_all()
+
+        await self._finalize(setup, outcome, trace_id, started)
+
+    async def _prepare_turn(
+        self,
+        state: StreamState,
+        session_id: str,
+        text: str,
+        user_id: str,
+        trace_id: str,
+        attachments: list[str],
+    ) -> _TurnSetup | None:
+        """校验、落用户消息、路由工具、装配提示词，并设置本轮 ContextVar。
+
+        返回 ``None`` 表示这一轮不该继续（已通过 SSE 告诉用户原因）。
+        """
+        session = await self._sessions.get(session_id)
 
         # 预算闸放在最前面：超限的请求连用户消息都不落库，
         # 否则历史里会留下一句永远得不到回答的话
@@ -454,7 +420,7 @@ class ChatService:
                     "trace_id": trace_id,
                 }
             )
-            return
+            return None
 
         if attachments and self._uploads is None:
             # 宁可整轮拒绝，也不要把图悄悄丢掉然后假装回答了一个看图问题
@@ -466,22 +432,85 @@ class ChatService:
                     "trace_id": trace_id,
                 }
             )
-            return
+            return None
+
+        # 技能命令（``/skill <key>`` 或直接 ``/<key>``）只影响这一轮：
+        # 命令本身不是对话内容，落库的是去掉命令后的正文，否则下一轮模型
+        # 会在历史里看到一句没人回应的斜杠命令。
+        explicit_skill, remainder = split_command(text)
+        if explicit_skill:
+            skill_item = get_skill(explicit_skill)
+            name = skill_item.name if skill_item else explicit_skill
+            model_text = remainder or f"使用「{name}」技能。"
+            # 只统计用户主动输入命令的这一种。选择器固定下来的技能每轮都会生效，
+            # 记在这里会把「一次选择」算成「每轮都点了一次」，指标失去意义
+            metrics.inc("skill_activations_total", skill=explicit_skill, source="command")
+        else:
+            # 会话上固定的技能（前端选择器）在没有命令时生效
+            sticky = session.skill if get_skill(session.skill) else ""
+            explicit_skill = sticky
+            model_text = text
 
         session.messages.append(
             ChatMessage(
                 id=str(uuid4()),
                 role="user",
-                content=text,
-                created_at=_now(),
-                attachments=list(attachments or []),
+                content=model_text,
+                created_at=now_iso(),
+                attachments=list(attachments),
             )
         )
-        self._trim(session)
-        await self._store.save(session)
+        self._context.trim(session)
+        await self._sessions.save(session)
+
+        # 本轮绑哪些工具：按这句话（加附件类型）路由到能力组，只把相关的那几组
+        # 交给模型。全量绑定要发 13k token 的工具 schema，一句「你好」也照付，
+        # 而它一个都不会调——详见 app/agent/toolset.py 里的实测数字。
+        groups = route(
+            model_text,
+            persona=session.persona,
+            attachments=self._context.attachment_names(attachments),
+            active=session.active_groups,
+        )
+        # 放一个可变集合进上下文：discover_tools 会往里加组，
+        # 流结束后回写会话，下一轮就真的能用上
+        active_box = bind_active(groups)
+
+        # 本轮用哪些技能：显式选择优先；否则按触发词挑；一个都没命中时沿用
+        # 上一轮的技能，让「那第二天呢」这种追问不至于掉回通用回答
+        if explicit_skill:
+            skill_keys = [explicit_skill]
+        else:
+            matched = match_skills(model_text)
+            skill_keys = matched or [key for key in session.active_skills if get_skill(key)]
+        # 同理放一个可变集合：use_skill 在工具里激活的技能，流结束后回写
+        skill_box = bind_active_skills(skill_keys)
+
+        tools = tools_for(groups, all_tools(), routing=self._settings.tool_routing)
+        if skill_keys:
+            known = {tool.name for tool in tools}
+            extra = [tool for tool in tools_for_skills(skill_keys) if tool.name not in known]
+            tools = [*tools, *extra[:MAX_SKILL_TOOLS]]
+        # 这条日志是排查「模型为什么不调工具」的第一现场：工具没绑上时，
+        # 它只会说「我做不到」，而看日志能一眼分清是路由没命中还是模型没用
+        logger.info(
+            "本轮工具 | 组=%s 技能=%s 工具=%d 模式=%s",
+            ",".join(groups) or "无",
+            ",".join(skill_keys) or "无",
+            len(tools),
+            self._settings.tool_routing,
+        )
+        # 这条日志是排查路由问题唯一的入口：用户报「模型说没有这个工具」时，
+        # 先看这一行就知道是没命中组，还是命中了却没绑上
+        logger.info(
+            "工具路由 | 组=%s 工具=%d 个：%s",
+            ",".join(groups) or "无",
+            len(tools),
+            ",".join(tool.name for tool in tools) or "无",
+        )
 
         try:
-            graph, mode = await self._ensure_graph()
+            graph, mode = await self._graph_for(tools)
         except Exception as exc:  # noqa: BLE001 - 配置或探测失败要如实报错
             await state.emit(
                 {
@@ -491,40 +520,18 @@ class ChatService:
                     "trace_id": trace_id,
                 }
             )
-            return
+            return None
 
-        # 长期偏好并入 system prompt：只带确认过的条目，避免每轮都膨胀
-        # 提示词按本会话选定的风格组装：核心规则 + 领域规则（旅行类才有）+ 说话方式。
-        # 「闲聊时别推行程」不能靠加一句规则——实测那只是概率改善，
-        # 得让闲聊型人格根本拿不到旅行规则，见 app/agent/prompts.py 的说明。
-        system_text = build_system_prompt(session.persona)
-        if self._profile is not None:
-            block = await self._profile.render_block(user_id)
-            if block:
-                system_text = f"{system_text}\n\n{block}"
-
-        await self._refresh_summary(session, system_text)
-        await self._store.save(session)
-        history = [(item.role, item.content) for item in session.messages]
-        # 事实块**在摘要之后**才拼进去：摘要是对对话的压缩，不该把
-        # 「这一轮任务成功了几张」这种瞬时状态卷进长期记忆
-        facts = await self._turn_facts(session)
-        prompt_text = f"{system_text}\n\n{facts}" if facts else system_text
-        messages = compose_messages(prompt_text, session.summary, history, session.summarized_count)
-
-        # 图片只挂**当前轮**。每轮重发会让 token 随轮数线性膨胀（一张 1280 的图约 1.5k token），
-        # 而用户接着追问的多半还是同一张图——上一轮的回答里已经有模型对它的描述。
-        # 代价是「隔一轮再问图里的细节」会问不到，这是刻意选的：宁可让用户重发一次，
-        # 也不要在第 10 轮还替第 1 轮的图付钱。
-        blocks = self._image_blocks(attachments or [])
-        if blocks:
-            messages[-1] = HumanMessage(
-                content=[{"type": "text", "text": text or "请看这张图。"}, *blocks]
-            )
-        # 同一批图片还要能给生图工具当底图：用户说「在我这张图上加个东西」时，
-        # 模型看不见上传 id，也没法把图交给上游，只能靠这里转成 data URL 递下去。
-        # 只取前两张——上游单次最多吃两张参考图，再多只是把请求体撑大
-        refs = [block["image_url"]["url"] for block in blocks][:MAX_REF_IMAGES]
+        # 提示词、历史、附件、事实、摘要折叠都在 TurnContext 里装配，
+        # 这里只拿结果。摘要可能在这一步推进，所以要单独存一次
+        prompt = await self._context.build(
+            session,
+            user_id=user_id,
+            model_text=model_text,
+            attachments=attachments,
+            explicit_skill=explicit_skill,
+        )
+        await self._sessions.save(session)
 
         # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，生成器只从队列取。
         # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死。
@@ -534,31 +541,34 @@ class ChatService:
             await queue.put(("permission", permission.to_event()))
 
         broker = PermissionBroker(self._decisions, _notify_permission)
-        ctx_token = current_broker.set(broker)
-        # 必须在创建后台任务之前设置：ContextVar 由任务继承，
-        # 工具层要靠它拿到**同一个** MediaService 实例（任务存在实例里）
-        media_token = current_media.set(self._media)
-        # 同理：生图工具要拿本轮上传的原图当参考图，也靠任务继承
-        ref_token = current_ref_images.set(refs)
-        # 同上：工具重试发生在后台任务里，统计要回到本轮
+        # 每设置一个 ContextVar 就记下 (变量, token)，由 _generate 的 finally 统一复位
+        tokens: list[tuple[Any, Any]] = [
+            (current_broker, current_broker.set(broker)),
+            # 必须在创建后台任务之前设置：ContextVar 由任务继承，
+            # 工具层要靠它拿到**同一个** MediaService 实例（任务存在实例里）
+            (current_media, current_media.set(self._media)),
+            # 同理：生图工具要拿本轮上传的原图当参考图，也靠任务继承
+            (current_ref_images, current_ref_images.set(prompt.refs)),
+        ]
+        # 工具重试统计发生在后台任务里，要回到本轮
         retry_stats = RetryStats()
-        retry_token = current_retry_stats.set(retry_stats)
+        tokens.append((current_retry_stats, current_retry_stats.set(retry_stats)))
         # 工具调用预算也按轮重置：模型对同一工具反复试参数时，
         # 光靠 prompt 约束不住，必须由代码兜底
         tool_budget = ToolBudget(
             per_tool=self._settings.tool_max_calls_per_tool,
             total=self._settings.tool_max_calls_total,
         )
-        budget_token = current_tool_budget.set(tool_budget)
+        tokens.append((current_tool_budget, current_tool_budget.set(tool_budget)))
         # 污点状态同样按轮重置：本轮读到的内容里出现注入指令时，
         # 后续有副作用的工具会被拦下；用户重发一次明确指令即回到干净状态
         taint = TaintState()
-        taint_token = current_taint.set(taint)
+        tokens.append((current_taint, current_taint.set(taint)))
 
         turn_usage = TokenUsage()
         # 一次尝试需要的、多趟之间不变的东西。打包传下去，
-        # 免得 _run_attempt 长出一排位置参数，调用处全靠顺序记忆
-        ctx = _TurnRun(
+        # 免得 run_attempt 长出一排位置参数，调用处全靠顺序记忆
+        ctx = TurnRun(
             state=state,
             graph=graph,
             mode=mode,
@@ -567,7 +577,33 @@ class ChatService:
             session_id=session_id,
             user_id=user_id,
             turn_usage=turn_usage,
+            log=self._log,
         )
+        return _TurnSetup(
+            session=session,
+            ctx=ctx,
+            broker=broker,
+            tokens=tokens,
+            model_text=model_text,
+            explicit_skill=explicit_skill,
+            active_box=active_box,
+            skill_box=skill_box,
+            system_text=prompt.system_text,
+            history=prompt.history,
+            messages=prompt.messages,
+            tool_budget=tool_budget,
+            taint=taint,
+            retry_stats=retry_stats,
+            mode=mode,
+        )
+
+    async def _converse(self, setup: _TurnSetup) -> _TurnOutcome:
+        """跑图：空回答重试一次；自检不通过且策略认领时，带纠正话术重跑一次。"""
+        ctx = setup.ctx
+        state = ctx.state
+        turn_usage = ctx.turn_usage
+        messages = setup.messages
+        outcome = _TurnOutcome()
 
         streamed = ""
         final_state: dict | None = None
@@ -582,78 +618,128 @@ class ChatService:
         called_tools: set[str] = set()
         warnings: list[dict[str, str]] = []
         repairs = 0
+        empty_retries = 0
 
-        try:
-            while True:
-                attempt = await self._run_attempt(ctx, messages)
-                streamed = attempt.streamed
-                final_state = attempt.final_state
-                failed = attempt.failed
-                media_task_ids.extend(attempt.media_task_ids)
-                tool_calls += attempt.tool_calls
-                called_tools |= attempt.called_tools
+        while True:
+            attempt = await run_attempt(ctx, messages)
+            streamed = attempt.streamed
+            final_state = attempt.final_state
+            failed = attempt.failed
+            media_task_ids.extend(attempt.media_task_ids)
+            tool_calls += attempt.tool_calls
+            called_tools |= attempt.called_tools
 
-                if state.cancelled or failed is not None:
-                    break
+            if state.cancelled or failed is not None:
+                break
 
-                answer, finish_reason = _extract_answer(final_state, streamed)
-                if not answer.strip():
-                    # 空回答交给下面的错误分支，不在这里判自检
-                    break
-
-                # 收尾自检：模型可能声称「已提交」但一次工具都没调。
-                # 这一轮必须自己承认，不能等用户对着空气猜
-                warnings = check_turn(
-                    user_text=text,
-                    answer=answer,
-                    tool_names=called_tools,
-                    media_task_ids=media_task_ids,
-                )
-                if not warnings or repairs >= MAX_REPAIR_ATTEMPTS - 1:
-                    break
-
-                instruction = self._repair.instruction(
-                    Diagnosis(
-                        code=warnings[0]["code"],
-                        title=warnings[0]["title"],
-                        evidence=warnings[0].get("evidence", ""),
-                        user_text=text,
-                        answer=answer,
+            answer, finish_reason = extract_answer(final_state, streamed)
+            if not answer.strip():
+                # 空回答先当上游抖动处理：偶发 200 + 空 content 重跑一次就好。
+                # finish_reason=length 例外——同一段 prompt 重跑还会被截断，
+                # 只是让用户多等一次、多花一次钱
+                if finish_reason != "length" and empty_retries < MAX_EMPTY_RETRIES:
+                    empty_retries += 1
+                    logger.warning(
+                        "空回答，自动重试 | finish=%s 模式=%s 工具=%s 第 %d 次 trace=%s",
+                        finish_reason or "无",
+                        setup.mode,
+                        ",".join(sorted(called_tools)) or "无",
+                        empty_retries + 1,
+                        ctx.trace_id,
                     )
-                )
-                if not instruction:
-                    # 策略认领不了：照旧把问题摆给用户，不硬修
-                    break
-
-                repairs += 1
+                    await state.emit(
+                        {
+                            "type": "retry",
+                            "reason": "EMPTY_RESPONSE",
+                            "attempt": empty_retries + 1,
+                            "message": "模型这一轮没有返回内容，正在自动重试一次。",
+                        }
+                    )
+                    continue
+                # 放弃前的最后一条证据：没有它，「空回答」只能靠猜是哪种
                 logger.warning(
-                    "本轮自愈重跑 | code=%s 第 %d 次尝试 | 工具=%s 生图任务=%d",
-                    warnings[0]["code"],
-                    repairs + 1,
+                    "空回答 | finish=%s 模式=%s 工具=%s 尝试=%d 用量=%d/%d 调用=%d trace=%s",
+                    finish_reason or "无",
+                    setup.mode,
                     ",".join(sorted(called_tools)) or "无",
-                    len(media_task_ids),
+                    empty_retries + 1,
+                    turn_usage.input_tokens,
+                    turn_usage.output_tokens,
+                    turn_usage.calls,
+                    ctx.trace_id,
                 )
-                await state.emit(
-                    {
-                        "type": "retry",
-                        "reason": warnings[0]["code"],
-                        "attempt": repairs + 1,
-                        "message": "模型上一轮只写了文字、没有真的调用工具，正在自动重试一次。",
-                    }
+                break
+
+            # 收尾自检：模型可能声称「已提交」但一次工具都没调。
+            # 这一轮必须自己承认，不能等用户对着空气猜
+            warnings = check_turn(
+                user_text=setup.model_text,
+                answer=answer,
+                tool_names=called_tools,
+                media_task_ids=media_task_ids,
+            )
+            if not warnings or repairs >= MAX_REPAIR_ATTEMPTS - 1:
+                break
+
+            instruction = self._repair.instruction(
+                Diagnosis(
+                    code=warnings[0]["code"],
+                    title=warnings[0]["title"],
+                    evidence=warnings[0].get("evidence", ""),
+                    user_text=setup.model_text,
+                    answer=answer,
                 )
-                # 纠正话术只活在这一轮的内存里，不落库：
-                # 用户的历史里不该出现一条「你刚才做错了」的系统消息
-                messages = [*messages, HumanMessage(content=instruction)]
-                # 上一轮的诊断作废，重跑后重新判
-                warnings = []
-        finally:
-            current_broker.reset(ctx_token)
-            current_media.reset(media_token)
-            current_ref_images.reset(ref_token)
-            current_retry_stats.reset(retry_token)
-            current_tool_budget.reset(budget_token)
-            current_taint.reset(taint_token)
-            await broker.cancel_all()
+            )
+            if not instruction:
+                # 策略认领不了：照旧把问题摆给用户，不硬修
+                break
+
+            repairs += 1
+            logger.warning(
+                "本轮自愈重跑 | code=%s 第 %d 次尝试 | 工具=%s 生图任务=%d",
+                warnings[0]["code"],
+                repairs + 1,
+                ",".join(sorted(called_tools)) or "无",
+                len(media_task_ids),
+            )
+            await state.emit(
+                {
+                    "type": "retry",
+                    "reason": warnings[0]["code"],
+                    "attempt": repairs + 1,
+                    "message": "模型上一轮只写了文字、没有真的调用工具，正在自动重试一次。",
+                }
+            )
+            # 纠正话术只活在这一轮的内存里，不落库：
+            # 用户的历史里不该出现一条「你刚才做错了」的系统消息
+            messages = [*messages, HumanMessage(content=instruction)]
+            # 上一轮的诊断作废，重跑后重新判
+            warnings = []
+
+        outcome.answer = answer
+        outcome.finish_reason = finish_reason
+        outcome.failed = failed
+        outcome.warnings = warnings
+        outcome.media_task_ids = media_task_ids
+        outcome.tool_calls = tool_calls
+        outcome.called_tools = called_tools
+        return outcome
+
+    async def _finalize(
+        self,
+        setup: _TurnSetup,
+        outcome: _TurnOutcome,
+        trace_id: str,
+        started: float,
+    ) -> None:
+        """收尾：错误分支、用量与指标、助手消息落库、end 事件。"""
+        session = setup.session
+        state = setup.ctx.state
+        turn_usage = setup.ctx.turn_usage
+        answer = outcome.answer
+        warnings = outcome.warnings
+        media_task_ids = outcome.media_task_ids
+        called_tools = outcome.called_tools
 
         if state.cancelled:
             # 用户点了停止：哪怕模型刚好跑完，也不把这一轮写进历史。
@@ -662,20 +748,27 @@ class ChatService:
             # 说成「模型出错」
             return
 
-        if failed is not None:
-            await state.emit({"type": "error", **failed, "trace_id": trace_id})
+        if outcome.failed is not None:
+            await state.emit({"type": "error", **outcome.failed, "trace_id": trace_id})
             return
 
-        if mode != "native" and answer:
+        if setup.mode != "native" and answer:
             # structured 模式无法逐字流式，整段一次性给出
             await state.emit({"type": "token", "content": answer})
 
         if not answer.strip():
+            # 「被长度上限截断」和「上游什么都没给」用户要做的事不一样：
+            # 前者缩短问题就能解决，后者重试才有意义
+            truncated = outcome.finish_reason == "length"
             await state.emit(
                 {
                     "type": "error",
-                    "code": "MODEL_EMPTY_RESPONSE",
-                    "message": "模型没有返回可显示的文本。",
+                    "code": "MODEL_TRUNCATED" if truncated else "MODEL_EMPTY_RESPONSE",
+                    "message": (
+                        "回答达到长度上限被截断，请把问题拆小一些再试。"
+                        if truncated
+                        else "模型没有返回可显示的文本。"
+                    ),
                     "trace_id": trace_id,
                 }
             )
@@ -695,7 +788,12 @@ class ChatService:
         # 但必须把 estimated 标出来，不能让估算值冒充账单
         if turn_usage.calls == 0:
             est_in, est_out = estimate_usage(
-                [system_text, *(content for _, content in history), text], answer
+                [
+                    setup.system_text,
+                    *(content for _, content in setup.history),
+                    setup.model_text,
+                ],
+                answer,
             )
             turn_usage.add(est_in, est_out, estimated=True)
 
@@ -710,39 +808,64 @@ class ChatService:
         # 耗时在这里结算：回答已生成完，end 事件还没发，
         # 前端拿到的数字 = 用户从点发送到看见完整回答的等待时间
         latency_ms = int((time.perf_counter() - started) * 1000) if started else 0
+
+        # 运营口径：一轮 = 一次用户提问到完整回答。
+        # 技能标签：用户命令/选择器 → 具体 key；模型自己 use_skill → auto；
+        # 没用技能 → none。三者分开，才能分别算「用户偏好」和「模型命中率」
+        skill_label = setup.explicit_skill or ("auto" if setup.skill_box else "none")
+        metrics.inc("chat_turns_total", mode=setup.mode, skill=skill_label)
+        metrics.observe("chat_turn_duration_seconds", latency_ms / 1000, mode=setup.mode)
+        metrics.inc("chat_tokens_total", turn_usage.input_tokens, kind="input")
+        metrics.inc("chat_tokens_total", turn_usage.output_tokens, kind="output")
+        metrics.inc("chat_model_calls_total", turn_usage.calls)
+        if turn_usage.estimated:
+            metrics.inc("chat_usage_estimated_total")
+        # 价目表里没有这个模型时 cost 是 None（不是 0），不能拿 None 去加
+        if turn_usage_dict["cost"] is not None:
+            metrics.inc("chat_cost_cny_total", float(turn_usage_dict["cost"]))
         session.messages.append(
             ChatMessage(
                 id=message_id,
                 role="assistant",
                 content=answer,
-                created_at=_now(),
+                created_at=now_iso(),
                 media_task_ids=media_task_ids,
                 usage=turn_usage_dict,
                 latency_ms=latency_ms,
                 warnings=warnings,
             )
         )
-        self._trim(session)
-        await self._store.save(session)
+        self._context.trim(session)
+        # 回写本轮实际激活的工具组：discover_tools 可能往里加过东西，
+        # 下一轮的 route() 要据此判断「这轮是不是在追问上一个话题」。
+        # 用 sorted 而不是原顺序，让会话文件的 diff 稳定
+        session.active_groups = sorted(setup.active_box)
+        # 技能同理：use_skill 激活的技能下一轮要能绑上它的工具
+        session.active_skills = sorted(setup.skill_box)
+        await self._sessions.save(session)
 
         # 回答已落库，后台抽偏好；失败不影响本轮，也不阻塞 SSE
         if self._profile is not None:
             self._spawn(
-                self._profile.maybe_suggest(user_id, text, [*history, ("assistant", answer)])
+                self._profile.maybe_suggest(
+                    setup.ctx.user_id,
+                    setup.model_text,
+                    [*setup.history, ("assistant", answer)],
+                )
             )
 
         logger.info(
             "本轮完成 | mode=%s 回答=%d 字 finish=%s 工具调用=%d 生图任务=%d "
             "tokens=%d/%d 成本=%s 重试=%d 估算=%s",
-            mode,
+            setup.mode,
             len(answer),
-            finish_reason,
-            tool_calls,
+            outcome.finish_reason,
+            outcome.tool_calls,
             len(media_task_ids),
             turn_usage.input_tokens,
             turn_usage.output_tokens,
             turn_usage_dict["cost"],
-            retry_stats.retries,
+            setup.retry_stats.retries,
             turn_usage.estimated,
         )
 
@@ -750,180 +873,20 @@ class ChatService:
             {
                 "type": "end",
                 "message_id": message_id,
-                "finish_reason": finish_reason,
+                "finish_reason": outcome.finish_reason,
                 "trace_id": trace_id,
                 "usage": {"turn": turn_usage_dict, "session": dict(session.usage)},
                 "latency_ms": latency_ms,
-                "tool_retries": retry_stats.to_dict(),
-                "tool_budget": tool_budget.to_dict(),
+                "tool_retries": setup.retry_stats.to_dict(),
+                "tool_budget": setup.tool_budget.to_dict(),
                 # 本轮自检告警。前端必须显示出来——用户看到的「已完成」
                 # 和实际发生的事不一致时，这是唯一能纠正它的地方
                 "warnings": warnings,
                 # 本轮是否读到过注入内容、拦了几次危险操作。前端不展示，
                 # 但排查「为什么写文件没执行」时这是唯一线索
-                "taint": taint.to_dict(),
+                "taint": setup.taint.to_dict(),
             }
         )
-
-    async def _run_attempt(self, ctx: _TurnRun, messages: list[Any]) -> _Attempt:
-        """跑一趟模型循环：把图事件转成 SSE 推出去，返回这一趟的结果。
-
-        单独成方法而不是内联，是因为自愈要重跑同一段流程。内联的话第二趟
-        只能复制一遍，两处迟早走样——而这段代码里每个分支都关系到
-        「用户能不能看见正在发生什么」，复制走样的代价是静默丢事件。
-        """
-        state = ctx.state
-        queue = ctx.queue
-        result = _Attempt()
-        last_cancel_check = 0.0
-
-        # 上一趟若被打断，队列里可能还留着没消费完的事件。
-        # 不清干净的话，第二趟会先把上一趟的 token 吐出来
-        while not queue.empty():
-            queue.get_nowait()
-
-        # 上次检查「别的进程有没有取消我」的时刻。跨进程取消只能轮询共享标记，
-        # 限流到每秒一次：每条 token 都查一次 Redis，延迟和成本都不划算
-        async def _cancelled_elsewhere() -> bool:
-            nonlocal last_cancel_check
-            now = time.monotonic()
-            if now - last_cancel_check < CANCEL_POLL_SEC:
-                return False
-            last_cancel_check = now
-            if not await self._log.is_cancelled(state.stream_id):
-                return False
-            logger.info("检测到跨进程取消 | stream=%s", state.stream_id)
-            state.cancelled = True
-            return True
-
-        # 图放在后台任务里跑，图事件与权限请求都送进同一个队列，消费端只从队列取。
-        # 否则工具在等用户确认期间会阻塞 astream_events，整条流被卡死
-        async def _run_graph() -> None:
-            try:
-                async for graph_event in ctx.graph.astream_events(
-                    {"messages": messages},
-                    version="v2",
-                    config={
-                        "recursion_limit": MAX_STEPS * 2 + 5,
-                        # run_name / metadata 会出现在 LangSmith 面板上，
-                        # 便于按 session_id 或 trace_id 直接筛出这一轮
-                        **trace_config(
-                            ctx.trace_id, session_id=ctx.session_id, user_id=ctx.user_id
-                        ),
-                    },
-                ):
-                    await queue.put(("graph", graph_event))
-            except Exception as exc:  # noqa: BLE001 - 交给消费端统一映射错误码
-                await queue.put(("failed", exc))
-                return
-            await queue.put(("finished", None))
-
-        runner = asyncio.create_task(_run_graph())
-        try:
-            while True:
-                try:
-                    kind, payload = await asyncio.wait_for(queue.get(), timeout=15)
-                except TimeoutError:
-                    # 采集/生图这类长工具调用期间没有 token；公网反代会把长时间
-                    # 无数据的 SSE 连接掐断，这里定期发心跳保活（前端忽略该类型）
-                    await state.emit({"type": "ping"})
-                    if await _cancelled_elsewhere():
-                        break
-                    continue
-
-                if await _cancelled_elsewhere():
-                    break
-
-                if kind == "permission":
-                    await state.emit(payload)
-
-                elif kind == "failed":
-                    result.failed = _map_failure(payload)
-                    break
-
-                elif kind == "finished":
-                    break
-
-                else:
-                    event = payload
-                    name = event.get("event")
-
-                    if name == "on_chat_model_stream":
-                        chunk = event["data"].get("chunk")
-                        # 兜底取 chunk 本身：万一上游给的是裸字符串，
-                        # getattr(..., "content", None) 会得到 None 并**静默丢掉**
-                        # 这一段输出——用户会看到回答凭空少一截，且没有任何报错
-                        piece = _as_text(getattr(chunk, "content", chunk))
-                        if piece:
-                            result.streamed += piece
-                            # structured 模式内部会输出 JSON 决策，不能直接透给用户
-                            if ctx.mode == "native":
-                                await state.emit({"type": "token", "content": piece})
-
-                    elif name == "on_tool_start":
-                        result.tool_calls += 1
-                        result.called_tools.add(event.get("name") or "")
-                        logger.info(
-                            "调用工具 | tool=%s category=%s",
-                            event.get("name") or "",
-                            tool_category(event.get("name") or ""),
-                        )
-                        await state.emit(
-                            {
-                                "type": "tool_call",
-                                "call_id": str(event.get("run_id") or ""),
-                                "tool": event.get("name") or "",
-                                "category": tool_category(event.get("name") or ""),
-                                "args": event["data"].get("input") or {},
-                            }
-                        )
-
-                    elif name == "on_tool_end":
-                        output = event["data"].get("output")
-                        summary = _summarize(output)
-                        status = "error" if summary.startswith(TOOL_ERROR_PREFIXES) else "ok"
-                        if event.get("name") == "generate_image" and status == "ok":
-                            raw = _as_text(getattr(output, "content", output)) or str(output)
-                            match = _TASK_ID_RE.search(raw)
-                            if match and match.group(1) not in result.media_task_ids:
-                                result.media_task_ids.append(match.group(1))
-                        await state.emit(
-                            {
-                                "type": "tool_result",
-                                "call_id": str(event.get("run_id") or ""),
-                                "status": status,
-                                "summary": summary,
-                            }
-                        )
-
-                    elif name == "on_tool_error":
-                        await state.emit(
-                            {
-                                "type": "tool_result",
-                                "call_id": str(event.get("run_id") or ""),
-                                "status": "error",
-                                "summary": _truncate(
-                                    str(event["data"].get("error") or "工具执行失败")
-                                ),
-                            }
-                        )
-
-                    elif name == "on_chat_model_end":
-                        # native 模式下每轮工具调用都会多一次模型调用，
-                        # 所以要在这里逐次累加，而不是只看最后一条消息
-                        found = usage_from_output(event["data"].get("output"))
-                        if found is not None:
-                            ctx.turn_usage.add(*found)
-
-                    elif name == "on_chain_end":
-                        output = event["data"].get("output")
-                        if isinstance(output, dict) and "messages" in output:
-                            result.final_state = output
-        finally:
-            if not runner.done():
-                runner.cancel()
-
-        return result
 
     # ---------- 内部 ----------
 
@@ -944,197 +907,22 @@ class ChatService:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _ensure_graph(self) -> tuple[Any, str]:
-        """首次调用时构图（含 tool calling 能力探测），之后复用。"""
+    async def _graph_for(self, tools: list[Any]) -> tuple[Any, str]:
+        """取（必要时构建）绑定指定工具集合的图。
+
+        缓存键是工具名集合，所以「同一话题连续追问」只建一次图；
+        换话题时多一张，用 ``_MAX_GRAPHS`` 兜住上限——每张图都持有一次
+        ``bind_tools`` 的产物，无上限地存下去就是内存泄漏。
+        """
+        key = frozenset(tool.name for tool in tools)
         async with self._graph_lock:
-            if self._graph is None:
-                self._graph, self._mode = build_agent_graph(self._settings)
-            return self._graph, self._mode
-
-    async def _turn_facts(self, session: ChatSession) -> str:
-        """查证「模型看不到但真实发生了的事」，写成一段事实注入提示词。
-
-        这一步存在的理由是一次真实故障：模型连着三轮说「生图服务卡住了」，
-        而那几个任务全部 succeeded。它拿不到任务终态，只能从「用户说没看到图」
-        反推「任务失败」——推断在它的信息集里是合理的，只是事实是错的。
-        事实由系统查好喂给它，它就不需要猜了。
-
-        查询在这里、拼文字在 ``app/services/facts.py``：那边是纯函数，
-        可以被单测钉住，不需要 mock 一个 Redis 或生图服务。
-        """
-        media: list[MediaFact] = []
-        if self._media is not None:
-            for task_id in recent_task_ids(session.messages):
-                task = await self._media.get(task_id)
-                if task is None:
-                    # 任务过期或已被清理。不编一个状态出来，
-                    # 让它从列表里消失比说「状态未知」更诚实
-                    continue
-                media.append(
-                    MediaFact(
-                        task_id=task.id,
-                        status=task.status.value,
-                        error=task.error,
-                    )
-                )
-        return build_turn_facts(media, last_warnings(session.messages))
-
-    async def _refresh_summary(self, session: ChatSession, system_prompt: str) -> None:
-        """按预算决定是否把历史折叠进摘要。
-
-        摘要失败时不推进 summarized_count，那批消息会继续留在窗口里——
-        宁可多占一点上下文，也不能因为摘要失败而丢掉记忆。
-        """
-        history = [(item.role, item.content) for item in session.messages]
-        plan = plan_fold(
-            system_prompt=system_prompt,
-            summary=session.summary,
-            history=history,
-            summarized_count=session.summarized_count,
-            max_tokens=self._settings.max_context_tokens,
-        )
-        if not plan.needed:
-            return
-
-        if self._summarizer is None:
-            self._summarizer = build_chat_model(self._settings)
-        try:
-            session.summary = await make_summary(self._summarizer, session.summary, plan.fold)
-        except Exception as exc:  # noqa: BLE001 - 摘要失败不能影响正常回答
-            logger.warning("上下文摘要生成失败，本轮沿用原摘要：%s", exc)
-            return
-        session.summarized_count = plan.new_summarized_count
-
-    @staticmethod
-    def _trim(session: ChatSession) -> None:
-        """裁剪超长会话。
-
-        裁掉的消息若已被折叠进摘要，需同步回退计数，保持下标一致。
-        """
-        limit = MAX_TURNS * 2
-        excess = len(session.messages) - limit
-        if excess > 0:
-            del session.messages[:excess]
-            session.summarized_count = max(0, session.summarized_count - excess)
-
-
-# ---------- 模块级辅助函数 ----------
-
-
-def _sse(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _as_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and item.get("text"):
-                parts.append(str(item["text"]))
-        return "".join(parts)
-    return ""
-
-
-def _truncate(text: str, limit: int = _SUMMARY_LIMIT) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def _summarize(output: Any) -> str:
-    content = getattr(output, "content", output)
-    return _truncate(_as_text(content) or str(content))
-
-
-def _extract_answer(final_state: dict | None, streamed: str) -> tuple[str, str]:
-    """取最终回答。
-
-    structured 模式下流式内容是内部 JSON 决策，不能直接用，
-    因此优先从最终状态里取最后一条「不含 tool_calls 的 AI 消息」。
-    """
-    if final_state:
-        for message in reversed(final_state.get("messages") or []):
-            if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
-                text = _as_text(message.content)
-                if text.strip():
-                    reason = ""
-                    meta = getattr(message, "response_metadata", None) or {}
-                    if meta.get("finish_reason") == "length":
-                        reason = "length"
-                    return text, reason or "stop"
-    return streamed, "stop"
-
-
-# 上游账单类错误的关键词。命中了就说明「重试」永远没用——
-# 火山方舟欠费返回 403 AccountOverdueError，OpenAI 是 429 insufficient_quota，
-# 有的网关只给一句 "insufficient balance"。这些都是账户状态问题，
-# 归到 INTERNAL_ERROR 会给出「请稍后重试」，等于让用户白试。
-_QUOTA_HINTS = (
-    "overdue",
-    "arrears",
-    "insufficient_quota",
-    "insufficient balance",
-    "exceeded your current quota",
-    "billing",
-    "欠费",
-    "余额不足",
-    "额度",
-)
-# 上游鉴权失败：Key 写错、被吊销、没有该模型的权限
-_AUTH_HINTS = ("invalid api key", "incorrect api key", "unauthorized", "authentication")
-
-# key 来源 → 用户该去哪儿改。说错地方等于让他去一个不存在的页面
-_KEY_PLACES = {
-    secrets.CONFIG: "config.json（在程序目录里）",
-    secrets.ENV: ".env 或环境变量",
-    secrets.BUNDLED: "内置配置",
-}
-
-
-def _quota_message() -> str:
-    """额度用尽时该说什么，取决于这个 key 是谁的。
-
-    内置 key 的用户**没有服务商控制台可去**——那不是他的账号。他能做的
-    只有一件事：填自己的 key。这条分支不写，桌面版用户会一直点重试。
-    """
-    if secrets.source("MODEL_API_KEY") == secrets.BUNDLED:
-        return (
-            "内置额度已用完。在程序目录的 config.json 里把 MODEL_API_KEY "
-            "换成你自己的，重启就能继续用"
-        )
-    return "请到服务商控制台充值或补缴欠款后再试（重试不会恢复）"
-
-
-def _auth_message() -> str:
-    place = _KEY_PLACES.get(secrets.source("MODEL_API_KEY"), "配置")
-    return f"请检查 {place} 里的 MODEL_API_KEY 是否填错或被吊销"
-
-
-def _map_failure(exc: Exception) -> dict[str, str]:
-    """把异常映射成契约错误码。
-
-    顺序有讲究：**先认账单，再认鉴权，最后才看状态码**。
-    403 既可能是欠费也可能是 Key 没权限，只看状态码会把「去充值」说成
-    「检查 Key」；而这两件事都不是重试能解决的，说错方向用户会一直点重试。
-    """
-    name = type(exc).__name__
-    text = str(exc)
-    lowered = text.lower()
-    status = getattr(exc, "status_code", None)
-
-    if any(hint in lowered for hint in _QUOTA_HINTS):
-        return {"code": "MODEL_QUOTA_EXCEEDED", "message": _quota_message()}
-
-    if status in (401, 403) or any(hint in lowered for hint in _AUTH_HINTS):
-        return {"code": "MODEL_AUTH_FAILED", "message": _auth_message()}
-
-    # 「timed out」和「timeout」两种写法都要认：openai SDK 的异常名是
-    # APITimeoutError，但有的网关只在正文里写 "Request timed out"
-    if "Timeout" in name or "timeout" in lowered or "timed out" in lowered:
-        return {"code": "MODEL_TIMEOUT", "message": f"模型响应超时：{text}"}
-    if "Connection" in name or "Connect" in name:
-        return {"code": "MODEL_UNAVAILABLE", "message": f"无法连接模型服务：{text}"}
-    return {"code": "INTERNAL_ERROR", "message": f"处理失败：{text}"}
+            cached = self._graphs.get(key)
+            if cached is not None:
+                return cached
+            # 复用已探测到的模式，避免每换一次工具子集就重新探测一遍模型能力
+            graph, mode = build_agent_graph(self._settings, mode=self._mode or None, tools=tools)
+            self._mode = mode
+            if len(self._graphs) >= _MAX_GRAPHS:
+                self._graphs.pop(next(iter(self._graphs)))
+            self._graphs[key] = (graph, mode)
+            return graph, mode

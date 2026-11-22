@@ -58,6 +58,11 @@ WEB_DIR = RESOURCE_ROOT / "web"
 # 让它们带上账号密码不现实。它只返回版本号和模型名，没有敏感信息。
 _PUBLIC_PATHS = {"/api/v1/health"}
 
+# 分享页也不鉴权：它的凭据是 URL 里那 96 bit 的 token（``secrets.token_urlsafe(12)``），
+# 本来就是发给没账号的人看的。要求 Basic Auth 会让「把行程发给朋友」直接失效——
+# 而失效时页面只会弹一个登录框，用户根本不知道是密码的问题。
+_PUBLIC_PREFIXES = ("/share/",)
+
 # 静态目录里混着 serve.py 这类源码文件，不该被当成静态资源下载走
 _BLOCKED_SUFFIXES = (".py", ".pyc")
 
@@ -103,7 +108,7 @@ class BasicAuthMiddleware:
             return
 
         path = scope.get("path", "")
-        if path in _PUBLIC_PATHS:
+        if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
             await self.app(scope, receive, send)
             return
 
@@ -125,20 +130,51 @@ class BasicAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+def _open_access_allowed() -> bool:
+    """显式允许裸奔的开关。
+
+    **默认必须是「拒绝启动」而不是「打个 warning 继续跑」。**
+
+    这个入口按文档就是 ``--host 0.0.0.0``，一旦没有密码，整个网络都能：列全部
+    会话（``GET /api/v1/sessions`` 不分用户）、删会话、用文件工具读写白名单内
+    的文件、把模型额度烧光。而原来的实现只 ``logger.warning`` 一句就继续服务——
+    警告在控制台里滚过去了，服务照常对外，等于没有防线。
+
+    失败方向要收敛到「不提供服务」：起不来是当场就能发现的事故，裸奔是半年后
+    才发现的事故。
+    """
+    return os.getenv("ALLOW_OPEN_ACCESS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def build_standalone_app(require_auth: bool = True) -> FastAPI:
     """组装单端口应用。
 
     ``require_auth=False`` 给桌面版用：那边只监听 127.0.0.1，密码不是防线而是
     一堵用户打不开的墙——``WEB_AUTH_PASS`` 是给「对外暴露一个端口」的场景准备的，
     嵌在窗口里的浏览器没法先跟他要一次 Basic Auth。
+
+    需要鉴权但没配密码时**抛异常拒绝启动**，除非显式设 ``ALLOW_OPEN_ACCESS=1``。
     """
-    app = create_app()
     user, password = _credentials()
+
+    if require_auth and not password and not _open_access_allowed():
+        raise RuntimeError(
+            "WEB_AUTH_PASS 未配置，拒绝启动。\n"
+            "这个入口监听 0.0.0.0，没有密码意味着同一网络内任何人都能读取并删除\n"
+            "全部会话历史、调用文件工具、消耗模型额度。\n"
+            "请设置环境变量 WEB_AUTH_PASS=<密码>（可选 WEB_AUTH_USER，默认 ocean）后重启。\n"
+            "确实需要无密码裸跑（例如只在内网、前面已有反代鉴权），"
+            "显式设置 ALLOW_OPEN_ACCESS=1。"
+        )
+
+    app = create_app()
 
     if require_auth and password:
         app.add_middleware(BasicAuthMiddleware, user=user, password=password)
     elif require_auth:
-        logger.warning("WEB_AUTH_PASS 未配置：接口对外完全开放，任何人都会消耗模型额度")
+        logger.warning(
+            "ALLOW_OPEN_ACCESS 已开启：接口对外完全开放，会话历史与模型额度对同网络内任何人可见"
+        )
     elif password:
         logger.warning("桌面版忽略 WEB_AUTH_PASS：服务只监听 127.0.0.1，不需要登录")
 

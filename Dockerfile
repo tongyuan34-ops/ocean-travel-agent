@@ -14,6 +14,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# 中文字体：导出 PDF 行程单要用。slim 镜像里一个中文字体都没有，
+# 缺了它 /trips/export 会直接抛「找不到中文字体」，而接口其余部分全正常。
+# 选文泉驿而不是 Noto CJK：Noto 是 CFF（PostScript）轮廓，reportlab 注册不了。
+#
+# 放在 COPY 代码之前：字体和源码无关，放后面的话每次改一行代码都会重跑 apt，
+# 国内网络下一慢就 exit 100，整个镜像重建被卡住。
+# Acquire::Retries / Timeout：拉 Debian 包经常半路超时，不设就只能重试整个构建。
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 install -y --no-install-recommends fonts-wqy-zenhei \
+    && rm -rf /var/lib/apt/lists/*
+
 # 先只装依赖，代码改动不会让这一层失效
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --no-dev
@@ -24,13 +35,9 @@ COPY web ./web
 # 知识库语料随仓库分发，检索靠它。漏掉这一行不会报错，只会让
 # search_knowledge 永远返回「知识库为空」——打包版踩过一次，这里别再踩
 COPY knowledge ./knowledge
+# 技能目录同理：漏了不报错，只是 /api/v1/health 的 skills 变 0、技能全不可用
+COPY skills ./skills
 RUN uv sync --frozen --no-dev
-
-# 中文字体：导出 PDF 行程单要用。slim 镜像里一个中文字体都没有，
-# 缺了它 /trips/export 会直接抛「找不到中文字体」，而接口其余部分全正常
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-cjk \
-    && rm -rf /var/lib/apt/lists/*
 
 # 运行期需要可写的目录：媒体产物与会话落盘
 RUN useradd --create-home --uid 10001 ocean \

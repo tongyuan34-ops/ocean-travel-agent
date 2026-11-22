@@ -32,6 +32,7 @@
     MODEL_UNAVAILABLE: '模型服务不可用，请检查网络或稍后重试',
     MODEL_TIMEOUT: '模型响应超时，可重试',
     MODEL_EMPTY_RESPONSE: '模型未返回内容，可重试',
+    MODEL_TRUNCATED: '回答被长度上限截断，请把问题拆小一些',
     MODEL_QUOTA_EXCEEDED: '模型账户欠费或额度已用尽',
     MODEL_AUTH_FAILED: '模型 API Key 无效或没有该模型权限',
     PERMISSION_DENIED: '该操作未获授权，已取消',
@@ -63,6 +64,8 @@
   var NO_RETRY = {
     MODEL_QUOTA_EXCEEDED: 1,
     MODEL_AUTH_FAILED: 1,
+    /* 截断是「这段输入就放不下」，原样重发必然复现 */
+    MODEL_TRUNCATED: 1,
     BUDGET_EXCEEDED: 1,
     PERMISSION_DENIED: 1,
     PATH_NOT_ALLOWED: 1,
@@ -78,6 +81,7 @@
     plan: '规划',
     media: '生图',
     system: '系统',
+    docs: '文档',
     plugin: '插件',
     other: '其他'
   };
@@ -88,7 +92,10 @@
     create_dir: '创建目录',
     delete_path: '删除文件 / 目录',
     set_wallpaper: '切换桌面壁纸',
-    read_file: '读取文件'
+    read_file: '读取文件',
+    edit_document: '编辑文档（只生成副本）',
+    query_sheet: '筛选结果另存为副本',
+    organize_documents: '整理文档（移动 / 重命名）'
   };
 
   var PLATFORM_TEXT = {
@@ -177,7 +184,10 @@
     // 存在会话上而不是浏览器里——换设备、清缓存后不该丢
     personas: [],
     persona: '',
-    personaDefault: ''
+    personaDefault: '',
+    // 技能：skills 是后端给的清单，skill 是当前选中项（空表示不指定，按话题自动判断）
+    skills: [],
+    skill: ''
   };
 
   var STATUS = { timer: null };
@@ -381,9 +391,10 @@
     var showImage = !!caps.image_gen;
     if (DOM.mediaBtn) DOM.mediaBtn.hidden = !showImage;
     if (DOM.composerMedia) DOM.composerMedia.hidden = !showImage;
-    /* 图片输入：上传链路就绪才放按钮。放一个点了必然失败的入口，
-       比没有入口更糟——用户会以为是自己的图有问题 */
-    if (DOM.composerAttach) DOM.composerAttach.hidden = !caps.vision;
+    /* 附件入口常驻：Word / Excel 走「摘要 + 路径」，不依赖模型能不能看图，
+       藏掉按钮等于把能用的功能一起藏了。图片和视频在选完之后再按能力拦，
+       提示写清「为什么不行」，比一个点不动的按钮好懂 */
+    if (DOM.composerAttach) DOM.composerAttach.hidden = false;
     /* 生视频不在产品范围内，界面永远不展示入口 */
   }
 
@@ -410,14 +421,29 @@
     DOM.sourceChips.innerHTML = chips.join('');
   }
 
-  /* ================= 附件：图片与视频 ================= */
+  /* ================= 附件：图片、视频、文档 ================= */
 
   var MAX_ATTACHMENTS = 6;
   var MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+  /* 文档单独一档：带图的 docx、几万行的 xlsx 很容易过 12MB。
+     与后端 app/media/uploads.py 的 MAX_DOC_BYTES 保持一致 */
+  var MAX_DOC_BYTES = 32 * 1024 * 1024;
+  /* 能传的文档后缀。和后端 DOC_SUFFIXES 对齐，改一边记得改另一边——
+     只在前端放宽会让用户白传一次再被拒 */
+  var DOC_EXTS = ['docx', 'xlsx', 'xlsm', 'doc', 'xls', 'csv', 'tsv', 'txt', 'md', 'markdown'];
   /* 视频抽几帧。4 帧足够回答「这是哪儿」「大概什么样」，
      再多只是在替同一段画面重复付 token */
   var VIDEO_FRAMES = 4;
   var attachSeq = 0;
+
+  function extOf(name) {
+    var m = /\.([a-z0-9]+)$/i.exec(name || '');
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function isDocName(name) {
+    return DOC_EXTS.indexOf(extOf(name)) >= 0;
+  }
 
   function visionReady() {
     return !!(state.caps && state.caps.vision);
@@ -434,6 +460,24 @@
       for (var j = 0; j < list.length; j++) ids.push(list[j]);
     }
     return ids;
+  }
+
+  /* 附件 id → 展示信息。气泡里要据此决定画缩略图还是文件卡片：
+     光有一串 id 是看不出哪个是 xlsx、哪个是照片的 */
+  function pendingMeta() {
+    var meta = {};
+    for (var i = 0; i < state.attachments.length; i++) {
+      var a = state.attachments[i];
+      var list = a.ids || [];
+      for (var j = 0; j < list.length; j++) {
+        meta[list[j]] = {
+          kind: a.kind === 'doc' ? 'doc' : 'image',
+          filename: a.name || '',
+          ext: a.ext || ''
+        };
+      }
+    }
+    return meta;
   }
 
   function attachmentsBusy() {
@@ -464,11 +508,11 @@
     if (!files || !files.length) return;
     var room = MAX_ATTACHMENTS - slotCount();
     if (room <= 0) {
-      toast('一条消息最多 ' + MAX_ATTACHMENTS + ' 张图');
+      toast('一条消息最多 ' + MAX_ATTACHMENTS + ' 个附件');
       return;
     }
     if (files.length > room) {
-      toast('只取了前 ' + room + ' 个，一条消息最多 ' + MAX_ATTACHMENTS + ' 张图');
+      toast('只取了前 ' + room + ' 个，一条消息最多 ' + MAX_ATTACHMENTS + ' 个附件');
     }
     var batch = [];
     for (var i = 0; i < files.length && batch.length < room; i++) batch.push(files[i]);
@@ -478,20 +522,47 @@
   function addAttachment(file) {
     var name = file.name || '';
     var isVideo = /^video\//.test(file.type || '') || /\.(mp4|mov|m4v|webm|3gp)$/i.test(name);
-    if (file.size > MAX_UPLOAD_BYTES) {
-      toast('「' + name + '」超过 12MB，换小一点的');
+    var isDoc = !isVideo && isDocName(name);
+    /* 文档按扩展名判断，不看 file.type：Office 文件在浏览器里的 MIME 极不可靠，
+       Windows 上常见空字符串或 application/octet-stream */
+    var limit = isDoc ? MAX_DOC_BYTES : MAX_UPLOAD_BYTES;
+    if (file.size > limit) {
+      toast('「' + name + '」超过 ' + Math.round(limit / 1048576) + 'MB，换小一点的');
       return;
     }
-    if (!isVideo && !/^image\//.test(file.type || '')) {
-      toast('只支持图片和视频');
+    if (!isVideo && !isDoc && !/^image\//.test(file.type || '')) {
+      toast('支持图片、视频和 Word / Excel / 文本文件');
+      return;
+    }
+    /* 文档不需要模型会看图，图片和视频需要。当前模型看不了图时，
+       与其传上去让上游报一个看不懂的错，不如当场说清楚 */
+    if ((isVideo || !isDoc) && !visionReady()) {
+      toast('当前模型不支持看图，图片和视频传不了；Word / Excel / 文本文件可以');
       return;
     }
     attachSeq += 1;
-    var entry = { key: 'a' + attachSeq, kind: isVideo ? 'video' : 'image', ids: [], preview: '', busy: true };
+    var entry = {
+      key: 'a' + attachSeq,
+      kind: isVideo ? 'video' : (isDoc ? 'doc' : 'image'),
+      name: name,
+      ext: extOf(name),
+      size: file.size,
+      ids: [],
+      preview: '',
+      busy: true
+    };
     state.attachments.push(entry);
     renderAttachStrip();
     if (isVideo) uploadVideo(entry, file);
+    else if (isDoc) uploadDoc(entry, file);
     else uploadImage(entry, file);
+  }
+
+  /* 文档没有缩略图可显示，所以不建 objectURL：传上去之后气泡里画的是文件卡片 */
+  function uploadDoc(entry, file) {
+    uploadBlob(file, file.name, function (err, data) {
+      finishAttachment(entry, err, data ? [data] : []);
+    });
   }
 
   function uploadImage(entry, file) {
@@ -582,8 +653,10 @@
     for (var i = 0; i < state.attachments.length; i++) {
       var a = state.attachments[i];
       html.push(
-        '<div class="attach-chip' + (a.busy ? ' is-busy' : '') + '" data-key="' + a.key + '">' +
+        '<div class="attach-chip' + (a.busy ? ' is-busy' : '') + (a.kind === 'doc' ? ' is-doc' : '') +
+          '" data-key="' + a.key + '"' + (a.kind === 'doc' ? ' title="' + esc(a.name) + '"' : '') + '>' +
           (a.preview ? '<img src="' + esc(a.preview) + '" alt="">' : '') +
+          (a.kind === 'doc' ? docChipBody(a.name, a.ext) : '') +
           (a.kind === 'video' ? '<span class="attach-tag">' + (a.ids.length || VIDEO_FRAMES) + ' 帧</span>' : '') +
           '<button type="button" class="attach-del" data-key="' + a.key + '" aria-label="移除">' +
             '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg>' +
@@ -592,6 +665,13 @@
       );
     }
     strip.innerHTML = html.join('');
+  }
+
+  /* 文档卡片：扩展名角标 + 文件名。不画缩略图——docx / xlsx 没有能当缩略图的画面，
+     画个通用文件图标又区分不出「合同」还是「报价单」，用户还得点开看 */
+  function docChipBody(name, ext) {
+    var label = (ext || 'file').toUpperCase();
+    return '<span class="attach-file"><b>' + esc(label) + '</b><i>' + esc(name) + '</i></span>';
   }
 
   function onAttachStripClick(event) {
@@ -954,6 +1034,85 @@
     );
   }
 
+  /* ================= 技能 ================= */
+
+  function skillOf(key) {
+    for (var i = 0; i < state.skills.length; i++) {
+      if (state.skills[i].key === key) return state.skills[i];
+    }
+    return null;
+  }
+
+  function loadSkills(cb) {
+    request('GET', '/skills', null, function (err, data) {
+      if (err || !data || !data.items || !data.items.length) {
+        // 没有技能就藏掉入口：宁可少一个按钮，也不要给一个点开是空的入口
+        state.skills = [];
+        if (DOM.skillBtn) DOM.skillBtn.hidden = true;
+        if (cb) cb();
+        return;
+      }
+      state.skills = data.items;
+      // 清单加载完之后再解析一次：历史可能比清单先回来，那时只能先把 key 记着
+      applySkill(state.skill);
+      if (cb) cb();
+    });
+  }
+
+  function applySkill(key) {
+    var item = skillOf(key);
+    // 清单还没加载完时先把 key 记着：`loadHistory` 可能比 `/skills` 先返回，
+    // 这时候直接清空会把会话上已选的技能抹掉，刷新一次就「丢了」
+    state.skill = item ? item.key : (state.skills.length ? '' : (key || ''));
+    if (DOM.skillName) {
+      DOM.skillName.textContent = item ? item.name : (state.skill ? state.skill : '技能');
+    }
+    if (DOM.skillBtn) {
+      DOM.skillBtn.hidden = !state.skills.length;
+      DOM.skillBtn.className = 'persona-switch skill-switch' + (item ? ' is-active' : '');
+      DOM.skillBtn.setAttribute(
+        'aria-label',
+        item ? '当前技能：' + item.name + '，点击切换' : '选择技能'
+      );
+    }
+  }
+
+  function switchSkill(key) {
+    key = key === '__none__' ? '' : key;
+    if (key === state.skill) return;
+    applySkill(key);
+    if (!state.sessionId) {
+      // 还没有会话：先记住选择，等 ensureSession 建完会话再写进后端
+      toast(key ? '技能已选好，发出第一条消息后生效' : '已取消技能');
+      return;
+    }
+    syncSkill(key, function () {
+      var item = skillOf(key);
+      toast(item ? '已启用「' + item.name + '」' : '已取消技能，改由助手按话题判断');
+    });
+  }
+
+  function syncSkill(key, done) {
+    // 空串也要写后端：从某个技能切回「不指定」时，跳过这一步就永远切不回来
+    if (!state.sessionId) {
+      if (done) done();
+      return;
+    }
+    request(
+      'PATCH',
+      '/chat/sessions/' + encodeURIComponent(state.sessionId) + '/skill',
+      { skill: key || '' },
+      function (err, data) {
+        if (err) {
+          toast(err.message || '切换技能失败');
+          return;
+        }
+        applySkill((data && data.skill) || '');
+        if (done) done();
+      }
+    );
+  }
+
   function sessionTitleOf(id) {
     for (var i = 0; i < state.sessions.length; i++) {
       if (state.sessions[i].id === id) return state.sessions[i].title || '新的旅程';
@@ -976,8 +1135,9 @@
     state.sessionId = '';
     lsDel(STORE.active);
     setChatTitle('新的旅程');
-    // 新会话回到默认风格：风格是会话属性，不是全局设置
+    // 新会话回到默认风格、不指定技能：两者都是会话属性，不是全局设置
     if (state.personaDefault) applyPersona(state.personaDefault);
+    applySkill('');
     clearMessages();
     renderEmpty();
     renderSessions();
@@ -994,13 +1154,20 @@
       state.sessionId = data.session_id;
       lsSet(STORE.active, data.session_id);
       upsertSession(data.session_id, '新的旅程', new Date(data.created_at || Date.now()).getTime());
-      // 用户可能在建会话之前就选好了风格，这时候才写进后端；
-      // 不这么做，第一条消息会用默认风格回答，选了个寂寞
+      // 用户可能在建会话之前就选好了风格/技能，这时候才写进后端；
+      // 不这么做，第一条消息会用默认设置回答，选了个寂寞
+      var afterPersona = function () {
+        if (state.skill) {
+          syncSkill(state.skill, function () { cb(null, state.sessionId); });
+          return;
+        }
+        cb(null, state.sessionId);
+      };
       if (state.persona && state.persona !== state.personaDefault) {
-        syncPersona(state.persona, function () { cb(null, state.sessionId); });
+        syncPersona(state.persona, afterPersona);
         return;
       }
-      cb(null, data.session_id);
+      afterPersona();
     });
   }
 
@@ -1062,7 +1229,7 @@
       '</div>';
   }
 
-  function appendUser(text, attachments) {
+  function appendUser(text, attachments, meta) {
     var node = document.createElement('div');
     var hasMedia = !!(attachments && attachments.length);
     node.className = hasMedia ? 'msg msg-user has-media' : 'msg msg-user';
@@ -1070,8 +1237,20 @@
     if (attachments && attachments.length) {
       html += '<div class="msg-thumbs">';
       for (var i = 0; i < attachments.length; i++) {
-        /* 用服务端地址而不是本地 objectURL：刷新后还能显示，也不用管生命周期 */
-        html += '<img src="' + esc(uploadUrl(attachments[i])) + '" alt="" loading="lazy">';
+        var info = (meta && meta[attachments[i]]) || null;
+        if (info && info.kind === 'doc') {
+          /* 文档画成可点开的卡片：点一下下载，用户能确认自己传的是哪一份。
+             画 <img> 只会得到一个裂图 */
+          var name = info.filename || '附件';
+          html +=
+            '<a class="msg-file" href="' + esc(uploadUrl(attachments[i])) + '"' +
+              ' download="' + esc(name) + '" title="' + esc(name) + '">' +
+              docChipBody(name, info.ext || extOf(name)) +
+            '</a>';
+        } else {
+          /* 用服务端地址而不是本地 objectURL：刷新后还能显示，也不用管生命周期 */
+          html += '<img src="' + esc(uploadUrl(attachments[i])) + '" alt="" loading="lazy">';
+        }
       }
       html += '</div>';
     }
@@ -1254,8 +1433,9 @@
         return;
       }
       box.innerHTML = '';
-      // 风格跟着会话走：刷新页面后靠它恢复，不用重选
+      // 风格与技能都跟着会话走：刷新页面后靠它们恢复，不用重选
       applyPersona((data && data.persona) || state.personaDefault);
+      applySkill((data && data.skill) || '');
       var items = (data && data.items) || [];
       if (!items.length) { renderEmpty(); return; }
       /* 记着上一条用户消息：告警卡片上的「重试这一轮」要用它 */
@@ -1263,7 +1443,7 @@
       for (var i = 0; i < items.length; i++) {
         if (items[i].role === 'user') {
           lastUser = items[i].content || '';
-          appendUser(lastUser, items[i].attachments || []);
+          appendUser(lastUser, items[i].attachments || [], items[i].attachment_meta || {});
         } else {
           appendAssistantText(
             items[i].content || '',
@@ -1878,7 +2058,7 @@
       input.setAttribute('placeholder', personaEmpty().placeholder);
       var has = !!(state.caps && state.caps.image_gen);
       if (DOM.composerMedia) DOM.composerMedia.hidden = !has;
-      if (DOM.composerAttach) DOM.composerAttach.hidden = !visionReady();
+      if (DOM.composerAttach) DOM.composerAttach.hidden = false;
     }
     checkSendable();
   }
@@ -1887,17 +2067,17 @@
     text = trim(text);
     var ids = pendingIds();
     if ((!text && !ids.length) || state.streaming) return;
-    if (attachmentsBusy()) { toast('图片还在上传，稍等一下'); return; }
+    if (attachmentsBusy()) { toast('附件还在上传，稍等一下'); return; }
     ensureSession(function (err, id) {
       if (err) { toast(err.message); return; }
       if (DOM.messages && DOM.messages.querySelector('.empty')) DOM.messages.innerHTML = '';
-      appendUser(text, ids);
+      appendUser(text, ids, pendingMeta());
       stickNow();
       var meta = null;
       for (var i = 0; i < state.sessions.length; i++) {
         if (state.sessions[i].id === id) { meta = state.sessions[i]; break; }
       }
-      var label = text || (ids.length > 1 ? '[' + ids.length + ' 张图]' : '[图片]');
+      var label = text || (ids.length > 1 ? '[' + ids.length + ' 个附件]' : '[附件]');
       if (meta && (meta.title === '新的旅程' || !meta.title)) {
         var title = label.length > 20 ? label.slice(0, 20) + '…' : label;
         meta.title = title;
@@ -1995,8 +2175,8 @@
       } else if (ev.type === 'permission_request') {
         showPermission(ev);
       } else if (ev.type === 'retry') {
-        /* 自愈重跑：服务端认定上一轮「只说了做、其实没做」，那段文字已作废。
-           这里必须把已经画出来的正文和工具卡片清掉——否则用户会看到两段
+        /* 服务端重跑：可能是「只说了做、其实没做」的自愈，也可能是上游空包。
+           上一轮的文字与工具卡片一律作废，必须清掉——否则用户会看到两段
            回答首尾相接，还以为模型真的说了这么多。 */
         gotText = '';
         for (var oldId in cards) {
@@ -3130,6 +3310,61 @@
     }
   };
 
+  SHEETS.skill = {
+    kicker: 'SKILLS',
+    title: '技能',
+    render: function (body) {
+      if (!state.skills.length) {
+        body.innerHTML = '<p class="sheet-note">暂时没有可用技能，请检查后端连接。</p>';
+        return;
+      }
+      function item(key, name, latin, text, active) {
+        return (
+          '<button type="button" class="persona-item' + (active ? ' is-active' : '') +
+            '" data-skill="' + esc(key) + '">' +
+            '<span class="persona-item-main">' +
+              '<span class="persona-item-name">' + esc(name) + '</span>' +
+              '<span class="persona-item-latin">' + esc(latin) + '</span>' +
+              '<span class="persona-item-text">' + esc(text) + '</span>' +
+            '</span>' +
+            '<span class="persona-item-mark"><svg viewBox="0 0 12 12" aria-hidden="true">' +
+              '<path d="M2 6.4l2.6 2.6L10 3.4"/></svg></span>' +
+          '</button>'
+        );
+      }
+      var html = [
+        '<p class="sheet-note">技能会把一类问题按固定步骤处理，必要时调用模板与专属工具。不指定也可以，助手会根据话题自己判断。</p>',
+        '<div class="persona-list">',
+        item('__none__', '不使用技能', 'AUTO', '按话题自动判断，适合日常问答', !state.skill)
+      ];
+      for (var i = 0; i < state.skills.length; i++) {
+        var skill = state.skills[i];
+        html.push(
+          item(
+            skill.key,
+            skill.name,
+            skill.key.toUpperCase(),
+            skill.description + (skill.has_tools ? '（含专属工具）' : ''),
+            skill.key === state.skill
+          )
+        );
+      }
+      html.push('</div>');
+      body.innerHTML = html.join('');
+      body.onclick = function (e) {
+        var target = e.target;
+        while (target && target !== body && !target.getAttribute('data-skill')) {
+          target = target.parentNode;
+        }
+        if (!target || target === body) return;
+        closeSheet();
+        switchSkill(target.getAttribute('data-skill') === '__none__'
+          ? ''
+          : target.getAttribute('data-skill'));
+      };
+    }
+  };
+
   SHEETS.media = {
     kicker: 'IMAGE STUDIO',
     title: '生成旅行图片',
@@ -3218,6 +3453,7 @@
     if (DOM.attachFile) DOM.attachFile.onchange = onFilesPicked;
     if (DOM.attachStrip) DOM.attachStrip.onclick = onAttachStripClick;
     DOM.personaBtn.onclick = function () { openSheet('persona'); };
+    if (DOM.skillBtn) DOM.skillBtn.onclick = function () { openSheet('skill'); };
     DOM.railToggle.onclick = openRail;
     DOM.railScrim.onclick = closeRail;
     DOM.conn.onclick = function () {
@@ -3340,6 +3576,8 @@
     DOM.chatKicker = $('#chatKicker');
     DOM.personaBtn = $('#personaBtn');
     DOM.personaName = $('#personaName');
+    DOM.skillBtn = $('#skillBtn');
+    DOM.skillName = $('#skillName');
     DOM.sourceChips = $('#sourceChips');
     DOM.mediaBtn = $('#mediaBtn');
     DOM.capBtn = $('#capBtn');
@@ -3386,8 +3624,9 @@
 
     loadCapabilities(function () { applyCapabilities(); });
     loadTools();
-    // 风格列表由后端提供：新增一种风格时只改后端，前端不用发版
+    // 风格与技能列表都由后端提供：新增一种时只改后端，前端不用发版
     loadPersonas();
+    loadSkills();
 
     var active = lsGet(STORE.active, '');
     if (active) {

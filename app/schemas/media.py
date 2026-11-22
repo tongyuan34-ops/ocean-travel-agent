@@ -52,7 +52,7 @@ class ImageTemplateList(BaseModel):
 
 
 class UploadOut(BaseModel):
-    """一张已接收的图片。
+    """一个已接收的附件。
 
     ``url`` 由服务端给出而不是前端拼：路径里带设备维度以后，
     前端不该知道 URL 长什么样。
@@ -65,3 +65,7 @@ class UploadOut(BaseModel):
     bytes: int
     # 服务端重新编码后的实际格式，可能和上传时不同（PNG 太大被压成 JPEG）
     format: str = Field(description="jpg 或 png")
+    # image / doc。前端据此决定渲染缩略图还是文件卡片——文档没有缩略图可显示
+    kind: str = "image"
+    # 用户的原文件名，文档卡片上要显示它；图片留着方便排查「传错了哪张」
+    filename: str = ""

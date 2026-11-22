@@ -12,10 +12,9 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.agent.guard import DANGEROUS_TOOLS
-from app.core.config import load_settings
 from app.mcp.registry import all_tools
 from app.schemas.tools import ToolItem, ToolList
-from app.services.chat import tool_category
+from app.services.turn_events import tool_category
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -83,7 +82,9 @@ def _description(tool) -> str:
 @router.get("", response_model=ToolList)
 async def list_tools(request: Request) -> ToolList:
     """返回工具清单。category 与 SSE tool_call 事件里的取值保持一致。"""
-    settings = load_settings()
+    # 用启动时加载好的配置，不再每次 load_settings()：那要读 .env 与
+    # config.json 并重建七十多个字段，实测 22ms，而这是一个纯展示接口
+    settings = request.app.state.settings
     media_caps = request.app.state.media.capabilities()
     items = [
         ToolItem(

@@ -40,6 +40,8 @@ CODE_TO_HTTP: dict[str, int] = {
     "MODEL_AUTH_FAILED": 401,
     "MODEL_UNAVAILABLE": 502,
     "MODEL_EMPTY_RESPONSE": 502,
+    # 输出撞上长度上限：这不是服务故障，重试同一段 prompt 必然复现
+    "MODEL_TRUNCATED": 502,
     "MEDIA_UPSTREAM_ERROR": 502,
     "MEDIA_BACKEND_MISSING": 503,
     "SESSION_EXPIRED": 503,
@@ -60,6 +62,12 @@ TOOL_ERROR_PREFIXES: tuple[str, ...] = (
     "INVALID_REQUEST",
     "SEARCH_FAILED",
     "KNOWLEDGE_EMPTY",
+    # 文档组三个码分开：读失败（格式不支持/文件损坏）、改失败（操作没生效）、
+    # 整理失败（规则为空/移动出错）——模型对这三种的纠正动作完全不同，
+    # 合成一个 DOC_FAILED 只会让它盲目重试
+    "DOC_READ_FAILED",
+    "DOC_EDIT_FAILED",
+    "DOC_ORGANIZE_FAILED",
     # 外部 MCP 工具失败：前缀在这里而不在 client.py 里定义，
     # 否则 SSE 的 tool_result 会把它记成 ok，前端显示成功、模型看到失败
     "MCP_TOOL_FAILED",

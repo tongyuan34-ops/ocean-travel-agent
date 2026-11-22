@@ -84,10 +84,10 @@ def test_session_without_messages_still_has_a_title(client) -> None:
 
 def test_long_first_message_is_truncated() -> None:
     """侧栏一行放不下长标题；截断规则要和前端发送后显示的那版一致。"""
-    from app.services.chat import _session_title
+    from app.services.sessions import session_title
 
     session = _session("s1", "请" * 60, "2026-11-05T09:00:00+00:00")
 
-    title = _session_title(session)
+    title = session_title(session)
     assert len(title) == 21  # 20 字 + 省略号
     assert title.endswith("…")

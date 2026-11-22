@@ -177,21 +177,25 @@ def test_missing_attachment_is_skipped_not_fatal(tmp_path):
     """
     from app.core.config import load_settings
     from app.services.chat import ChatService
+    from app.services.sessions import SessionService
     from app.storage import MemorySessionStore
 
     store = UploadStore(tmp_path)
     item = store.save_image(png_bytes(100, 100, alpha=True), "device-1")
-    service = ChatService(load_settings(), MemorySessionStore(), uploads=store)
+    service = ChatService(load_settings(), SessionService(MemorySessionStore()), uploads=store)
 
-    blocks = service._image_blocks([item.id, "0" * 32])
+    blocks, images = service._context.attachment_blocks([item.id, "0" * 32])
     assert len(blocks) == 1
     assert blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    # 同时返回图片 data URL 列表：生图工具拿它当参考图，模型看不见 upload_id
+    assert images == [blocks[0]["image_url"]["url"]]
 
 
 def test_no_uploads_configured_yields_no_blocks():
     from app.core.config import load_settings
     from app.services.chat import ChatService
+    from app.services.sessions import SessionService
     from app.storage import MemorySessionStore
 
-    service = ChatService(load_settings(), MemorySessionStore())
-    assert service._image_blocks(["0" * 32]) == []
+    service = ChatService(load_settings(), SessionService(MemorySessionStore()))
+    assert service._context.attachment_blocks(["0" * 32]) == ([], [])

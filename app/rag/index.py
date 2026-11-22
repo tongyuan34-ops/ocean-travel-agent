@@ -20,13 +20,34 @@
    （``evals/retrieval.py --sweep`` 实测：0.20～0.55 之间结果完全一样，
    0.60 开始才伤到 recall@3。）
 3. **稳定排序**：同分按块 id 排。检索结果必须可复现，否则测试和线上对不上。
+
+**为什么倒排是 CSR 数组而不是 dict[str, dict[int, int]]**
+
+几十个块时两者没差别，摊到十万块就是「能不能跑起来」的差别：
+
+- ``dict[str, dict[int, int]]``：每个 posting 是一个 Python dict 条目，
+  十万块 × 每块几百个唯一 term ≈ 两三千万条，光是每个条目的对象头就要
+  2~3 GB，而且建索引时峰值更高。
+- CSR（``indptr`` + ``docs`` + ``tfs`` 三个 ``array``）：同样两三千万条
+  每条只占 4+2 字节，约 150 MB，且是连续内存，遍历时没有指针跳转。
+
+搜一条查询仍然只碰命中的那几个 term 的倒排段，所以检索延迟跟语料规模
+基本无关——这是「大规模」和「小规模」必须分开建索引的原因。
+
+索引可以落盘（``save`` / ``load``）：十万块的构建是分钟级，落盘后加载
+是秒级。落盘格式用 pickle 的「数组 + 元数据」，不序列化任何 Python 对象图，
+保证加载时间跟内容长度线性相关而不是跟对象数量相关。
 """
 
 from __future__ import annotations
 
 import math
+import os
+import pickle
+from array import array
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.rag.chunk import Chunk
 from app.rag.tokenize import tokenize
@@ -44,6 +65,12 @@ RELATIVE_FLOOR = 0.35
 # 没有额外收益，只是把标题权重推得更高）。
 FIELD_BOOST = 3
 
+# 落盘格式版本。改了倒排布局就 +1，避免读到不兼容的旧文件。
+INDEX_VERSION = 1
+# tf 用 unsigned short 存：单个块里一个 term 出现 65535 次以上没有意义，
+# 而且中文块只有几百字。超出时截断，不影响排序（tf 已远超饱和区）。
+_TF_MAX = 65535
+
 
 @dataclass(frozen=True)
 class Hit:
@@ -52,7 +79,7 @@ class Hit:
 
 
 class BM25Index:
-    """在内存里建倒排索引。语料是几十到几百块，构建一次不到毫秒级。"""
+    """BM25 倒排索引。小块在内存里建，大块可以落盘复用。"""
 
     def __init__(
         self,
@@ -66,9 +93,16 @@ class BM25Index:
         self._k1 = k1
         self._b = b
         self._field_boost = field_boost
+        self._build()
 
-        postings: dict[str, dict[int, int]] = {}
-        lengths: list[int] = []
+    # ---------------- 构建 ----------------
+
+    def _build(self) -> None:
+        # 先用「term -> 交错存放的 [doc, tf, doc, tf, ...]」做中间态：
+        # 追加速度最快，且每个 term 只占一个 array 对象。
+        raw: dict[str, array[int]] = {}
+        lengths = array("I")
+
         for index, chunk in enumerate(self._chunks):
             # 字段加权（BM25F 的简化版）：文件名和标题里出现的词权重加倍。
             # 用户提问用的词往往正是它们（「亲子」「预算」「雨天」），
@@ -80,19 +114,62 @@ class BM25Index:
                 counts[term] += self._field_boost * count
             lengths.append(len(body_terms) + len(field_terms))
             for term, count in counts.items():
-                postings.setdefault(term, {})[index] = count
+                posting = raw.get(term)
+                if posting is None:
+                    posting = raw[term] = array("I")
+                posting.append(index)
+                posting.append(min(count, _TF_MAX))
 
-        self._postings = postings
+        # term id 按字典序分配：同样的语料每次构建出同样的索引文件，
+        # 落盘指纹才有意义（否则同样内容会生成不同的字节）。
+        ordered = sorted(raw)
+        terms: dict[str, int] = {}
+        indptr = array("I", [0])
+        docs = array("I")
+        tfs = array("H")
+        for term_id, term in enumerate(ordered):
+            terms[term] = term_id
+            posting = raw[term]
+            docs.extend(posting[0::2])
+            # array 的切片保持原类型（I），直接 extend 到 H 会报类型不符，
+            # 这里显式转一次。tf 已经在写入时截断到 _TF_MAX，不会溢出。
+            tfs.extend(array("H", posting[1::2]))
+            indptr.append(len(docs))
+        raw.clear()
+
+        self._terms = terms
+        self._indptr = indptr
+        self._docs = docs
+        self._tfs = tfs
         self._lengths = lengths
         self._avg_length = (sum(lengths) / len(lengths)) if lengths else 0.0
         self._total = len(self._chunks)
+
+    # ---------------- 检索 ----------------
 
     @property
     def size(self) -> int:
         return self._total
 
+    @property
+    def chunks(self) -> list[Chunk]:
+        """索引里的全部检索单元。缓存复用时不重新切块，由这里取回。"""
+        return self._chunks
+
+    @property
+    def term_count(self) -> int:
+        return len(self._terms)
+
+    @property
+    def posting_count(self) -> int:
+        """倒排条目总数，用来看索引到底多大。"""
+        return len(self._docs)
+
     def _idf(self, term: str) -> float:
-        df = len(self._postings.get(term, ()))
+        term_id = self._terms.get(term)
+        if term_id is None:
+            return 0.0
+        df = self._indptr[term_id + 1] - self._indptr[term_id]
         if df == 0:
             return 0.0
         return math.log(1 + (self._total - df + 0.5) / (df + 0.5))
@@ -106,16 +183,25 @@ class BM25Index:
             return []
 
         scores: dict[int, float] = {}
+        indptr = self._indptr
+        docs = self._docs
+        tfs = self._tfs
+        lengths = self._lengths
+        avg_length = self._avg_length or 1
+
         for term in set(terms):
-            posting = self._postings.get(term)
-            if not posting:
+            term_id = self._terms.get(term)
+            if term_id is None:
                 continue
-            idf = self._idf(term)
-            for doc, tf in posting.items():
-                length = self._lengths[doc] or 1
-                denominator = tf + self._k1 * (
-                    1 - self._b + self._b * length / (self._avg_length or 1)
-                )
+            start = indptr[term_id]
+            end = indptr[term_id + 1]
+            df = end - start
+            idf = math.log(1 + (self._total - df + 0.5) / (df + 0.5))
+            for position in range(start, end):
+                doc = docs[position]
+                tf = tfs[position]
+                length = lengths[doc] or 1
+                denominator = tf + self._k1 * (1 - self._b + self._b * length / avg_length)
                 scores[doc] = scores.get(doc, 0.0) + idf * tf * (self._k1 + 1) / denominator
 
         if not scores:
@@ -128,3 +214,56 @@ class BM25Index:
             for doc, score in ranked[:limit]
             if score >= cutoff
         ]
+
+    # ---------------- 落盘 ----------------
+
+    def save(self, path: str | Path) -> int:
+        """把索引写到磁盘，返回文件字节数。写入走临时文件再改名，避免半截文件。"""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": INDEX_VERSION,
+            "k1": self._k1,
+            "b": self._b,
+            "field_boost": self._field_boost,
+            "terms": self._terms,
+            "indptr": self._indptr,
+            "docs": self._docs,
+            "tfs": self._tfs,
+            "lengths": self._lengths,
+            "avg_length": self._avg_length,
+            # 用元组而不是 Chunk 对象：十万个 dataclass 的 pickle 要走
+            # 逐个 __reduce__，比按位置拆成元组慢一个数量级。
+            "chunks": [(c.id, c.source, c.heading, c.text) for c in self._chunks],
+        }
+        temp = target.with_name(target.name + ".tmp")
+        with open(temp, "wb") as handle:
+            pickle.dump(payload, handle, protocol=5)
+        os.replace(temp, target)
+        return target.stat().st_size
+
+    @classmethod
+    def load(cls, path: str | Path) -> BM25Index:
+        """从磁盘恢复索引。格式不兼容时抛 ``ValueError``，由调用方决定重建。"""
+        with open(path, "rb") as handle:
+            payload = pickle.load(handle)
+        if payload.get("version") != INDEX_VERSION:
+            raise ValueError(
+                f"索引格式版本不符：文件 {payload.get('version')}，期望 {INDEX_VERSION}"
+            )
+        index = cls.__new__(cls)
+        index._chunks = [
+            Chunk(id=cid, source=src, heading=head, text=text)
+            for cid, src, head, text in payload["chunks"]
+        ]
+        index._k1 = payload["k1"]
+        index._b = payload["b"]
+        index._field_boost = payload["field_boost"]
+        index._terms = payload["terms"]
+        index._indptr = payload["indptr"]
+        index._docs = payload["docs"]
+        index._tfs = payload["tfs"]
+        index._lengths = payload["lengths"]
+        index._avg_length = payload["avg_length"]
+        index._total = len(index._chunks)
+        return index

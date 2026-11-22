@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "旅行规划助手后端",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/api/v1/health": {
@@ -51,13 +51,79 @@
         }
       }
     },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Metrics Json",
+        "description": "指标快照。字段见 ``app/core/metrics.py`` 的 ``snapshot()``。",
+        "operationId": "metrics_json_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Metrics Json Api V1 Metrics Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat/personas": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "List Personas",
+        "description": "可选对话风格。\n\n由后端提供而不是前端写死：新增一种风格时只改一处，\n前端不需要发版。列表里不含 prompt 正文——那是内部实现。",
+        "operationId": "list_personas_api_v1_chat_personas_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/chat/sessions": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "List Sessions",
+        "description": "列出**本租户**的会话，最近的排前面。\n\n会话列表必须由后端给：桌面版每次启动的端口是随机的，localStorage 按\n源（含端口）隔离，重开程序后前端自己记的列表是空的——用户会以为历史\n消息丢了，实际数据一直在 ``data/sessions.json`` 里。",
+        "operationId": "list_sessions_api_v1_chat_sessions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "chat"
         ],
         "summary": "Create Session",
-        "description": "创建会话。",
+        "description": "创建会话。会话在创建时盖上租户，之后只对该租户可见。",
         "operationId": "create_session_api_v1_chat_sessions_post",
         "responses": {
           "200": {
@@ -156,7 +222,7 @@
           "chat"
         ],
         "summary": "Send Message",
-        "description": "发送消息，以 SSE 流式返回回答。",
+        "description": "发送消息，以 SSE 流式返回回答。\n\n生成在后台任务里跑，连接断开不会中断回答；/streams/{id} 可续传。",
         "operationId": "send_message_api_v1_chat_sessions__session_id__messages_post",
         "parameters": [
           {
@@ -201,6 +267,422 @@
         }
       }
     },
+    "/api/v1/chat/sessions/{session_id}/persona": {
+      "patch": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Set Persona",
+        "description": "切换本会话的对话风格。\n\n只影响后续轮次，不改历史消息——已经聊过的内容按当时的风格生成，\n这是事实，不该被追溯修改。",
+        "operationId": "set_persona_api_v1_chat_sessions__session_id__persona_patch",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonaUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat/sessions/{session_id}/skill": {
+      "patch": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Set Skill",
+        "description": "切换本会话固定使用的技能。空串表示回到「不指定」。\n\n与风格切换不同，未知技能会返回 INVALID_REQUEST：技能会带来额外的工具\n和提示词，静默回落到默认会让用户以为它正在生效。",
+        "operationId": "set_skill_api_v1_chat_sessions__session_id__skill_patch",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat/sessions/{session_id}/usage": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Get Usage",
+        "description": "会话累计 token 与成本，供前端展示用量。",
+        "operationId": "get_usage_api_v1_chat_sessions__session_id__usage_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat/streams/{stream_id}": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Resume Stream",
+        "description": "断线续传：重放 last_event_id 之后的事件，并继续推送。",
+        "operationId": "resume_stream_api_v1_chat_streams__stream_id__get",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Stream Id"
+            }
+          },
+          {
+            "name": "last_event_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Last Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat/streams/{stream_id}/cancel": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Cancel Stream",
+        "description": "用户主动停止：终止后台生成，不保存半截回答。\n\n跨进程部署时这次请求可能落到生成端以外的那台机器上，此时只能写取消标记，\n由生成端轮询退出——所以是 await，不再是同步调用。",
+        "operationId": "cancel_stream_api_v1_chat_streams__stream_id__cancel_post",
+        "parameters": [
+          {
+            "name": "stream_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Stream Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Cancel Stream Api V1 Chat Streams  Stream Id  Cancel Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Get Memory",
+        "description": "读取当前设备的正式偏好。",
+        "operationId": "get_memory_api_v1_memory_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Clear Memory",
+        "description": "清空当前设备的全部偏好。",
+        "operationId": "clear_memory_api_v1_memory_delete",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/api/v1/memory/items": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Add Memory",
+        "description": "用户确认后写入偏好（判重、最多 20 条）。",
+        "operationId": "add_memory_api_v1_memory_items_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/items/{item_id}": {
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Delete Memory",
+        "description": "删除一条偏好。",
+        "operationId": "delete_memory_api_v1_memory_items__item_id__delete",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/suggestions": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Get Suggestions",
+        "description": "读取最近一轮抽取出的待确认候选。",
+        "operationId": "get_suggestions_api_v1_memory_suggestions_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemorySuggestionList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Dismiss Suggestions",
+        "description": "忽略候选，不写入偏好。",
+        "operationId": "dismiss_suggestions_api_v1_memory_suggestions_delete",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/api/v1/skills": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "List Skills",
+        "operationId": "list_skills_api_v1_skills_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tools": {
       "get": {
         "tags": [
@@ -229,7 +711,7 @@
           "permissions"
         ],
         "summary": "Decide",
-        "description": "前端对 permission_request 的裁决。\n\n未找到或已处理的 request_id 一律拒绝，不做任何默认放行。",
+        "description": "前端对 permission_request 的裁决。\n\n未找到或已处理的 request_id 一律拒绝，不做任何默认放行。\n\n裁决不再需要「找到持有该请求的那个 broker」——多进程下这次 POST\n可能落在任何一台机器上。裁决写进共享通道，由真正在等的那一端取走。",
         "operationId": "decide_api_v1_permissions__request_id__decision_post",
         "parameters": [
           {
@@ -424,6 +906,426 @@
           }
         }
       }
+    },
+    "/api/v1/media/tasks/{task_id}/image": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Get Task Image",
+        "description": "返回生成图本身，供页面内直接预览或下载。\n\n优先读项目 media/ 下的本地成品（重启后任务丢失也能看），\n其次用服务端代取上游临时链接，避免浏览器跨域与 24 小时过期问题。",
+        "operationId": "get_task_image_api_v1_media_tasks__task_id__image_get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Download"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/uploads": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Create Upload",
+        "description": "接收一个附件（图片或文档），落盘后返回 id。\n\n直读请求体而不是 multipart：一次只传一个，省一个依赖和一个解析器。\n前端用 ``xhr.send(file)`` 发，``Content-Type`` 就是文件本身的类型。\n\n**分流看扩展名，不看 Content-Type**。Office 文件的类型在浏览器里极不可靠：\nWindows 上 .xlsx 常见 ``application/octet-stream``，某些环境给\n``application/zip``，还有给空字符串的。扩展名是用户看得见的那一层，\n而且我们本来就要拿它决定落盘文件名。",
+        "operationId": "create_upload_api_v1_media_uploads_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadOut"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/uploads/{upload_id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Get Upload",
+        "description": "取回原图（已规范化）。前端缩略图与气泡里的预览都走这里。\n\n**不校验设备 ID**，这是刻意的：``<img src>`` 带不了自定义请求头，\n校验了就等于让页面里的图全都 403。32 位十六进制随机 id 本身就是凭证，\n和 S3 预签名链接一个思路——拿到链接就能看，拿不到就猜不着。\n写操作（DELETE）仍然校验归属，因为那是 XHR，能带头。",
+        "operationId": "get_upload_api_v1_media_uploads__upload_id__get",
+        "parameters": [
+          {
+            "name": "upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Upload Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Delete Upload",
+        "description": "用户把附件从输入框里删掉时调用，避免落一堆没人用的图。",
+        "operationId": "delete_upload_api_v1_media_uploads__upload_id__delete",
+        "parameters": [
+          {
+            "name": "upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Upload Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/map": {
+      "get": {
+        "tags": [
+          "trips"
+        ],
+        "summary": "Trip Map",
+        "description": "按地点顺序生成静态地图；服务端缓存，同一条线路只请求高德一次。",
+        "operationId": "trip_map_api_v1_trips_map_get",
+        "parameters": [
+          {
+            "name": "stops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "按顺序排列的地点名称，可重复传参",
+              "default": [],
+              "title": "Stops"
+            },
+            "description": "按顺序排列的地点名称，可重复传参"
+          },
+          {
+            "name": "city",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "City"
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Origin"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/files/{name}": {
+      "get": {
+        "tags": [
+          "trips"
+        ],
+        "summary": "Trip File",
+        "description": "把生成好的 PDF / 路线图发给前端。\n\n导出接口是「点一下就下载」，而助手侧的工具只能给一个链接——窗口里的\n浏览器要能把那份文件取回来，就得有个按名字取的地方。\n\n只认自己生成的文件名（``_FILE_NAME`` 白名单），不接受路径分隔符，\n所以拼不出 ``../`` 之类的越界读取。",
+        "operationId": "trip_file_api_v1_trips_files__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/export": {
+      "post": {
+        "tags": [
+          "trips"
+        ],
+        "summary": "Export Trip",
+        "description": "把行程渲染成 A4 PDF；地图失败时仍然出文档。",
+        "operationId": "export_trip_api_v1_trips_export_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TripPlan"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/export/ics": {
+      "post": {
+        "tags": [
+          "trips"
+        ],
+        "summary": "Export Ics",
+        "description": "每个地点一个日历事件；没有日期时从明天开始逐天排列。",
+        "operationId": "export_ics_api_v1_trips_export_ics_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TripPlan"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/share": {
+      "post": {
+        "tags": [
+          "trips"
+        ],
+        "summary": "Create Share",
+        "description": "生成只读分享页，返回相对路径；前端用当前域名拼完整链接。",
+        "operationId": "create_share_api_v1_trips_share_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TripPlan"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Create Share Api V1 Trips Share Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/share/{token}": {
+      "get": {
+        "tags": [
+          "share"
+        ],
+        "summary": "Share Page",
+        "operationId": "share_page_share__token__get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -578,6 +1480,133 @@
         ],
         "title": "ImageTemplateList"
       },
+      "MemoryItemIn": {
+        "properties": {
+          "category": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Category",
+            "default": "其他"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "MemoryItemIn"
+      },
+      "MemoryItemOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "category",
+          "text",
+          "created_at"
+        ],
+        "title": "MemoryItemOut"
+      },
+      "MemoryItemsRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryItemIn"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MemoryItemsRequest"
+      },
+      "MemoryList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryItemOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MemoryList"
+      },
+      "MemorySuggestion": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "category",
+          "text"
+        ],
+        "title": "MemorySuggestion"
+      },
+      "MemorySuggestionList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemorySuggestion"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MemorySuggestionList"
+      },
       "MessageItem": {
         "properties": {
           "id": {
@@ -595,6 +1624,46 @@
           "created_at": {
             "type": "string",
             "title": "Created At"
+          },
+          "media_task_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Media Task Ids"
+          },
+          "usage": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Usage"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "title": "Latency Ms",
+            "default": 0
+          },
+          "attachments": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Attachments"
+          },
+          "attachment_meta": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Attachment Meta"
+          },
+          "warnings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Warnings"
           }
         },
         "type": "object",
@@ -614,6 +1683,16 @@
             },
             "type": "array",
             "title": "Items"
+          },
+          "persona": {
+            "type": "string",
+            "title": "Persona",
+            "default": "concierge"
+          },
+          "skill": {
+            "type": "string",
+            "title": "Skill",
+            "default": ""
           }
         },
         "type": "object",
@@ -627,16 +1706,101 @@
           "message": {
             "type": "string",
             "maxLength": 4000,
-            "minLength": 1,
             "title": "Message",
-            "description": "用户输入"
+            "description": "用户输入",
+            "default": ""
+          },
+          "attachments": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 6,
+            "title": "Attachments",
+            "description": "图片 upload_id 列表"
+          }
+        },
+        "type": "object",
+        "title": "MessageRequest"
+      },
+      "PersonaItem": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "latin": {
+            "type": "string",
+            "title": "Latin"
+          },
+          "tagline": {
+            "type": "string",
+            "title": "Tagline"
           }
         },
         "type": "object",
         "required": [
-          "message"
+          "key",
+          "name",
+          "latin",
+          "tagline"
         ],
-        "title": "MessageRequest"
+        "title": "PersonaItem",
+        "description": "一种对话风格。不暴露 prompt 正文，那是内部实现。"
+      },
+      "PersonaList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PersonaItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "default": {
+            "type": "string",
+            "title": "Default"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "default"
+        ],
+        "title": "PersonaList"
+      },
+      "PersonaOut": {
+        "properties": {
+          "persona": {
+            "type": "string",
+            "title": "Persona"
+          }
+        },
+        "type": "object",
+        "required": [
+          "persona"
+        ],
+        "title": "PersonaOut"
+      },
+      "PersonaUpdate": {
+        "properties": {
+          "persona": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Persona",
+            "description": "风格 key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "persona"
+        ],
+        "title": "PersonaUpdate"
       },
       "SessionCreated": {
         "properties": {
@@ -655,6 +1819,146 @@
           "created_at"
         ],
         "title": "SessionCreated"
+      },
+      "SessionItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          },
+          "message_count": {
+            "type": "integer",
+            "title": "Message Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "created_at",
+          "updated_at",
+          "message_count"
+        ],
+        "title": "SessionItem",
+        "description": "会话列表里的一行。\n\n标题由后端从首条用户消息里截，不在前端拼：前端只看得见 localStorage 里\n自己记的那份，换端口/换设备就空了，标题会退化成「新的旅程」。"
+      },
+      "SessionList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "SessionList"
+      },
+      "SkillItem": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "triggers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Triggers"
+          },
+          "has_tools": {
+            "type": "boolean",
+            "title": "Has Tools",
+            "default": false
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tools"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "description"
+        ],
+        "title": "SkillItem",
+        "description": "一个可用技能。不暴露完整步骤正文——那是内部实现，前端只需要展示字段。"
+      },
+      "SkillList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SkillItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "SkillList"
+      },
+      "SkillOut": {
+        "properties": {
+          "skill": {
+            "type": "string",
+            "title": "Skill"
+          }
+        },
+        "type": "object",
+        "required": [
+          "skill"
+        ],
+        "title": "SkillOut"
+      },
+      "SkillUpdate": {
+        "properties": {
+          "skill": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Skill",
+            "description": "技能 key，空串表示不指定",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "SkillUpdate"
       },
       "TaskAccepted": {
         "properties": {
@@ -764,6 +2068,204 @@
           "items"
         ],
         "title": "ToolList"
+      },
+      "TripDay": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "maxLength": 40,
+            "title": "Date",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Title",
+            "default": ""
+          },
+          "stops": {
+            "items": {
+              "$ref": "#/components/schemas/TripStop"
+            },
+            "type": "array",
+            "title": "Stops"
+          }
+        },
+        "type": "object",
+        "title": "TripDay"
+      },
+      "TripPlan": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Title",
+            "default": "我的行程"
+          },
+          "city": {
+            "type": "string",
+            "maxLength": 60,
+            "title": "City",
+            "default": ""
+          },
+          "origin": {
+            "type": "string",
+            "maxLength": 120,
+            "title": "Origin",
+            "default": ""
+          },
+          "mode": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Mode",
+            "default": "driving"
+          },
+          "start_date": {
+            "type": "string",
+            "maxLength": 10,
+            "title": "Start Date",
+            "default": ""
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/TripDay"
+            },
+            "type": "array",
+            "title": "Days"
+          }
+        },
+        "type": "object",
+        "title": "TripPlan"
+      },
+      "TripStop": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "time": {
+            "type": "string",
+            "maxLength": 40,
+            "title": "Time",
+            "default": ""
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 300,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "TripStop"
+      },
+      "UploadOut": {
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "title": "Upload Id"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "bytes": {
+            "type": "integer",
+            "title": "Bytes"
+          },
+          "format": {
+            "type": "string",
+            "title": "Format",
+            "description": "jpg 或 png"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": "image"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload_id",
+          "url",
+          "width",
+          "height",
+          "bytes",
+          "format"
+        ],
+        "title": "UploadOut",
+        "description": "一个已接收的附件。\n\n``url`` 由服务端给出而不是前端拼：路径里带设备维度以后，\n前端不该知道 URL 长什么样。"
+      },
+      "UsageOut": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens",
+            "default": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens",
+            "default": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens",
+            "default": 0
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls",
+            "default": 0
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "CNY"
+          },
+          "estimated": {
+            "type": "boolean",
+            "title": "Estimated",
+            "default": false
+          },
+          "turns": {
+            "type": "integer",
+            "title": "Turns",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "UsageOut",
+        "description": "会话累计用量。cost 为 None 表示价目表里没有这个模型（不是免费）。"
       },
       "ValidationError": {
         "properties": {

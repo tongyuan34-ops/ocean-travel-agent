@@ -60,6 +60,12 @@ DANGEROUS_TOOLS = frozenset(
         "set_wallpaper",
         "open_file",
         "run_script",
+        # 文档组：改文档和整理目录都会**动用户的真实资料**。
+        # 尤其是 organize_documents——它一次移动几十个文件，
+        # 被注入的话一句话就能把整个目录搬空（虽然不删，但位置全乱）。
+        # read_document / digest_documents 是只读的，不在这份清单里。
+        "edit_document",
+        "organize_documents",
         # 不是工具，是工具内部的一个动作：为某个目录申请长期授权。
         # 放进这份清单是因为它同样能造成「扩大权限」——读到一个被注入的网页后
         # 模型可以说「请允许访问 ~/.ssh」，用户看着像正常步骤就点了。

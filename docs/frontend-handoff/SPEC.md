@@ -248,6 +248,7 @@ HTTP 状态码与错误码映射：
     501 TOOL_NOT_ENABLED          工具未启用
     502 MODEL_UNAVAILABLE         模型服务未启动或不可连
     502 MODEL_EMPTY_RESPONSE      模型返回空文本
+    502 MODEL_TRUNCATED           输出达到长度上限被截断（重试无效，需缩短问题）
     502 MEDIA_UPSTREAM_ERROR      媒体上游返回错误（原因原样透传）
     503 MEDIA_BACKEND_MISSING     未配置生图/生视频后端
     503 SESSION_EXPIRED           登录态失效，需用户重新登录
@@ -434,7 +435,8 @@ HTTP 状态码与错误码映射：
 - 映射示例：
   MODEL_UNAVAILABLE → 「本地模型服务未启动，请检查 LM Studio 是否在运行」
   MODEL_TIMEOUT → 「模型响应超时，可重试」
-  MODEL_EMPTY_RESPONSE → 「模型未返回内容，可重试」
+  MODEL_EMPTY_RESPONSE → 「模型未返回内容，可重试」（服务端已自动重试一次，仍失败才提示）
+  MODEL_TRUNCATED → 「回答被长度上限截断，请把问题拆小一些」，不展示重试按钮
   PERMISSION_DENIED → 「该操作未获授权，已取消」
   PATH_NOT_ALLOWED → 「该路径不在允许范围内」
   TOOL_NOT_ENABLED → 「该功能未启用或未配置」

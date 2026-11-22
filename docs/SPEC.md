@@ -103,7 +103,8 @@
                "media_task_ids": ["uuid"],
                "usage": { "total_tokens": 368 },
                "latency_ms": 16976 } ],
-  "persona": "concierge" }
+  "persona": "concierge",
+  "skill": "packing-list" }
 ```
 
 `usage` 与 `latency_ms` 只有 assistant 消息才有值，形状见 2.8；用户消息固定为 `{}` 和 `0`。
@@ -117,7 +118,8 @@
 丢了就等于让模型重新开始猜。
 
 `persona` 是本会话当前的对话风格，刷新页面时前端据此恢复头部那个风格标签
-（否则会出现「后端是知心、界面显示礼宾」的错位）。
+（否则会出现「后端是知心、界面显示礼宾」的错位）。`skill` 同理：它是本会话
+固定使用的技能 key，空串表示「不指定，由模型按话题判断」。
 
 #### GET /api/v1/chat/personas
 可选的对话风格。由后端提供而不是前端写死：新增一种风格只改一处，前端不用发版。
@@ -137,6 +139,28 @@
 - 未知 key 不报错，回落到默认风格并把**实际生效**的 key 返回（老会话可能带着已删掉的 key）；
 - 只影响**后续轮次**的 system prompt，不改历史消息：已经聊过的内容按当时的风格生成，
   这是事实，不该被追溯修改；
+- 会话不存在返回 404 `SESSION_NOT_FOUND`。
+
+#### GET /api/v1/skills
+可用的插件式技能。与 `personas` 一样只给展示字段，**不返回完整步骤正文**。
+响应 200：
+```json
+{ "enabled": true,
+  "items": [ { "key": "packing-list", "name": "行前清单",
+               "description": "按目的地、季节与同行人生成可勾选清单",
+               "triggers": ["行前清单", "带什么"],
+               "has_tools": true,
+               "tools": ["skill__packing-list__build"] } ] }
+```
+技能目录为空时 `enabled=false`，前端据此隐藏入口，而不是给一个点开是空的面板。
+
+#### PATCH /api/v1/chat/sessions/{session_id}/skill
+切换本会话固定使用的技能。请求体 `{ "skill": "packing-list" }`，
+响应 200 `{ "skill": "packing-list" }`；传空串表示回到「不指定」。
+
+- 未知 key 返回 400 `INVALID_REQUEST`（与 persona 的「静默回落」不同：技能会带来
+  额外工具与提示词，静默用默认会让用户以为它正在生效）；
+- 只影响后续轮次，不改历史消息；
 - 会话不存在返回 404 `SESSION_NOT_FOUND`。
 
 #### GET /api/v1/chat/sessions/{session_id}/usage
@@ -159,8 +183,9 @@
   "attachments": ["upload_id", "..."] }
 ```
 
-`attachments` 可为空数组，最多 6 个。`message` 与 `attachments` **不能同时为空**
-（只发图不写字是合法的），否则 400 `INVALID_REQUEST`。
+`attachments` 可为空数组，最多 6 个，元素是 `POST /media/uploads` 返回的
+`upload_id`，图片和文档可以混着传。`message` 与 `attachments` **不能同时为空**
+（只发附件不写字是合法的），否则 400 `INVALID_REQUEST`。
 
 响应 200，Content-Type: text/event-stream。事件类型（data 为单行 JSON，事件间以空行分隔）：
 
@@ -247,12 +272,18 @@
 响应 200：
 ```json
 { "items": [ { "name": "get_weather",
-               "category": "info|search|knowledge|plan|media|system|plugin|mcp",
+               "category": "info|search|knowledge|plan|media|system|plugin|docs|meta|skill|other|mcp",
                "enabled": true,
                "requires_permission": false,
                "description": "中文说明" } ] }
 ```
 说明：前端据此渲染可用能力，并对 requires_permission=true 的工具给出提示。
+
+`category=meta` 目前有 `discover_tools` 与 `use_skill` 两个：前者申请工具组，
+后者取技能步骤，都不属于业务能力，按组展示时应跳过。`category=skill` 是技能
+自带的工具（名字以 `skill__` 开头），只在技能被选中或命中触发词时绑定，
+因此**不出现在本接口的全集里**，只在 SSE `tool_call` 事件里可见。注意
+**这个列表是内置工具的全集**，某一轮实际绑给模型的只是其中一部分（见 4.6.0 按轮路由）。
 
 ### 权限确认
 
@@ -304,9 +335,10 @@
 - agent 侧同名能力由工具 `generate_image(prompt, style)` 与
   `list_image_templates()` 提供
 
-### 图片输入（同步上传，不走任务队列）
+### 附件输入（图片 / 文档，同步上传，不走任务队列）
 
-用户从相册选图提问。上传是同步的：一张图几百 KB，没必要开任务队列再轮询。
+用户从相册选图，或者把 Word / Excel 拖进来提问。上传是同步的：一张图几百 KB、
+一份表格几 MB，没必要开任务队列再轮询。
 
 #### POST /api/v1/media/uploads
 请求体是**文件本身**（不是 multipart），`Content-Type` 用文件类型，
@@ -319,25 +351,42 @@
 响应 200：
 ```json
 { "upload_id": "32 位 hex", "url": "/api/v1/media/uploads/<id>",
-  "width": 1280, "height": 853, "bytes": 184320, "format": "jpg" }
+  "width": 1280, "height": 853, "bytes": 184320, "format": "jpg",
+  "kind": "image", "filename": "海边.jpg" }
 ```
 
-服务端会**重新编码**，不是原样存：按 EXIF 摆正、长边缩到 1280、去 EXIF（含 GPS）、
-有透明通道保留 PNG，其余转 JPEG。三个理由——原图 base64 后约 4MB 会吃穿上下文预算、
-竖拍照片不摆正模型看到的是躺着的、EXIF 里的拍摄坐标不该进模型上下文。
+`kind` 只有两个值：`image`（进多模态内容块）和 `doc`（进「摘要 + 路径」）。
+
+**图片会重新编码，文档一个字节都不改。** 图片按 EXIF 摆正、长边缩到 1280、
+去 EXIF（含 GPS）、有透明通道保留 PNG，其余转 JPEG——原图 base64 后约 4MB
+会吃穿上下文预算、竖拍照片不摆正模型看到的是躺着的、EXIF 里的拍摄坐标
+不该进模型上下文。文档相反：Word / Excel 是 zip 包，转码只会把它弄坏，
+而 `read_document` 的解析是按真实格式写的。
+
+**分流看扩展名，不看 `Content-Type`。** Office 文件的类型在浏览器里极不可靠：
+Windows 上 .xlsx 常见 `application/octet-stream`，也有给 `application/zip`
+或空字符串的。扩展名是用户看得见的那一层，而且本来就要拿它决定落盘文件名。
+
+文档白名单：`.docx` `.xlsx` `.xlsm` `.doc` `.xls` `.csv` `.tsv` `.txt` `.md`。
+收下 `.doc` / `.xls` 是刻意的——这两种旧格式读不了，但直接拒收只会让用户以为
+软件坏了，收下来再回一句「另存为 .docx 再传」才有用。`.docx` / `.xlsx` / `.xlsm`
+会校验文件头是 `PK`（zip 魔数），扩展名和内容对不上直接 415，不留到解析时才炸。
 
 | 错误码 | HTTP | 场景 |
 |---|---|---|
-| `UPLOAD_TOO_LARGE` | 413 | 超过 12MB |
-| `UPLOAD_TYPE_NOT_ALLOWED` | 415 | 不是能识别的图片 |
+| `UPLOAD_TOO_LARGE` | 413 | 图片超过 12MB / 文档超过 32MB |
+| `UPLOAD_TYPE_NOT_ALLOWED` | 415 | 不是能识别的图片，或文档后缀不在白名单 / 内容与扩展名不符 |
 | `INVALID_REQUEST` | 400 | 请求体为空 |
 
-`Content-Type` 为 `application/octet-stream` 时按 `X-File-Name` 的扩展名兜底
+`Content-Type` 为 `application/octet-stream` 且后缀像图片时按扩展名兜底
 （安卓相册常这么给）。
 
 #### GET /api/v1/media/uploads/{upload_id}
-返回图片本身。**不校验设备 ID**：`<img src>` 带不了自定义请求头，校验了页面里的图会全 403。
+返回文件本身。**不校验设备 ID**：`<img src>` 带不了自定义请求头，校验了页面里的图会全 403。
 32 位十六进制随机 id 本身就是凭证，与 S3 预签名链接同理。写操作仍然校验归属。
+
+图片 `Content-Disposition: inline`；文档一律 `attachment`（浏览器 inline 渲染 docx
+只会得到一片乱码或空白页），并带上原始的 `filename*`，下载下来就是用户传上去的名字。
 
 #### DELETE /api/v1/media/uploads/{upload_id}
 204。用户在输入框里移除附件时调用；归属不符返回 404。
@@ -376,8 +425,30 @@
 响应 200：
 ```json
 { "status": "ok", "version": "x.y.z",
-  "model": "当前模型名", "provider": "openai_compatible|lm_studio|ollama" }
+  "model": "当前模型名", "provider": "openai_compatible|lm_studio|ollama",
+  "knowledge_chunks": 23, "skills": 4 }
 ```
+
+`knowledge_chunks` 与 `skills` 是运行时可验证信号：路径解析错了会静默变成 0，
+打包冒烟据此断言。
+
+#### GET /api/v1/metrics
+
+进程内指标快照（JSON），结构为 `{"uptime_seconds": 123.4, "series": {指标名: [...]}}`。
+计数器序列是 `{"labels": {...}, "value": n}`；直方图序列额外带
+`count / sum_seconds / p50_ms / p95_ms / p99_ms`（分位数取最近 2048 个样本）。
+
+采集范围：HTTP 请求（数量 / 状态码 / 耗时）、对话轮次（耗时 / token / 成本 / 模式 / 技能）、
+工具调用（状态 / 耗时 / 重试）、技能激活（来源：`command` / `model`）。
+
+**标签约束**：只允许方法、路由模板、状态码、工具名、技能 key 这类枚举值。
+路径必须用路由模板（`/chat/sessions/{id}/messages`）而不是原始路径，否则时间序列基数会爆炸。
+
+#### GET /metrics
+
+同一份数据的 Prometheus 文本格式（version 0.0.4），不挂 `/api/v1` 前缀，便于直接抓取。
+多 worker 部署时每个进程独立计数，聚合交给抓取端。
+
 
 ## 2.3 错误规范
 
@@ -397,6 +468,7 @@ HTTP 状态码与错误码映射：
     501 TOOL_NOT_ENABLED          工具未启用
     502 MODEL_UNAVAILABLE         模型服务未启动或不可连
     502 MODEL_EMPTY_RESPONSE      模型返回空文本
+    502 MODEL_TRUNCATED           输出达到长度上限被截断（重试无效，需缩短问题）
     502 MEDIA_UPSTREAM_ERROR      媒体上游返回错误（原因原样透传）
     402 MODEL_QUOTA_EXCEEDED      模型账户欠费或额度用尽（充值才能恢复，重试无效）
     401 MODEL_AUTH_FAILED        模型 API Key 无效、被吊销或没有该模型权限
@@ -460,10 +532,11 @@ HTTP 状态码与错误码映射：
 9. `end` 事件的 `taint.tainted` 为 true 时，在回答下方给一条中性提示
    （「这段内容里检测到可疑指令，相关操作已暂停」），不要弹红框——
    用户没做错事，被提示的是他读到的那份内容
-10. 图片输入：`POST /api/v1/media/uploads` 上传（请求体是文件本身，文件名走
-    `X-File-Name` 且必须 URL 编码）；气泡里的缩略图直接用返回的 `url`；
-    刷新时用历史消息里的 `attachments` 重建。视频在**浏览器里抽帧**再上传，
-    见 4.10.3
+10. 附件输入：`POST /api/v1/media/uploads` 上传（请求体是文件本身，文件名走
+    `X-File-Name` 且必须 URL 编码）；图片在气泡里画缩略图，文档画文件卡片，
+    都直接用返回的 `url`。刷新时用历史消息里的 `attachments` 重建，靠同一条消息的
+    `attachment_meta` 区分该画哪一种（文档的 id 看不出类型）。视频在**浏览器里抽帧**
+    再上传，见 4.10.3
 11. 启动时调 `GET /api/v1/chat/personas` 取风格列表（**不要在前端写死**）；
    取不到就**把入口整个藏起来**，不要留一个点了没反应的按钮。
    切换走 `PATCH /chat/sessions/{id}/persona`，刷新时用 `GET .../messages` 返回的
@@ -676,7 +749,8 @@ HTTP 状态码与错误码映射：
 - 映射示例：
   MODEL_UNAVAILABLE → 「本地模型服务未启动，请检查 LM Studio 是否在运行」
   MODEL_TIMEOUT → 「模型响应超时，可重试」
-  MODEL_EMPTY_RESPONSE → 「模型未返回内容，可重试」
+  MODEL_EMPTY_RESPONSE → 「模型未返回内容，可重试」（服务端已自动重试一次，仍失败才提示）
+  MODEL_TRUNCATED → 「回答被长度上限截断，请把问题拆小一些」（**不展示重试按钮**）
   MODEL_QUOTA_EXCEEDED → 「模型账户欠费或额度已用尽」+ 服务商给的原文（**不展示重试按钮**）
   MODEL_AUTH_FAILED → 「模型 API Key 无效或没有该模型权限」（**不展示重试按钮**）
   PERMISSION_DENIED → 「该操作未获授权，已取消」
@@ -788,6 +862,33 @@ e) 上下文预算：MAX_CONTEXT_TOKENS 默认 4096；超出时滚动摘要压�
 ## 4.6 工具层设计（agent/tools/）
 
 每个工具包含：name、中文描述、Pydantic 输入模型、独立超时、是否需权限。
+
+### 4.6.0 按轮路由（`app/agent/toolset.py`）
+
+**约束**：`bind_tools` 是每轮请求的固定开销，不随历史滚动、不被摘要折叠。
+33 个工具全量绑定实测 13,144 token（cl100k），一句「你好」的固定输入 16,233。
+
+**规则**：
+
+1. 工具按能力域分 8 组：`trip` / `stay` / `delivery` / `docs` / `file` / `web` /
+   `social` / `media`；`discover_tools` 不属于任何组，**每轮常驻**。
+2. 每轮按用户消息的子串与正则（`\d+天`、`第N天`）匹配触发词，只绑定命中的组，
+   上限 `MAX_TOOLS = 16`。
+3. 一个组都没命中时**沿用上一轮**的组（`session.active_groups`），保证追问不掉工具；
+   命中新组时不沿用旧组。
+4. 附件按扩展名补一组：`.xlsx/.csv/.docx → docs`，图片 → `media`。
+5. `persona == "confidant"` 不绑任何组（闲聊人格不该看到旅行工具）。
+6. 模型发现没有合适工具时调 `discover_tools(need)`，它把命中的组写入
+   `ContextVar`，流结束后回写 `session.active_groups`，下一轮生效。
+7. `ChatService` 按「工具名 frozenset」缓存编译后的图，上限 4 张——
+   `bind_tools` 是构图时固定的，不同工具子集必须用不同的图。
+
+**预算基线**（`tests/test_toolset.py` 钉死）：一句「你好」的固定输入 < 2,200 token。
+
+**逃生舱**：`TOOL_ROUTING=all` 退回全量绑定。
+
+**提示词分工**：提示词只写「什么时候必须调工具」（跨工具的行为底线），
+「这个工具怎么调、什么时候别用」写进工具 description。同一句话不写两遍。
 
 **info 组（默认启用，正式 API）**
 - get_weather(city, date_range)
@@ -1219,10 +1320,37 @@ bili_limit_count 20 → 10；CRAWLER_MAX_SLEEP_SEC 2 → 1；叠加后从 >200s 
 （模型仍可能在第三轮开始给建议）。要真正稳定得靠 `persona` 分类的用例持续跑，
 而不是靠再写一句更严厉的规则。
 
-## 4.10.3 图片与视频输入
+## 4.10.3 图片、视频与文档输入
 
-用户从相册选一张图或一段视频来提问。链路是：**前端抽帧 → 上传 → 服务端规范化 →
-按当前轮拼成多模态消息 → 模型**。
+用户从相册选一张图、一段视频，或者把一份 Word / Excel 拖进来提问。
+图片和视频的链路是：**前端抽帧 → 上传 → 服务端规范化 → 按当前轮拼成多模态消息 → 模型**；
+文档的链路是：**上传 → 原样落盘 → 解析成结构摘要 → 拼成文本块（含绝对路径）→ 模型**。
+
+**文档为什么给摘要 + 路径，而不是把全文摊进上下文。** 一份五十页的合同摊开是
+几万 token，而用户问的往往只是其中一节；更要紧的是，模型对着长文本心算求和一定
+会错——项目自己的规则里就写着「不要拿样本自己数」。所以上下文里给两样东西：
+结构摘要（标题、表格、前若干块，够它回答「这是什么、讲了什么」）和**绝对路径**
+（要精确数字时自己去调 `query_sheet` / `aggregate_sheet`，要看全文调 `read_document`）。
+上传目录在启动时注册进允许范围（`app/core/security.py::register_root`），
+否则用户刚传完一份表格，模型要统计时会被「先授权这个目录」拦一下——
+而这个目录是程序自己建的，问用户毫无意义。
+
+**路径要跟着会话走，不能只挂在那一轮。** 文档内容块只在当轮注入，历史里靠
+`_history_text` 补一行路径；但历史会被摘要折叠——`summarized_count` 一推进，
+带附件的那条消息就不再进 `messages`，路径随之消失，而摘要器只抄它看到的东西
+（实测压出来是「整理26个网点…」，没有路径）。于是出现最伤人的一幕：用户第三次
+传同一个 Excel，模型还是回「我手上没有源文件名，请把 Excel 放到桌面」。
+
+所以另有一条**会话文件清单**（`_session_files`）：按全量消息推导本会话传过的文件，
+同名只留最新一份，作为提示词的一部分每轮注入，绕开摘要这条会丢信息的路径。
+上限 8 个文件——一行一个路径几十个 token，比让用户反复重传便宜得多。
+
+**结果落盘位置由用户决定，不由源文件位置决定。** 表格类工具的输出原本只写在源文件
+旁边，而源文件在 `data/uploads/` 下——用户要的「新表」于是被埋在程序数据目录里。
+现在 `write_sheet` 从零生成新文件（.xlsx / .csv，表头加粗冻结、列宽按显示宽度算），
+`query_sheet` 与 `edit_document` 接受 `save_to`（目录或完整文件名），三条路都能直接
+写到桌面；写完默认调系统默认程序打开（`launch_default`），并在返回值里带回真实路径
+（同名已存在时是 `汇总2.xlsx`）。覆盖同名文件是明确禁止的：上一版结果不该被重跑冲掉。
 
 ### 三个刻意的取舍
 
@@ -1241,6 +1369,14 @@ bili_limit_count 20 → 10；CRAWLER_MAX_SLEEP_SEC 2 → 1；叠加后从 >200s 
 而用户接着追问的多半还是同一张图，上一轮的回答里已经有模型对它的描述。
 代价是「隔一轮再问图里的细节」问不到——这是刻意的：宁可让用户重发一次。
 
+**四、文档的路径必须活过当前轮。** 内容块和图片一样只挂当前轮，但落库的
+`ChatMessage.attachments` 只有一串 upload_id。重建历史时若不处理，下一轮模型就只剩
+一句「按网点汇总」——它不知道文件在哪，会去翻桌面/下载/文档目录，然后回「源文件已找不到」。
+所以历史里的用户消息末尾补一行 `（本消息附带文件「x.xlsx」，本地路径：…）`：
+几十个 token，换模型在后续轮次继续能调 `query_sheet` / `aggregate_sheet`。
+文件已不存在时不补（避免留下指向空处的路径）。摘要器同样被要求原样抄下文件名与路径——
+历史一旦被折叠，摘要就是路径唯一的载体。见 `ChatService._history_text`。
+
 ### 视觉注入
 
 图片没有 `<untrusted>` 可以包（那是给工具返回用的），所以把规则写进 `CORE_RULES`：
@@ -1254,6 +1390,63 @@ bili_limit_count 20 → 10；CRAWLER_MAX_SLEEP_SEC 2 → 1；叠加后从 >200s 
 - 服务端不做 OCR，也不做图片内容审核；模型看到什么就是什么。
 - 上传目录 `data/uploads/` 不会自动清理。历史消息里的图靠它显示，所以删了会「图裂」；
   要清理得连同历史一起处理。
+
+## 4.10.4 插件式技能（skills/）
+
+**工具解决「能不能做」，技能解决「按什么步骤做、交付成什么样」。**
+「帮我做个预算表」这句话，工具能查到票价、能算总和，但每次生成的表头、口径、
+有没有留机动金，全靠模型即兴。技能把这类**流程性知识**固定下来：步骤写在
+`SKILL.md`，统一格式放在 `templates/`，需要一点代码才能完成的部分放进 `tools.py`。
+
+### 目录格式
+
+    skills/
+      packing-list/
+        SKILL.md            # YAML frontmatter + 步骤正文
+        tools.py            # 可选：TOOLS = [langchain 工具]
+        templates/          # 可选：模板文件（.md/.txt/.csv 会被内联进提示词）
+
+`SKILL.md` 的 frontmatter 只有四个字段：
+
+```yaml
+---
+name: 行前清单
+description: 按目的地、季节、同行人生成可勾选清单
+triggers: 行前清单, 行李清单, 带什么
+---
+```
+
+- `key` 取目录名，只允许 `[a-z0-9][a-z0-9_-]*`——它会被拼进工具名、斜杠命令和 URL；
+- `description` 只有一句话，会进每轮的系统提示词，所以不能写长；
+- `triggers` 是子串匹配，和工具路由同一套朴素做法（中文不需要分词）；
+- 正文是完整步骤，只在技能被选中或模型调用 `use_skill` 时才进上下文。
+
+### 两条触发通道
+
+| 通道 | 入口 | 行为 |
+|---|---|---|
+| 用户显式 | 前端选择器、`PATCH .../skill`、`/skill <key>` 或 `/<key>` | 步骤**直接注入**本轮 system prompt，技能工具本轮就绑 |
+| 模型自主 | 提示词里只有技能清单；模型调用 `use_skill(skill="...")` | 工具返回完整步骤；命中 trigger 的技能工具本轮已绑，否则下一轮可用 |
+
+用户消息里的斜杠命令**不落库**：存进历史的是去掉命令后的正文，避免下一轮模型
+看到一句没人回应的 `/packing-list`。未知 key 原样保留，不吞用户输入。
+
+### 加载与安全
+
+- 技能在启动时从 `SKILLS_DIR`（默认 `skills/`，按资源根解析）加载，打包后位于
+  `_internal/skills/`；目录不存在只记日志，不是启动失败；
+- `tools.py` 用 `importlib` 在进程内加载，工具名强制加 `skill__<key>__` 前缀。
+  **不起子进程跑脚本**：桌面版 `sys.executable` 是 exe 本身，不是 Python 解释器；
+  进程内加载才能照旧走权限确认、污点拦截、调用预算与重试；
+- 一个技能的工具加载失败只影响这个技能的执行入口，步骤正文仍然可用（日志里记原因）；
+- 技能目录随版本分发，**不做远程下载**——装技能等于装可执行代码，和 MCP 是同一个取舍。
+
+### 成本
+
+技能清单每轮约 230 token（四个技能），技能工具只在选中时绑（单轮上限 4 个）。
+纯提示词技能的模板会内联进上下文，但总量封顶 1,500 字符；长模板只留路径，
+交给技能代码自己读。`tests/test_toolset.py::test_small_talk_input_stays_under_budget`
+用数字钉住了这笔开销。
 
 ## 4.11 分层架构
 
@@ -1281,7 +1474,12 @@ bili_limit_count 20 → 10；CRAWLER_MAX_SLEEP_SEC 2 → 1；叠加后从 >200s 
       ranking/
         dedupe.py / bm25.py / diversity.py   # 去重、BM25 排序、多样性控制
       services/
-        chat.py / media.py    # 会话消息业务；媒体任务队列（预留 Celery/Redis）
+        chat.py               # 单轮编排：流生命周期 + 准备 / 跑图 / 收尾
+        sessions.py           # 会话目录（增删查、列表投影、persona / skill）
+        turn_context.py       # 提示词 / 历史 / 附件 / 摘要装配
+        turn_runtime.py       # 图事件 → SSE、跨进程取消
+        turn_events.py / turn_errors.py  # 纯函数：SSE 帧、错误映射
+        media.py              # 媒体任务队列（预留 Celery/Redis）
       storage/
         base.py / memory.py   # 存储抽象 + 内存实现，预留 Redis
       schemas/                # Pydantic 请求/响应模型

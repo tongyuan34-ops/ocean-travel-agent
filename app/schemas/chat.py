@@ -48,8 +48,11 @@ class MessageItem(BaseModel):
     # 本条回答的用量与耗时，用于在消息下方展示；用户消息为空 / 0
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: int = 0
-    # 用户消息附带的图片。刷新后据此重建气泡里的缩略图
+    # 用户消息附带的附件 id。刷新后据此重建气泡里的缩略图 / 文件卡片
     attachments: list[str] = Field(default_factory=list)
+    # 附件 id → {kind, filename, ext, bytes}。只有 id 的话前端分不清该画缩略图
+    # 还是画文件卡片（文档没有图可显示）
+    attachment_meta: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # 本轮自检告警。刷新后仍要显示，否则用户回头翻记录会以为当时成功了
     warnings: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -59,6 +62,8 @@ class MessageList(BaseModel):
     # 本会话当前的对话风格。前端刷新页面后靠它恢复选中项——
     # 只存在浏览器本地的话，换设备或清缓存后就和后端对不上了
     persona: str = "concierge"
+    # 本会话固定使用的技能 key；空表示没指定，由模型按触发词判断
+    skill: str = ""
 
 
 class PersonaItem(BaseModel):
@@ -81,6 +86,32 @@ class PersonaUpdate(BaseModel):
 
 class PersonaOut(BaseModel):
     persona: str
+
+
+class SkillItem(BaseModel):
+    """一个可用技能。不暴露完整步骤正文——那是内部实现，前端只需要展示字段。"""
+
+    key: str
+    name: str
+    description: str
+    triggers: list[str] = Field(default_factory=list)
+    has_tools: bool = False
+    tools: list[str] = Field(default_factory=list)
+
+
+class SkillList(BaseModel):
+    items: list[SkillItem]
+    # 技能目录为空时前端据此隐藏入口，而不是展示一个空面板
+    enabled: bool = True
+
+
+class SkillUpdate(BaseModel):
+    # 空串表示「不指定技能」。允许为空是清空操作的唯一表达方式
+    skill: str = Field(default="", max_length=64, description="技能 key，空串表示不指定")
+
+
+class SkillOut(BaseModel):
+    skill: str
 
 
 class UsageOut(BaseModel):

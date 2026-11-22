@@ -52,6 +52,39 @@ logger = logging.getLogger(__name__)
 _FORMAT_VERSION = 1
 
 
+def read_file(path: Path) -> list[ChatSession]:
+    """按本文件的格式读出一份会话（同步）。
+
+    抽出来给三处共用：启动载入、SQLite 首次切换时的一次性导入、迁移脚本。
+    格式知识只留这一份，改格式时不会漏掉某一条路径。
+
+    文件损坏时改名留证并返回空——直接删掉才是真的把用户数据弄丢了。
+    """
+    if not path.exists():
+        return []
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        broken = path.with_suffix(".broken.json")
+        logger.error("会话文件损坏，已另存为 %s：%s", broken, exc)
+        with contextlib.suppress(OSError):
+            os.replace(path, broken)
+        return []
+
+    items = raw.get("sessions") if isinstance(raw, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    sessions: list[ChatSession] = []
+    for item in items:
+        try:
+            sessions.append(ChatSession.from_dict(item))
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("跳过一条无法解析的会话记录：%s", exc)
+    return sessions
+
+
 class FileSessionStore(MemorySessionStore):
     """会话持久化到单个 JSON 文件。启动时全量载入，写入时原子落盘。"""
 
@@ -75,26 +108,7 @@ class FileSessionStore(MemorySessionStore):
         self._stale.clear()
         if not self._path.exists():
             return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            # 读坏了不能让程序起不来：改名留证，从空库继续。
-            # 直接删掉才是真的把用户数据弄丢了。
-            broken = self._path.with_suffix(".broken.json")
-            logger.error("会话文件损坏，已另存为 %s：%s", broken, exc)
-            with contextlib.suppress(OSError):
-                os.replace(self._path, broken)
-            return
-
-        items = raw.get("sessions") if isinstance(raw, dict) else None
-        if not isinstance(items, list):
-            return
-        for item in items:
-            try:
-                session = ChatSession.from_dict(item)
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.warning("跳过一条无法解析的会话记录：%s", exc)
-                continue
+        for session in read_file(self._path):
             # 直接塞进父类的字典，跳过 create() 的深拷贝——刚解析出来的对象没人共享
             self._data[session.id] = session
         logger.info("会话存储：文件（%s，%d 条）", self._path, len(self._data))

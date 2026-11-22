@@ -1,7 +1,8 @@
 {
   "GET /api/v1/health": {
     "status": "ok",
-    "version": "0.1.0",
+    "version": "0.2.0",
+    "skills": 4,
     "model": "deepseek-v4-1-flash-economy-261017",
     "provider": "openai_compatible"
   },

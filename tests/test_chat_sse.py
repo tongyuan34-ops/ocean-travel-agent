@@ -19,7 +19,9 @@ from app.agent.graph import SYSTEM_PROMPT
 from app.agent.permissions import Decision, DecisionChannel, LocalDecisionChannel
 from app.core.config import Settings
 from app.services import chat as chat_module
+from app.services import turn_runtime as turn_runtime_module
 from app.services.chat import ChatService
+from app.services.sessions import SessionService
 from app.services.streams import RedisEventLog
 from app.storage import MemorySessionStore
 from fake_redis import FakeRedis
@@ -90,12 +92,12 @@ def _service(
     repair: Any = None,
     media: Any = None,
 ) -> ChatService:
-    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (graph, mode))
+    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s, **_kw: (graph, mode))
     from app.core.config import load_settings
 
     return ChatService(
         load_settings(),
-        MemorySessionStore(),
+        SessionService(MemorySessionStore()),
         decision_channel=channel,
         event_log=event_log,
         repair=repair,
@@ -111,7 +113,7 @@ def _other_worker(event_log: Any) -> ChatService:
     """
     from app.core.config import load_settings
 
-    return ChatService(load_settings(), MemorySessionStore(), event_log=event_log)
+    return ChatService(load_settings(), SessionService(MemorySessionStore()), event_log=event_log)
 
 
 class FlakyLog:
@@ -206,7 +208,7 @@ async def test_streams_tokens_then_end(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "三亚怎么玩")
 
     assert _types(frames)[:2] == ["token", "token"]
@@ -215,7 +217,7 @@ async def test_streams_tokens_then_end(monkeypatch):
     assert end["finish_reason"] == "stop"
 
     # 回答必须落库，刷新页面才能恢复
-    stored = await service.get_session(session.id)
+    stored = await service._sessions.get(session.id)
     assert stored.messages[-1].role == "assistant"
     assert stored.messages[-1].content == "三亚攻略"
 
@@ -231,13 +233,13 @@ async def test_cancel_stream_is_not_persisted(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     state = await service.start_reply(session.id, "问题")
     assert await service.cancel_stream(state.stream_id) is True
     with contextlib.suppress(asyncio.CancelledError):
         await state.task
 
-    stored = await service.get_session(session.id)
+    stored = await service._sessions.get(session.id)
     assert all(item.role != "assistant" for item in stored.messages)
 
 
@@ -274,7 +276,7 @@ async def test_resume_lands_on_another_worker(monkeypatch):
     worker_a = _service(monkeypatch, FakeGraph(script), event_log=RedisEventLog(client))
     worker_b = _other_worker(RedisEventLog(client))
 
-    session = await worker_a.create_session()
+    session = await worker_a._sessions.create()
     state = await worker_a.start_reply(session.id, "问题")
     await state.task
 
@@ -290,14 +292,14 @@ async def test_cancel_from_another_worker_stops_generation(monkeypatch):
     这是 ``cancel_stream`` 里「先写标记再 cancel 本地任务」两半中的后一半——
     只测同进程取消的话，这条路径永远不会被执行。
     """
-    monkeypatch.setattr(chat_module, "CANCEL_POLL_SEC", 0.01)
+    monkeypatch.setattr(turn_runtime_module, "CANCEL_POLL_SEC", 0.01)
     client = FakeRedis()
     worker_a = _service(
         monkeypatch, SlowGraph(["一", "二", "三", "四"]), event_log=RedisEventLog(client)
     )
     worker_b = _other_worker(RedisEventLog(client))
 
-    session = await worker_a.create_session()
+    session = await worker_a._sessions.create()
     state = await worker_a.start_reply(session.id, "问题")
     # 等 A 真的开始生成，再让 B 去取消
     for _ in range(200):
@@ -308,7 +310,7 @@ async def test_cancel_from_another_worker_stops_generation(monkeypatch):
     assert await worker_b.cancel_stream(state.stream_id) is True
     await asyncio.wait_for(state.task, timeout=5)
 
-    stored = await worker_a.get_session(session.id)
+    stored = await worker_a._sessions.get(session.id)
     assert all(item.role != "assistant" for item in stored.messages), "取消后不该落库半截回答"
     meta = await worker_a._log.meta(state.stream_id)
     assert meta is not None and meta.cancelled is True
@@ -325,14 +327,14 @@ async def test_disconnect_does_not_cancel_generation(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     generator = service.stream_reply(session.id, "问题")
     first = await generator.__anext__()
     assert json.loads(first.split("data: ", 1)[1])["type"] == "token"
     await generator.aclose()
     await asyncio.sleep(0.2)
 
-    stored = await service.get_session(session.id)
+    stored = await service._sessions.get(session.id)
     assert stored.messages[-1].role == "assistant"
     assert stored.messages[-1].content == "完整回答"
 
@@ -357,7 +359,7 @@ async def test_tool_call_and_result_error_status(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "搜社媒")
 
     call = next(f for f in frames if f["type"] == "tool_call")
@@ -390,7 +392,7 @@ async def test_tool_result_ok_status(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "搜网页")
 
     call = next(f for f in frames if f["type"] == "tool_call")
@@ -414,7 +416,7 @@ async def test_tool_error_event(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "触发错误")
     result = next(f for f in frames if f["type"] == "tool_result")
     assert result["status"] == "error"
@@ -443,7 +445,7 @@ async def test_permission_request_then_granted(monkeypatch):
         ),
         channel=channel,
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames: list[dict] = []
     saw_request = False
@@ -467,11 +469,64 @@ async def test_permission_request_then_granted(monkeypatch):
 
 async def test_empty_response_maps_to_contract_error(monkeypatch):
     service = _service(monkeypatch, FakeGraph([]))
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "问点什么")
 
     assert frames[-1]["type"] == "error"
     assert frames[-1]["code"] == "MODEL_EMPTY_RESPONSE"
+
+
+def _truncated_message() -> dict:
+    """模型这次什么都没写，且 finish_reason=length：4096 个 token 被用光了。"""
+    return {
+        "event": "on_chain_end",
+        "data": {
+            "output": {
+                "messages": [AIMessage(content="", response_metadata={"finish_reason": "length"})]
+            }
+        },
+    }
+
+
+async def test_empty_answer_is_retried_once(monkeypatch):
+    """上游偶发空包时服务端自己重跑一次，不让用户手动点「重试」。"""
+    graph = ScriptedGraph([[_final_message("")], [_final_message("我在。")]])
+    service = _service(monkeypatch, graph)
+    session = await service._sessions.create()
+    frames = await _frames(service, session.id, "nihao")
+
+    assert graph.calls == 2
+    retry = next(frame for frame in frames if frame["type"] == "retry")
+    assert retry["reason"] == "EMPTY_RESPONSE"
+    assert retry["attempt"] == 2
+    assert frames[-1]["type"] == "end"
+    assert (await service._sessions.get(session.id)).messages[-1].content == "我在。"
+
+
+async def test_empty_answer_twice_gives_up_with_error(monkeypatch):
+    """第二次还是空，就不是抖动：只重试一次，然后如实报错。"""
+    graph = ScriptedGraph([[_final_message("")], [_final_message("")]])
+    service = _service(monkeypatch, graph)
+    session = await service._sessions.create()
+    frames = await _frames(service, session.id, "nihao")
+
+    assert graph.calls == 2, "只该重试一次，不能无限重跑"
+    assert _types(frames).count("retry") == 1
+    assert frames[-1]["type"] == "error"
+    assert frames[-1]["code"] == "MODEL_EMPTY_RESPONSE"
+
+
+async def test_truncated_answer_is_not_retried(monkeypatch):
+    """finish_reason=length 原样重跑必然复现，只多花一次钱，所以不重试。"""
+    graph = ScriptedGraph([[_truncated_message()]])
+    service = _service(monkeypatch, graph)
+    session = await service._sessions.create()
+    frames = await _frames(service, session.id, "写一篇一万字的攻略")
+
+    assert graph.calls == 1
+    assert "retry" not in _types(frames)
+    assert frames[-1]["type"] == "error"
+    assert frames[-1]["code"] == "MODEL_TRUNCATED"
 
 
 async def test_model_unavailable_when_graph_build_fails(monkeypatch):
@@ -481,8 +536,8 @@ async def test_model_unavailable_when_graph_build_fails(monkeypatch):
     monkeypatch.setattr(chat_module, "build_agent_graph", boom)
     from app.core.config import load_settings
 
-    service = ChatService(load_settings(), MemorySessionStore())
-    session = await service.create_session()
+    service = ChatService(load_settings(), SessionService(MemorySessionStore()))
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "在吗")
 
     assert frames[0]["type"] == "error"
@@ -491,7 +546,7 @@ async def test_model_unavailable_when_graph_build_fails(monkeypatch):
 
 async def test_internal_error_when_graph_crashes(monkeypatch):
     service = _service(monkeypatch, ExplodingGraph())
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "触发崩溃")
 
     assert frames[-1]["type"] == "error"
@@ -534,9 +589,9 @@ def test_failure_mapping_puts_billing_before_status_code(exc, expect):
     只看状态码会把「去充值」说成「检查 Key」，两件事都不是重试能解决的，
     指错方向用户就会一直点重试。这条用例锁住判断顺序。
     """
-    from app.services.chat import _map_failure
+    from app.services.turn_errors import map_failure
 
-    assert _map_failure(exc)["code"] == expect
+    assert map_failure(exc)["code"] == expect
 
 
 def test_quota_message_points_at_config_json_for_bundled_key(monkeypatch):
@@ -546,10 +601,10 @@ def test_quota_message_points_at_config_json_for_bundled_key(monkeypatch):
     填自己的 key，所以这句话必须指向 config.json——说错地方等于让他一直重试。
     """
     from app.core import secrets
-    from app.services.chat import _map_failure
+    from app.services.turn_errors import map_failure
 
     monkeypatch.setattr(secrets, "source", lambda name: secrets.BUNDLED)
-    message = _map_failure(UpstreamError("insufficient_quota", 429))["message"]
+    message = map_failure(UpstreamError("insufficient_quota", 429))["message"]
     assert "config.json" in message
     assert "MODEL_API_KEY" in message
     assert "充值" not in message
@@ -558,10 +613,10 @@ def test_quota_message_points_at_config_json_for_bundled_key(monkeypatch):
 def test_quota_message_points_at_console_for_own_key(monkeypatch):
     """自己填的 key 才有「控制台」这个概念，这句话反过来也要成立。"""
     from app.core import secrets
-    from app.services.chat import _map_failure
+    from app.services.turn_errors import map_failure
 
     monkeypatch.setattr(secrets, "source", lambda name: secrets.ENV)
-    message = _map_failure(UpstreamError("insufficient_quota", 429))["message"]
+    message = map_failure(UpstreamError("insufficient_quota", 429))["message"]
     assert "充值" in message
     assert "config.json" not in message
 
@@ -569,16 +624,24 @@ def test_quota_message_points_at_console_for_own_key(monkeypatch):
 def test_auth_message_names_the_place_the_key_came_from(monkeypatch):
     """「请检查 .env」对桌面版用户是句废话——他的 key 在 config.json 里。"""
     from app.core import secrets
-    from app.services.chat import _map_failure
+    from app.services.turn_errors import map_failure
 
     monkeypatch.setattr(secrets, "source", lambda name: secrets.CONFIG)
-    message = _map_failure(UpstreamError("Invalid API key", 401))["message"]
+    message = map_failure(UpstreamError("Invalid API key", 401))["message"]
     assert "config.json" in message
     assert ".env" not in message
 
 
 async def test_overdue_account_surfaces_actionable_error(monkeypatch):
-    """欠费要走完整链路：图里抛 → 映射 → SSE error 事件带新错误码。"""
+    """欠费要走完整链路：图里抛 → 映射 → SSE error 事件带新错误码。
+
+    必须把 key 来源钉成 env：不钉的话，这个断言取决于跑测试的机器上有没有
+    ``.env`` / ``config.json``。干净 checkout 里 ``source()`` 回落到 bundled，
+    消息变成「内置额度已用完」，于是同一条代码在 CI 上红、在本机绿。
+    """
+    from app.core import secrets
+
+    monkeypatch.setattr(secrets, "source", lambda name: secrets.ENV)
 
     class OverdueGraph:
         async def astream_events(self, _input: Any, **_: Any) -> AsyncIterator[dict[str, Any]]:
@@ -586,7 +649,7 @@ async def test_overdue_account_surfaces_actionable_error(monkeypatch):
             yield {}  # pragma: no cover - 让函数成为异步生成器
 
     service = _service(monkeypatch, OverdueGraph())
-    session = await service.create_session()
+    session = await service._sessions.create()
     frames = await _frames(service, session.id, "在吗")
 
     assert frames[-1]["type"] == "error"
@@ -599,7 +662,7 @@ async def test_summary_failure_keeps_history(monkeypatch):
     from app.storage import ChatMessage
 
     service = _service(monkeypatch, FakeGraph([]))
-    session = await service.create_session()
+    session = await service._sessions.create()
     for index in range(40):
         session.messages.append(
             ChatMessage(
@@ -614,10 +677,10 @@ async def test_summary_failure_keeps_history(monkeypatch):
         async def ainvoke(self, _prompt):
             raise RuntimeError("摘要服务挂了")
 
-    service._summarizer = BoomModel()
+    service._context.summarizer = BoomModel()
     # 必须传真实 system prompt：折叠预算按「system + 摘要 + 历史」估算，
     # 传空串会让 token 总量低于阈值而直接跳过摘要，用例就测不到失败路径了
-    await service._refresh_summary(session, SYSTEM_PROMPT)
+    await service._context.refresh_summary(session, SYSTEM_PROMPT)
 
     # 失败时不推进 summarized_count，那批消息继续留在窗口里
     assert session.summary == ""
@@ -635,14 +698,14 @@ async def test_end_reports_claim_without_tool_call(monkeypatch):
     """
     claim = "三张图都提交生成好了，等前端轮询出图就会显示。"
     service = _service(monkeypatch, FakeGraph([_final_message(claim)]))
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
 
     assert end["warnings"][0]["code"] == "CLAIMED_WITHOUT_ACTION"
     # 告警要落库：刷新之后翻记录，不能看着像当时成功了
-    stored = (await service.get_session(session.id)).messages[-1]
+    stored = (await service._sessions.get(session.id)).messages[-1]
     assert stored.warnings[0]["code"] == "CLAIMED_WITHOUT_ACTION"
 
 
@@ -669,13 +732,13 @@ async def test_end_has_no_warning_when_image_tool_was_called(monkeypatch):
             ]
         ),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
 
     assert end["warnings"] == []
-    stored = (await service.get_session(session.id)).messages[-1]
+    stored = (await service._sessions.get(session.id)).messages[-1]
     assert stored.media_task_ids == [task_id]
 
 
@@ -685,7 +748,7 @@ async def test_clarifying_reply_does_not_warn(monkeypatch):
         monkeypatch,
         FakeGraph([_final_message("你想画几张？偏打卡风还是海报风？")]),
     )
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
@@ -721,9 +784,13 @@ async def test_uploaded_image_is_handed_to_image_tool(monkeypatch, tmp_path):
 
     from app.core.config import load_settings
 
-    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (_Recorder([]), "native"))
-    service = ChatService(load_settings(), MemorySessionStore(), uploads=uploads, event_log=None)
-    session = await service.create_session()
+    monkeypatch.setattr(
+        chat_module, "build_agent_graph", lambda _s, **_kw: (_Recorder([]), "native")
+    )
+    service = ChatService(
+        load_settings(), SessionService(MemorySessionStore()), uploads=uploads, event_log=None
+    )
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "把这张图改成水彩风", [item.id])
 
@@ -762,7 +829,7 @@ async def test_claim_without_action_is_repaired_automatically(monkeypatch):
     """
     graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
     service = _service(monkeypatch, graph)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
@@ -774,7 +841,7 @@ async def test_claim_without_action_is_repaired_automatically(monkeypatch):
 
     # 修好了就不该再报警，也不该把上一轮的假话留在历史里
     assert end["warnings"] == []
-    stored = (await service.get_session(session.id)).messages[-1]
+    stored = (await service._sessions.get(session.id)).messages[-1]
     assert stored.warnings == []
     assert stored.content == "三张图都提交好了，稍等。"
     assert stored.media_task_ids == ["7e0684c9-1c4a-4a4f-9d0e-2b7d3f1a5c88"]
@@ -787,7 +854,7 @@ async def test_retry_event_precedes_the_second_attempt(monkeypatch):
     """
     graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
     service = _service(monkeypatch, graph)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     kinds = _types(frames)
@@ -810,7 +877,7 @@ async def test_repair_stops_after_one_retry_and_still_warns(monkeypatch):
     """
     graph = ScriptedGraph([[_final_message(_CLAIM)], [_final_message(_CLAIM)]])
     service = _service(monkeypatch, graph)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
@@ -829,10 +896,10 @@ async def test_corrective_message_is_not_persisted(monkeypatch):
     """
     graph = ScriptedGraph([[_final_message(_CLAIM)], _TOOL_OK])
     service = _service(monkeypatch, graph)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "帮我生成三张旅行图")
-    stored = (await service.get_session(session.id)).messages
+    stored = (await service._sessions.get(session.id)).messages
 
     assert [m.role for m in stored] == ["user", "assistant"]
     assert all("没有真正调用 generate_image" not in m.content for m in stored)
@@ -851,7 +918,7 @@ async def test_policy_without_matching_rule_does_not_retry(monkeypatch):
 
     graph = ScriptedGraph([[_final_message(_CLAIM)]])
     service = _service(monkeypatch, graph, repair=_Silent())
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
     end = next(frame for frame in frames if frame["type"] == "end")
@@ -865,7 +932,7 @@ async def test_successful_turn_is_not_retried(monkeypatch):
     """正常干活的一轮不能被自愈误伤——多跑一趟就是多花一次钱。"""
     graph = ScriptedGraph([_TOOL_OK])
     service = _service(monkeypatch, graph)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     frames = await _frames(service, session.id, "帮我生成三张旅行图")
 
@@ -913,7 +980,7 @@ async def test_next_turn_learns_the_task_succeeded(monkeypatch):
     graph = ScriptedGraph([_TOOL_OK, [_final_message("图已经生成好了，刷新一下就能看到。")]])
     media = _FakeMedia({_TASK_SUCCEEDED: _Task(_TASK_SUCCEEDED, "succeeded")})
     service = _service(monkeypatch, graph, media=media)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "帮我生成三张旅行图")
     await _frames(service, session.id, "图在哪")
@@ -931,7 +998,7 @@ async def test_failed_task_reason_reaches_the_next_turn(monkeypatch):
         {_TASK_SUCCEEDED: _Task(_TASK_SUCCEEDED, "failed", "生图账号欠费，图片没有生成")}
     )
     service = _service(monkeypatch, graph, media=media)
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "帮我生成三张旅行图")
     await _frames(service, session.id, "图呢")
@@ -944,7 +1011,7 @@ async def test_expired_task_is_left_out_instead_of_guessed(monkeypatch):
     """任务过期查不到时，宁可少说一句，也不要编一个状态。"""
     graph = ScriptedGraph([_TOOL_OK, [_final_message("好。")]])
     service = _service(monkeypatch, graph, media=_FakeMedia({}))
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "帮我生成三张旅行图")
     await _frames(service, session.id, "图呢")
@@ -957,7 +1024,7 @@ async def test_first_turn_has_no_facts_block(monkeypatch):
     """首轮没有可查的历史，不该凭空出现一个「当前事实」标题。"""
     graph = ScriptedGraph([[_final_message("你好。")]])
     service = _service(monkeypatch, graph, media=_FakeMedia({}))
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "你好")
 
@@ -978,7 +1045,7 @@ async def test_previous_warning_is_fed_back(monkeypatch):
     claim = "三张图都提交生成好了。"
     graph = ScriptedGraph([[_final_message(claim)], [_final_message("我重新提交。")]])
     service = _service(monkeypatch, graph, repair=_Silent(), media=_FakeMedia({}))
-    session = await service.create_session()
+    session = await service._sessions.create()
 
     await _frames(service, session.id, "帮我生成三张旅行图")
     await _frames(service, session.id, "重试")

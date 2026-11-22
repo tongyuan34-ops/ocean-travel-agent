@@ -328,7 +328,7 @@ python scripts/build_desktop.py            # 出目录 + zip
 python scripts/build_desktop.py --installer # 顺带出 Inno Setup 安装包
 ```
 
-产物：`dist/OceanTravelAgent/`（解压即用）和 `dist/OceanTravelAgent-0.1.0-win64.zip`。
+产物：`dist/OceanTravelAgent/`（解压即用）和 `dist/OceanTravelAgent-0.2.1-win64.zip`。
 
 ### 形态：pywebview 原生窗口
 

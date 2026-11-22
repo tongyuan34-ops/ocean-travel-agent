@@ -27,12 +27,27 @@ from app.agent.prompts import build_system_prompt
 from app.agent.resilience import RetryPolicy, make_all_resilient
 from app.agent.state import AgentState
 from app.core.config import Settings
+from app.core.tracing import langfuse_callbacks
 from app.mcp.registry import all_tools
 
 logger = logging.getLogger(__name__)
 
 # 单轮对话内最多执行多少步，防止工具循环失控
 MAX_STEPS = 12
+
+
+def _with_tracing(runnable: Any) -> Any:
+    """把 Langfuse 回调挂到可运行对象上。
+
+    **顺序不能反。** ``with_config`` 返回的是 ``RunnableBinding``，它没有覆写
+    ``bind_tools``，靠 ``__getattr__`` 转发给内部模型并返回一个**不带原 config**
+    的新对象。先 ``with_config`` 再 ``bind_tools``，回调会被静默丢掉——不报错、
+    不告警，症状只是「Langfuse 里一条 trace 都没有」。
+    ``tests/test_agent_graph.py`` 用一条断言把顺序钉死了。
+    """
+    callbacks = langfuse_callbacks()
+    return runnable.with_config({"callbacks": callbacks}) if callbacks else runnable
+
 
 # 系统提示词已按「对话风格」拆到 app/agent/prompts.py：
 # 核心规则（可信与安全）+ 领域规则（只有旅行类人格才注入）+ 说话方式。
@@ -114,7 +129,8 @@ def build_agent_graph(
 
 
 def _build_native(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
-    bound = model.bind_tools(tools)
+    # bind_tools 在前、挂回调在后，理由见 _with_tracing
+    bound = _with_tracing(model.bind_tools(tools))
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         return {"messages": [bound.invoke(state["messages"])]}
@@ -137,12 +153,15 @@ def _build_native(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
 
 def _build_structured(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
     catalog = _tool_catalog(tools)
+    # 回调挂在这里而不是 graph.ainvoke 的 config 里：这一支在循环里反复调模型，
+    # 只挂外层会漏掉除最后一次之外的每一次
+    traced = _with_tracing(model)
 
     async def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         messages = list(state["messages"])
         for step in range(MAX_STEPS):
             prompt = _instruction(catalog, first=(step == 0))
-            reply = await model.ainvoke([*messages, HumanMessage(content=prompt)])
+            reply = await traced.ainvoke([*messages, HumanMessage(content=prompt)])
             decision = _parse_decision(reply.content)
 
             if decision is None or "final" in decision:

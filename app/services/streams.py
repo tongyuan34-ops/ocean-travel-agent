@@ -37,8 +37,6 @@ STREAM_TTL_SEC = 3600
 MAX_STREAMS = 200
 # 订阅端空闲多久发一次心跳。公网反代会掐断长时间无数据的 SSE 连接
 HEARTBEAT_SEC = 15.0
-# 生成端多久检查一次「别的进程有没有取消我」
-CANCEL_POLL_SEC = 1.0
 # 唤醒频道里的控制消息（其余消息都是 seq 数字）
 _CONTROL_WAKES = frozenset({"done", "cancel"})
 

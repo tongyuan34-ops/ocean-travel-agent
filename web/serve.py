@@ -139,7 +139,10 @@ class FrontendHandler(SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Device-ID")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Accept, X-Device-ID, X-Tenant-ID, X-File-Name",
+        )
         self.end_headers()
 
     def _proxy(self, method: str) -> None:
@@ -147,10 +150,26 @@ class FrontendHandler(SimpleHTTPRequestHandler):
         body = self.rfile.read(length) if length else None
 
         request = urllib.request.Request(self.backend + self.path, data=body, method=method)
-        for header in ("Content-Type", "Accept", "X-Device-ID", "Last-Event-ID"):
-            value = self.headers.get(header)
-            if value:
-                request.add_header(header, value)
+        # 固定头之外，**所有 X- 开头的自定义头都转发**。
+        #
+        # 这里原来是一份白名单（Content-Type / Accept / X-Device-ID / Last-Event-ID），
+        # 加附件上传时忘了补 X-File-Name：后端拿不到文件名，`.xlsx` 只能被当成
+        # 「一张认不出来的图片」，回 415。前端提示「这个文件不是能识别的图片」，
+        # 而后端日志里连个文件名都没有——排查方向完全被带偏。
+        # 白名单漏一个就是一个功能静默失效，所以改成「按前缀转发」。
+        skipped = HOP_HEADERS | {"host", "cookie", "authorization", "content-length"}
+        for key, value in self.headers.items():
+            if key.lower() in skipped:
+                continue
+            if key.lower().startswith("x-") or key in {"Content-Type", "Accept"}:
+                request.add_header(key, value)
+
+        # 后端开了 TENANT_TOKENS 时，令牌由反代自己注入：浏览器的 Basic 认证
+        # 在上面已经被剥掉，后端只认 Bearer。没配就什么都不加，
+        # 本地零配置的单人用法完全不受影响
+        backend_token = os.getenv("BACKEND_TOKEN", "").strip()
+        if backend_token:
+            request.add_header("Authorization", "Bearer " + backend_token)
 
         try:
             response = OPENER.open(request, timeout=600)
@@ -306,20 +325,47 @@ def main() -> None:
     FrontendHandler.backend = args.backend.rstrip("/")
     auth = ("", "") if args.no_auth else read_auth()
     FrontendHandler.auth = auth
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), FrontendHandler)
+
+    # 绑定地址跟着「有没有密码」走，不要一律 0.0.0.0。
+    #
+    # 原来无论有没有密码都绑 0.0.0.0，而 read_auth() 在没配密码时返回空串——
+    # 于是「忘了设 WEB_AUTH_PASS」的后果是：整个局域网都能打开这个页面，
+    # 代理到后端，读取并删除全部会话。启动日志里那句「访问密码：未启用」
+    # 是唯一提示，而它混在一堆输出里，没人会注意。
+    #
+    # 现在的规则：没密码就不许对外，只监听回环；要对外就必须配密码。
+    if args.no_auth:
+        host = "127.0.0.1"
+    elif not auth[1]:
+        raise SystemExit(
+            "未配置访问密码，拒绝对外监听。\n"
+            "请在 .env 设置 WEB_AUTH_PASS=<密码>（可选 WEB_AUTH_USER，默认 ocean）后重启；\n"
+            "只在本机调试可以加 --no-auth，那样只会监听 127.0.0.1。"
+        )
+    else:
+        host = "0.0.0.0"
+
+    server = ThreadingHTTPServer((host, args.port), FrontendHandler)
     server.daemon_threads = True
 
     print("前端已启动：http://localhost:%d" % args.port)
-    detected = lan_ip()
-    if detected == "127.0.0.1":
-        print(
-            "手机同网访问：未探测到局域网地址（可能在代理 / VPN 下），可加 LAN_IP=192.168.x.x 指定"
-        )
+    if host == "127.0.0.1":
+        print("仅监听本机（--no-auth 或未配置密码）")
     else:
-        print("手机同网访问：http://%s:%d" % (detected, args.port))
+        detected = lan_ip()
+        if detected == "127.0.0.1":
+            print(
+                "手机同网访问：未探测到局域网地址（可能在代理 / VPN 下），"
+                "可加 LAN_IP=192.168.x.x 指定"
+            )
+        else:
+            print("手机同网访问：http://%s:%d" % (detected, args.port))
     print("接口代理：/api/v1/**  ->  %s" % FrontendHandler.backend)
     print("访问密码：%s" % ("已启用（用户 %s）" % auth[0] if auth[0] else "未启用"))
-    print("后端需另行启动：.venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000")
+    # 只有后端在回环地址时才是「本机另开一个进程」；容器里传的是 http://api:8000，
+    # 再提示「需另行启动」只会让人以为少了什么
+    if "127.0.0.1" in FrontendHandler.backend or "localhost" in FrontendHandler.backend:
+        print("后端需另行启动：.venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

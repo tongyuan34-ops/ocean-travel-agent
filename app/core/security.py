@@ -27,6 +27,24 @@ MAX_READ_BYTES = 200_000
 # 预览内容上限，用于写文件前的确认展示
 PREVIEW_LIMIT = 1200
 
+# 进程内追加的只读根目录。目前只有附件目录用它。
+#
+# **为什么不写进 grants.json**：那个文件记的是「用户授权过的目录」，
+# 会在设置界面里列出来让用户撤销。附件目录是程序自己管的临时区，
+# 用户从没「同意」过什么，不该在撤销列表里看到一条陌生的授权；
+# 而且它跟着 data/ 走，换机器、换安装位置都对不上，写死反而会失效。
+_extra_roots: list[Path] = []
+
+
+def register_root(path: Path) -> None:
+    """把一个程序自管的目录加进允许范围（只影响当前进程）。"""
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return
+    if resolved not in _extra_roots:
+        _extra_roots.append(resolved)
+
 
 class PathNotAllowed(Exception):
     """路径越界。错误码与 SPEC 契约一致。"""
@@ -76,6 +94,12 @@ def allowed_roots(settings: Settings) -> list[Path]:
     for granted in grants.load():
         if granted not in roots:
             roots.append(granted)
+
+    # 程序自管的目录排在最后：用户手写的白名单优先级更高，
+    # 顺序也决定了「建议授权哪个目录」时先给出哪一个
+    for extra in _extra_roots:
+        if extra not in roots:
+            roots.append(extra)
     return roots
 
 

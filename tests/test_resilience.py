@@ -22,8 +22,10 @@ from app.agent.resilience import (
     current_tool_budget,
     is_retryable,
     make_all_resilient,
+    make_observed,
     make_resilient,
 )
+from app.core.metrics import metrics
 from app.core.security import PathNotAllowed
 from app.media.base import MediaError
 
@@ -163,6 +165,30 @@ async def test_make_resilient_preserves_metadata():
     assert wrapped.description == probe_tool.description
     assert wrapped.args_schema is _Args
     assert await wrapped.ainvoke({"city": "杭州"}) == "杭州-ok"
+
+
+@tool("sync_probe", args_schema=_Args)
+def sync_probe(city: str) -> str:
+    """同步探针：use_skill 这类元工具就是同步的。"""
+    return f"{city}-ok"
+
+
+def test_make_observed_records_sync_tool_metrics():
+    metrics.reset()
+    wrapped = make_observed(sync_probe)
+    assert wrapped.invoke({"city": "杭州"}) == "杭州-ok"
+
+    series = metrics.snapshot()["series"]["tool_calls_total"]
+    assert series == [{"labels": {"status": "ok", "tool": "sync_probe"}, "value": 1.0}]
+
+
+async def test_async_tool_is_not_counted_twice():
+    metrics.reset()
+    wrapped = make_all_resilient([probe_tool])[0]
+    assert await wrapped.ainvoke({"city": "杭州"}) == "杭州-ok"
+
+    series = metrics.snapshot()["series"]["tool_calls_total"]
+    assert sum(item["value"] for item in series) == 1
 
 
 async def test_make_resilient_retries_inside_single_tool_call():

@@ -20,8 +20,10 @@ Agent 应用里「工具挂了」是常态而不是异常：地图 API 抖动、
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -32,6 +34,8 @@ from langchain_core.tools import BaseTool
 
 from app.agent.guard import check_dangerous, guard_output
 from app.agent.permissions import PermissionDenied
+from app.core.errors import TOOL_ERROR_PREFIXES
+from app.core.metrics import metrics
 from app.core.security import PathNotAllowed
 from app.media.base import MediaError
 
@@ -39,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # 包装标记：graph 每次重建都会重新包一遍工具，靠它避免套娃
 _RESILIENT_MARK = "_resilient_wrapped"
+_OBSERVED_MARK = "_observed_wrapped"
 
 # 这些异常代表「同样的请求再发一次也没用」：要么是代码问题，要么是用户意图
 NON_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -189,6 +194,23 @@ def is_blocked_result(text: str) -> bool:
     return text.lstrip().startswith(BLOCKED_RESULT_PREFIXES)
 
 
+def _record_tool(name: str, status: str, started: float) -> None:
+    """记录一次工具调用的结果与耗时。
+
+    耗时包含重试：用户等的是最终结果，不是单次尝试。
+    状态标签是枚举（ok / failed / error / denied / budget_blocked /
+    guard_blocked / cancelled），不会把工具返回内容带进时间序列。
+    """
+    metrics.inc("tool_calls_total", tool=name, status=status)
+    metrics.observe(
+        "tool_call_duration_seconds", time.perf_counter() - started, tool=name, status=status
+    )
+
+
+def _is_error_result(result: Any) -> bool:
+    return isinstance(result, str) and result.lstrip().startswith(TOOL_ERROR_PREFIXES)
+
+
 def is_retryable(exc: BaseException) -> bool:
     """判断异常是否值得重试。
 
@@ -241,9 +263,12 @@ async def call_with_retry(
                 # 只有「确实重试过」才算耗尽，一次就失败的不该计入
                 if stats is not None and attempt > 1:
                     stats.exhausted += 1
+                if attempt > 1:
+                    metrics.inc("tool_retry_exhausted_total", tool=label)
                 raise
             if stats is not None:
                 stats.on_retry(label)
+            metrics.inc("tool_retries_total", tool=label)
             delay = policy.delay_for(attempt)
             logger.warning(
                 "工具调用失败，%.2fs 后重试 | tool=%s 第=%d/%d 次 原因=%s: %s",
@@ -259,6 +284,7 @@ async def call_with_retry(
             if attempt > 1:
                 if stats is not None:
                     stats.recovered += 1
+                metrics.inc("tool_retry_recovered_total", tool=label)
                 logger.info("重试后成功 | tool=%s 第=%d 次", label, attempt)
             return result
 
@@ -292,11 +318,13 @@ def make_resilient(tool: BaseTool, policy: RetryPolicy | None = None) -> BaseToo
         return tool
 
     async def _call(*args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
         # 预算检查放在重试之前：超限就不该再去碰上游
         budget = current_tool_budget.get()
         if budget is not None:
             reason = budget.consume(tool.name)
             if reason:
+                _record_tool(tool.name, "budget_blocked", started)
                 logger.warning("工具调用被预算拦截 | tool=%s 原因=%s", tool.name, reason)
                 return (
                     f"{BUDGET_BLOCKED_PREFIX}：{reason}。"
@@ -308,14 +336,30 @@ def make_resilient(tool: BaseTool, policy: RetryPolicy | None = None) -> BaseToo
         # 网关管「用户有没有确认」，这里管「这个操作该不该出现」。
         blocked = check_dangerous(tool.name)
         if blocked:
+            _record_tool(tool.name, "guard_blocked", started)
             return f"{GUARD_BLOCKED_PREFIX}：{blocked}"
 
-        result = await call_with_retry(
-            lambda: original(*args, **kwargs),
-            policy=resolved,
-            label=tool.name,
-            stats=current_retry_stats.get(),
-        )
+        try:
+            result = await call_with_retry(
+                lambda: original(*args, **kwargs),
+                policy=resolved,
+                label=tool.name,
+                stats=current_retry_stats.get(),
+            )
+        except PermissionDenied:
+            _record_tool(tool.name, "denied", started)
+            raise
+        except asyncio.CancelledError:
+            _record_tool(tool.name, "cancelled", started)
+            raise
+        except Exception:
+            _record_tool(tool.name, "error", started)
+            raise
+
+        # 业务层用错误码表达失败（搜索被限流、知识库为空），执行本身没有抛异常。
+        # 若都记成 ok，「工具成功率」会把上游故障算成健康
+        status = "failed" if _is_error_result(result) else "ok"
+        _record_tool(tool.name, status, started)
         # 内容型工具的返回统一加来源标记，检测到注入则降级为带警告的数据
         if isinstance(result, str):
             return guard_output(tool.name, result)
@@ -327,8 +371,42 @@ def make_resilient(tool: BaseTool, policy: RetryPolicy | None = None) -> BaseToo
     return patched
 
 
+def make_observed(tool: BaseTool) -> BaseTool:
+    """给同步工具补指标（异步工具已经在 ``make_resilient`` 里记过）。
+
+    ``make_resilient`` 只包 async 工具，而 ``use_skill`` / 技能自带的
+    ``build`` 都是同步的。不补这一层，模型自主加载技能这一整条路径就不会
+    出现在 ``tool_calls_total`` 里，「技能命中率」只剩用户命令那一条腿。
+    """
+    if getattr(tool, _OBSERVED_MARK, False) or getattr(tool, "coroutine", None) is not None:
+        return tool
+    original = getattr(tool, "func", None)
+    if original is None:
+        return tool
+
+    @functools.wraps(original)
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            result = original(*args, **kwargs)
+        except PermissionDenied:
+            _record_tool(tool.name, "denied", started)
+            raise
+        except Exception:
+            _record_tool(tool.name, "error", started)
+            raise
+        _record_tool(tool.name, "failed" if _is_error_result(result) else "ok", started)
+        return result
+
+    patched = tool.model_copy(update={"func": _wrapped})
+    object.__setattr__(patched, _OBSERVED_MARK, True)
+    return patched
+
+
 def make_all_resilient(tools: list[BaseTool], policy: RetryPolicy | None = None) -> list[BaseTool]:
-    return [make_resilient(tool, policy) for tool in tools]
+    # 顺序不能反：async 工具由 make_resilient 记指标，make_observed 看到
+    # coroutine 非空会直接返回，不会重复计数
+    return [make_observed(make_resilient(tool, policy)) for tool in tools]
 
 
 __all__ = [
@@ -344,5 +422,6 @@ __all__ = [
     "is_blocked_result",
     "is_retryable",
     "make_all_resilient",
+    "make_observed",
     "make_resilient",
 ]

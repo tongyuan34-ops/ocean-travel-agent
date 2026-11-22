@@ -1,6 +1,6 @@
-"""用户上传的图片：规范化、落盘、按设备归属。
+"""用户上传的附件：图片规范化后重编码，文档原样落盘。
 
-**必须重新编码，不能原样存**，三个理由都是踩过才知道的：
+**图片必须重新编码，不能原样存**，三个理由都是踩过才知道的：
 
 1. 手机原图 12MP，base64 后约 4MB，一轮对话就把上下文预算吃穿——
    而且 token 是按像素算的，原图不会因为「模型看不了那么细」而便宜；
@@ -8,6 +8,10 @@
    它会认真地描述一张歪掉的照片；
 3. EXIF 里常有 GPS 坐标。用户传一张旅行照，不该顺手把拍摄位置带进模型上下文——
    这是隐私问题，不是性能问题。
+
+**文档相反：一个字节都不改。** Word / Excel 是 zip 包，Pillow 不认识，重新编码
+更是无从谈起；而且 ``read_document`` 那一套解析是按真实文件格式写的，改动过的
+副本只会让解析失败。所以文档原样落盘，只按扩展名归档。
 
 **接口不走 multipart**：一次只传一个文件，直接读请求体就够，
 省掉 ``python-multipart`` 一个依赖和一个解析器；浏览器侧 ``xhr.send(file)``
@@ -33,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 # 单文件上限。12MB 足够覆盖手机原图，又不至于让内存里出现离谱的请求体
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+# 文档单独一档上限：带图的 docx、几万行的 xlsx 很容易过 12MB，
+# 而文档不需要 base64 进上下文（只进摘要），体积压力小得多
+MAX_DOC_BYTES = 32 * 1024 * 1024
 # 长边上限：1280 对「看图回答问题」够用，再大只是烧 token
 MAX_SIDE = 1280
 JPEG_QUALITY = 85
@@ -48,15 +55,43 @@ ALLOWED_MIME = {
     "image/bmp",
 }
 
-_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# 能收的文档后缀。和 ``app/services/docs/reader.py`` 的 SUPPORTED_SUFFIXES 对齐，
+# 另外**故意**收下 .doc / .xls：这两种旧格式读不了，但直接拒收只会让用户以为
+# 软件坏了；收下来再回一句「另存为 .docx 再传」才是有用的反馈
+DOC_SUFFIXES = frozenset(
+    {".docx", ".xlsx", ".xlsm", ".doc", ".xls", ".txt", ".md", ".markdown", ".csv", ".tsv"}
+)
 
-# 单条消息最多带几张图。视频抽帧会一次占掉 4 张，留两张给「图 + 截图」的混发
+# 取回文件时用的 Content-Type。浏览器拿到 octet-stream 会直接下载，
+# 而 docx 若被当成文本渲染，用户看到的是乱码
+DOC_MIME = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+}
+
+_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# 后缀只允许字母数字：文件名是用户给的，``../../x`` 这种不能进路径
+_SAFE_SUFFIX_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
+
+# 单条消息最多带几个附件。视频抽帧会一次占掉 4 个，留两个给「图 + 截图」的混发
 MAX_ATTACHMENTS = 6
+
+# 附件种类。image 会进多模态内容块，doc 走「摘要 + 路径」
+KIND_IMAGE = "image"
+KIND_DOC = "doc"
 
 
 @dataclass(frozen=True)
 class Upload:
-    """一张已落盘的图片。元数据与文件分开放，改元数据不用重写图片。"""
+    """一个已落盘的附件。元数据与文件分开放，改元数据不用重写文件。"""
 
     id: str
     ext: str
@@ -66,6 +101,8 @@ class Upload:
     created_at: float
     user_id: str
     filename: str
+    # image / doc。老记录没有这个字段，按 image 兜底（那时候只收图片）
+    kind: str = KIND_IMAGE
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,6 +114,7 @@ class Upload:
             "created_at": self.created_at,
             "user_id": self.user_id,
             "filename": self.filename,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -90,7 +128,12 @@ class Upload:
             created_at=_as_float(data.get("created_at")),
             user_id=str(data.get("user_id") or "default"),
             filename=str(data.get("filename") or ""),
+            kind=str(data.get("kind") or KIND_IMAGE),
         )
+
+    @property
+    def is_doc(self) -> bool:
+        return self.kind == KIND_DOC
 
 
 def _as_int(value: object, default: int = 0) -> int:
@@ -185,25 +228,71 @@ class UploadStore:
         )
         return item
 
+    def save_document(self, raw: bytes, user_id: str, filename: str = "") -> Upload:
+        """原样保存一个文档，不做任何转码。
+
+        **校验的是内容而不是扩展名**：docx / xlsx 都是 zip 包，头两个字节必然是
+        ``PK``。只看扩展名的话，一个改了名字的可执行文件会被老老实实存下来，
+        后面 ``read_document`` 解析时再炸——错误会出现在离原因很远的地方。
+        """
+        if len(raw) > MAX_DOC_BYTES:
+            raise ValueError(f"文档超过上限 {MAX_DOC_BYTES // (1024 * 1024)}MB")
+        suffix = doc_suffix_of(filename)
+        if suffix in {".docx", ".xlsx", ".xlsm"} and not raw.startswith(b"PK"):
+            raise ValueError(f"「{filename}」不是有效的 {suffix} 文件（内容与扩展名不符）")
+
+        upload_id = uuid4().hex
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / f"{upload_id}{suffix}").write_bytes(raw)
+        item = Upload(
+            id=upload_id,
+            ext=suffix,
+            width=0,
+            height=0,
+            bytes=len(raw),
+            created_at=time.time(),
+            user_id=user_id,
+            filename=filename[:120],
+            kind=KIND_DOC,
+        )
+        self._write_meta(item)
+        logger.info(
+            "文档已接收 | id=%s 类型=%s 体积=%.0fKB 原文件名=%s",
+            upload_id,
+            suffix,
+            len(raw) / 1024,
+            filename or "-",
+        )
+        return item
+
     def _write_meta(self, item: Upload) -> None:
         (self.root / f"{item.id}.json").write_text(
             json.dumps(item.to_dict(), ensure_ascii=False), encoding="utf-8"
         )
-
     # ---------- 读 ----------
 
-    def get(self, upload_id: str) -> Upload | None:
+    def get(self, upload_id: str, user_id: str | None = None) -> Upload | None:
+        """按 id 取上传记录。
+
+        ``user_id`` 不为 None 时校验归属，不属于这个人的按「不存在」返回。
+        归属必须由**取用方**显式传进来：原图接口 ``GET /uploads/{id}`` 故意
+        不校验（``<img src>`` 带不了自定义头），而「把它塞进某一轮对话」是
+        写操作，必须校验——否则拿到 id 就能让别人的文件进入自己的上下文。
+        """
         if not _UPLOAD_ID_RE.match(upload_id):
             return None
         meta = self.root / f"{upload_id}.json"
         if not meta.is_file():
             return None
         try:
-            return Upload.from_dict(json.loads(meta.read_text(encoding="utf-8")))
+            item = Upload.from_dict(json.loads(meta.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             # 边车损坏就当没有这张图：宁可让用户重传，也不要抛 500
             logger.warning("上传元数据损坏 | id=%s", upload_id)
             return None
+        if user_id is not None and item.user_id != user_id:
+            return None
+        return item
 
     def path_of(self, item: Upload) -> Path:
         return self.root / f"{item.id}{item.ext}"
@@ -222,7 +311,24 @@ class UploadStore:
         return True
 
 
+def doc_suffix_of(filename: str) -> str:
+    """从文件名取文档后缀，取不到或不在白名单里就抛 ``ValueError``。
+
+    白名单而不是黑名单：这个字符串会拼进落盘路径，任何「先取了再过滤」的写法
+    都得考虑 ``../../x`` 和 ``a.b/c`` 这类构造。只认字母数字后缀，别的直接拒。
+    """
+    suffix = Path(filename or "").suffix.lower()
+    if not _SAFE_SUFFIX_RE.match(suffix):
+        raise ValueError(f"「{filename or '未命名文件'}」没有可用的扩展名")
+    if suffix not in DOC_SUFFIXES:
+        readable = "、".join(sorted(DOC_SUFFIXES))
+        raise ValueError(f"不支持 {suffix} 文件，可以传：{readable}")
+    return suffix
+
+
 def mime_of(item: Upload) -> str:
+    if item.kind == KIND_DOC:
+        return DOC_MIME.get(item.ext, "application/octet-stream")
     return "image/png" if item.ext == ".png" else "image/jpeg"
 
 

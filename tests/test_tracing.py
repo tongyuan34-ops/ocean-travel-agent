@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from app.core import tracing
 from app.core.config import load_settings
 from app.services import chat as chat_module
 from app.services.chat import ChatService
+from app.services.sessions import SessionService
 from app.storage import MemorySessionStore
 
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
@@ -68,9 +71,9 @@ class _Graph:
 
 async def _run_once(monkeypatch) -> tuple[list[dict], dict]:
     graph = _Graph()
-    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s: (graph, "native"))
-    service = ChatService(load_settings(), MemorySessionStore())
-    session = await service.create_session()
+    monkeypatch.setattr(chat_module, "build_agent_graph", lambda _s, **_kw: (graph, "native"))
+    service = ChatService(load_settings(), SessionService(MemorySessionStore()))
+    session = await service._sessions.create()
 
     frames: list[dict] = []
     async for frame in service.stream_reply(session.id, "你好"):
@@ -96,3 +99,71 @@ async def test_each_turn_gets_a_fresh_trace_id(monkeypatch):
     first, _ = await _run_once(monkeypatch)
     second, _ = await _run_once(monkeypatch)
     assert first[-1]["trace_id"] != second[-1]["trace_id"]
+
+
+# ---------- Langfuse（可选后端） ----------
+
+
+@pytest.fixture
+def fresh_langfuse(monkeypatch):
+    """把模块里的追踪状态清回初始值。
+
+    ``configure_langfuse`` 只尝试一次并记住结论（避免每轮重试超时），
+    所以用例之间必须显式复位，否则第二个用例拿到的是上一个用例的结果。
+    """
+    monkeypatch.setattr(tracing, "_langfuse_settled", False)
+    monkeypatch.setattr(tracing, "_langfuse_client", None)
+    monkeypatch.setattr(tracing, "_langfuse_handler", None)
+
+
+def test_langfuse_without_keys_is_a_no_op(fresh_langfuse, settings):
+    """没配 key 就完全空转：不建客户端、不挂回调、不发请求。"""
+    bare = replace(settings, langfuse_public_key="", langfuse_secret_key="")
+
+    assert tracing.configure_langfuse(bare) is False
+    assert tracing.langfuse_callbacks() == []
+    assert tracing.langfuse_enabled() is False
+
+
+def test_langfuse_can_be_switched_off_with_keys_present(fresh_langfuse, settings):
+    """只填了 key 但不想上报时，开关要能压住它。"""
+    off = replace(
+        settings,
+        langfuse_tracing=False,
+        langfuse_public_key="pk-lf-x",
+        langfuse_secret_key="sk-lf-x",
+    )
+
+    assert tracing.configure_langfuse(off) is False
+    assert tracing.langfuse_callbacks() == []
+
+
+def test_flush_and_shutdown_are_safe_when_disabled(fresh_langfuse):
+    """退出路径上不能抛：追踪没配好也不该让程序关不掉。"""
+    tracing.flush_tracing()
+    tracing.shutdown_tracing()
+    assert tracing.langfuse_enabled() is False
+
+
+def test_trace_config_maps_session_to_langfuse_keys(fresh_langfuse, monkeypatch):
+    """启用后 metadata 要同时带 LangSmith 与 Langfuse 两套键。
+
+    Langfuse 只认 langfuse_session_id / langfuse_user_id 这几个名字，
+    少一个键的结果就是面板上所有 trace 散着，按会话根本串不起来。
+    """
+    monkeypatch.setattr(tracing, "_langfuse_handler", object())
+
+    config = tracing.trace_config("abc123", session_id="s1", user_id="u1")
+
+    assert config["metadata"]["langfuse_session_id"] == "s1"
+    assert config["metadata"]["langfuse_user_id"] == "u1"
+    assert config["metadata"]["langfuse_trace_name"] == "chat-abc123"
+    # 原来给 LangSmith 的键不能被顶掉
+    assert config["metadata"]["session_id"] == "s1"
+    assert config["run_name"] == "chat-abc123"
+
+
+def test_trace_config_stays_clean_when_disabled(fresh_langfuse):
+    """没启用时不要把 langfuse_* 塞进 metadata——LangSmith 面板上会全是无用字段。"""
+    config = tracing.trace_config("abc123", session_id="s1")
+    assert not any(key.startswith("langfuse_") for key in config["metadata"])

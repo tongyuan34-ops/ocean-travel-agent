@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -16,7 +16,14 @@ from app.media.base import MediaKind, MediaRequest
 from app.media.errors import explain_media_error
 from app.media.service import MediaService
 from app.media.templates import TEMPLATES
-from app.media.uploads import ALLOWED_MIME, MAX_UPLOAD_BYTES, UploadStore
+from app.media.uploads import (
+    ALLOWED_MIME,
+    DOC_SUFFIXES,
+    MAX_DOC_BYTES,
+    MAX_UPLOAD_BYTES,
+    UploadStore,
+    mime_of,
+)
 from app.schemas.media import (
     ImageRequest,
     ImageTemplateItem,
@@ -191,40 +198,50 @@ def _uploads(request: Request) -> UploadStore:
 
 @router.post("/uploads", response_model=UploadOut)
 async def create_upload(request: Request) -> UploadOut:
-    """接收一张图片，规范化后落盘。
+    """接收一个附件（图片或文档），落盘后返回 id。
 
-    直读请求体而不是 multipart：一次只传一张，省一个依赖和一个解析器。
+    直读请求体而不是 multipart：一次只传一个，省一个依赖和一个解析器。
     前端用 ``xhr.send(file)`` 发，``Content-Type`` 就是文件本身的类型。
+
+    **分流看扩展名，不看 Content-Type**。Office 文件的类型在浏览器里极不可靠：
+    Windows 上 .xlsx 常见 ``application/octet-stream``，某些环境给
+    ``application/zip``，还有给空字符串的。扩展名是用户看得见的那一层，
+    而且我们本来就要拿它决定落盘文件名。
     """
+    filename = _filename_of(request)
+    suffix = Path(filename).suffix.lower()
+    is_doc = suffix in DOC_SUFFIXES
+    limit = MAX_DOC_BYTES if is_doc else MAX_UPLOAD_BYTES
+
     declared = int(request.headers.get("content-length") or 0)
-    if declared > MAX_UPLOAD_BYTES:
+    if declared > limit:
         # 先看 Content-Length 再读体：几十 MB 的请求不该先进内存再被拒
-        raise ApiError(
-            "UPLOAD_TOO_LARGE",
-            f"图片超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限",
-        )
+        raise ApiError("UPLOAD_TOO_LARGE", f"文件超过 {limit // (1024 * 1024)}MB 上限")
 
     raw = await request.body()
     if not raw:
         raise ApiError("INVALID_REQUEST", "请求体为空")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise ApiError(
-            "UPLOAD_TOO_LARGE",
-            f"图片超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限",
+    if len(raw) > limit:
+        raise ApiError("UPLOAD_TOO_LARGE", f"文件超过 {limit // (1024 * 1024)}MB 上限")
+
+    if is_doc:
+        try:
+            item = _uploads(request).save_document(raw, resolve_user_id(request), filename)
+        except ValueError as exc:
+            raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", str(exc)) from None
+    else:
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        # 手机相册偶尔给 application/octet-stream，此时按扩展名兜底
+        unknown_but_named = content_type == "application/octet-stream" and _looks_like_image(
+            filename
         )
-
-    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
-    filename = _filename_of(request)
-    # 手机相册偶尔给 application/octet-stream，此时按扩展名兜底
-    unknown_but_named = content_type == "application/octet-stream" and _looks_like_image(filename)
-    if content_type and content_type not in ALLOWED_MIME and not unknown_but_named:
-        raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", f"不支持的图片类型：{content_type}")
-
-    try:
-        item = _uploads(request).save_image(raw, resolve_user_id(request), filename)
-    except ValueError as exc:
-        # Pillow 解析失败或超限，都归到「这个文件当图片用不了」
-        raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", str(exc)) from None
+        if content_type and content_type not in ALLOWED_MIME and not unknown_but_named:
+            raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", f"不支持的图片类型：{content_type}")
+        try:
+            item = _uploads(request).save_image(raw, resolve_user_id(request), filename)
+        except ValueError as exc:
+            # Pillow 解析失败或超限，都归到「这个文件当图片用不了」
+            raise ApiError("UPLOAD_TYPE_NOT_ALLOWED", str(exc)) from None
 
     return UploadOut(
         upload_id=item.id,
@@ -233,6 +250,8 @@ async def create_upload(request: Request) -> UploadOut:
         height=item.height,
         bytes=item.bytes,
         format=item.ext.lstrip("."),
+        kind=item.kind,
+        filename=item.filename,
     )
 
 
@@ -247,13 +266,27 @@ async def get_upload(upload_id: str, request: Request) -> Response:
     """
     item = _uploads(request).get(upload_id)
     if item is None:
-        raise ApiError("UPLOAD_NOT_FOUND", "图片不存在或已过期")
+        raise ApiError("UPLOAD_NOT_FOUND", "附件不存在或已过期")
     path = _uploads(request).path_of(item)
     if not path.is_file():
-        raise ApiError("UPLOAD_NOT_FOUND", "图片文件已丢失")
+        raise ApiError("UPLOAD_NOT_FOUND", "附件文件已丢失")
+
+    if item.is_doc:
+        # 文档一律 attachment：浏览器 inline 渲染 docx 只会得到一片乱码或空白页，
+        # 让用户下载下来用本机 Office 打开才是它该有的行为
+        name = item.filename or f"upload-{item.id[:8]}{item.ext}"
+        return Response(
+            content=path.read_bytes(),
+            media_type=mime_of(item),
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+            },
+        )
+
     return Response(
         content=path.read_bytes(),
-        media_type="image/png" if item.ext == ".png" else "image/jpeg",
+        media_type=mime_of(item),
         headers={
             # 内容按 id 固化，可以放心让浏览器缓存，省掉每次刷新的重复下载
             "Cache-Control": "private, max-age=86400",

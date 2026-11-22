@@ -16,7 +16,9 @@ from app.rag.index import BM25Index, Hit
 from app.rag.retriever import (
     KnowledgeBase,
     get_knowledge_base,
+    load_chunks,
     load_knowledge_base,
+    load_knowledge_base_cached,
     reset_cache,
 )
 from app.rag.tokenize import tokenize
@@ -27,7 +29,9 @@ __all__ = [
     "Hit",
     "KnowledgeBase",
     "get_knowledge_base",
+    "load_chunks",
     "load_knowledge_base",
+    "load_knowledge_base_cached",
     "reset_cache",
     "split_markdown",
     "tokenize",

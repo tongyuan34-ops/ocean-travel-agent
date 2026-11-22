@@ -187,3 +187,65 @@ def test_frontend_and_api_share_one_port(monkeypatch):
         assert "text/html" in page.headers["content-type"]
         # 前端走同源相对路径，所以接口必须在同一端口下可达
         assert client.get("/api/v1/health", auth=("ocean", "pw")).status_code == 200
+
+
+def test_missing_password_refuses_to_start(monkeypatch):
+    """没密码就不许起。
+
+    原来这里只 ``logger.warning`` 一句就继续服务，而这个入口按文档就是
+    ``--host 0.0.0.0``——警告在控制台滚过去，服务照常对外，等于没有防线。
+    失败方向必须收敛到「不提供服务」：起不来是当场能发现的事故。
+    """
+    monkeypatch.delenv("WEB_AUTH_PASS", raising=False)
+    monkeypatch.delenv("ALLOW_OPEN_ACCESS", raising=False)
+
+    from app.standalone import build_standalone_app
+
+    with pytest.raises(RuntimeError) as caught:
+        build_standalone_app()
+
+    message = str(caught.value)
+    assert "WEB_AUTH_PASS" in message
+    # 报错要给出下一步动作，否则用户只知道「起不来」
+    assert "ALLOW_OPEN_ACCESS" in message
+
+
+def test_open_access_requires_an_explicit_opt_in(monkeypatch):
+    """确实要裸跑的场景（内网、前面有反代鉴权）留一个显式开关。"""
+    monkeypatch.delenv("WEB_AUTH_PASS", raising=False)
+    monkeypatch.setenv("ALLOW_OPEN_ACCESS", "1")
+    monkeypatch.setenv("STORAGE_BACKEND", "memory")
+
+    from app.standalone import build_standalone_app
+
+    with TestClient(build_standalone_app()) as client:
+        assert client.get("/api/v1/health").status_code == 200
+
+
+def test_desktop_mode_still_needs_no_password(monkeypatch):
+    """桌面版只监听 127.0.0.1，不该被这条规则挡住。"""
+    monkeypatch.delenv("WEB_AUTH_PASS", raising=False)
+    monkeypatch.delenv("ALLOW_OPEN_ACCESS", raising=False)
+    monkeypatch.setenv("STORAGE_BACKEND", "memory")
+
+    from app.standalone import build_standalone_app
+
+    with TestClient(build_standalone_app(require_auth=False)) as client:
+        assert client.get("/api/v1/health").status_code == 200
+
+
+def test_share_link_does_not_require_basic_auth(monkeypatch):
+    """分享页的凭据是 URL 里的 token。
+
+    要求 Basic Auth 会让「把行程发给朋友」直接失效，而失效时页面只弹一个
+    登录框，用户根本想不到是密码的问题。
+    """
+    monkeypatch.setenv("WEB_AUTH_PASS", "pw")
+    monkeypatch.setenv("STORAGE_BACKEND", "memory")
+
+    from app.standalone import build_standalone_app
+
+    with TestClient(build_standalone_app()) as client:
+        response = client.get("/share/not-a-real-token")
+        # token 不存在 → 404 或 410 都行，但绝不能是 401
+        assert response.status_code != 401

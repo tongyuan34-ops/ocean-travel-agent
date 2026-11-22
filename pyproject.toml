@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocean-travel-agent"
-version = "0.1.0"
+version = "0.2.1"
 description = "旅行规划 Agent：双模式 Agent 循环、可续传 SSE、默认拒绝的权限网关"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,6 +26,10 @@ dependencies = [
     # ImportError，而且是整个 app 起不来——所以显式声明。
     "pillow>=13.0,<14.0",
     "python-dotenv>=1.2,<2.0",
+    # 文档读写：docx / xlsx 是「真编辑」的两种格式（保留样式），
+    # PDF 只能生成不能改，所以不引 pdf 编辑库
+    "python-docx>=1.2,<2.0",
+    "openpyxl>=3.1,<4.0",
     "redis>=8.1,<9.0",
     # 评测用例集用 YAML 维护：比 JSON 适合手写长中文文本与注释
     "pyyaml>=6.0,<7.0",
@@ -44,6 +48,7 @@ dev = [
 ]
 # LangSmith 是可选依赖：不装也能跑，装了并配好 LANGSMITH_API_KEY 才有链路追踪
 tracing = [
+    "langfuse>=5,<6",
     "langsmith>=0.7,<1.0",
 ]
 # 桌面版：pywebview 提供原生窗口（Windows 走 WebView2），

@@ -321,7 +321,10 @@ app/
   main.py                 FastAPI 入口、lifespan 装配、CORS
   api/routes/             chat / tools / permissions / media / system / trips / share
   schemas/                请求响应模型（字段名即契约）
-  services/chat.py        会话 + agent 循环 → SSE；工具 category 映射
+  services/chat.py        单轮编排（准备 / 跑图 / 收尾）→ SSE
+  services/sessions.py    会话目录（增删查、列表投影）
+  services/turn_context.py 提示词 / 历史 / 附件 / 摘要装配
+  services/turn_runtime.py 图事件 → SSE、跨进程取消
   services/streams.py     StreamState 事件缓冲与续传
   services/trips*.py      地图缓存、PDF、ICS、分享页
   agent/graph.py          LangGraph 图与 SYSTEM_PROMPT（MAX_STEPS=12）

@@ -62,6 +62,9 @@ class ChatMessage:
 class ChatSession:
     id: str
     created_at: str
+    # 会话归属的租户（来自 X-Tenant-ID）。老会话没有这个字段，回落 default：
+    # 升级前写下的数据都属于同一个人，不该因为加了隔离就读不出来
+    tenant: str = "default"
     messages: list[ChatMessage] = field(default_factory=list)
     # 滚动摘要，以及已被折叠进摘要的消息条数（messages 的下标）
     summary: str = ""
@@ -71,15 +74,28 @@ class ChatSession:
     # 对话风格（app/agent/prompts.py）。存在会话上而不是每轮传：
     # 用户选一次就该一直生效，否则每轮都要重新说一遍
     persona: str = "concierge"
+    # 上一轮激活的工具组（app/agent/toolset.py）。只用来做「追问时别掉工具」
+    # 的沿用判断，不参与展示；老会话没有这个字段，回落空列表
+    active_groups: list[str] = field(default_factory=list)
+    # 用户显式选中的技能（app/skills/registry.py）。空表示「没选，让模型按
+    # 触发词自己判断」。和 persona 一样是会话属性：选一次就该一直生效
+    skill: str = ""
+    # 上一轮实际用到的技能（显式 + 模型自主 + 追问沿用）。用于让「那第二天呢」
+    # 这类追问沿用同一技能，不参与展示
+    active_skills: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "created_at": self.created_at,
+            "tenant": self.tenant,
             "summary": self.summary,
             "summarized_count": self.summarized_count,
             "usage": dict(self.usage),
             "persona": self.persona,
+            "active_groups": list(self.active_groups),
+            "skill": self.skill,
+            "active_skills": list(self.active_skills),
             "messages": [item.to_dict() for item in self.messages],
         }
 
@@ -88,10 +104,15 @@ class ChatSession:
         return cls(
             id=str(data.get("id", "")),
             created_at=str(data.get("created_at", "")),
+            tenant=str(data.get("tenant") or "default"),
             summary=str(data.get("summary", "")),
             summarized_count=int(data.get("summarized_count", 0)),
             usage=dict(data.get("usage") or {}),
             # 老会话没有这个字段，回落默认风格，不要报错
             persona=str(data.get("persona") or "concierge"),
+            active_groups=[str(item) for item in data.get("active_groups") or []],
+            # 老会话没有技能字段，回落空串：没选技能本来就是合法状态
+            skill=str(data.get("skill") or ""),
+            active_skills=[str(item) for item in data.get("active_skills") or []],
             messages=[ChatMessage.from_dict(item) for item in data.get("messages") or []],
         )

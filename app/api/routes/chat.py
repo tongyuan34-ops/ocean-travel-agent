@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.prompts import DEFAULT_PERSONA, persona_list
 from app.core.errors import ApiError
-from app.core.identity import resolve_user_id
+from app.core.identity import resolve_tenant_id, resolve_user_id
 from app.schemas.chat import (
     MessageItem,
     MessageList,
@@ -19,15 +19,24 @@ from app.schemas.chat import (
     SessionCreated,
     SessionItem,
     SessionList,
+    SkillOut,
+    SkillUpdate,
     UsageOut,
 )
 from app.services.chat import ChatService
+from app.services.sessions import SessionService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 def _service(request: Request) -> ChatService:
+    """流式对话相关的服务：发消息、续传、停止。"""
     return request.app.state.chat
+
+
+def _sessions(request: Request) -> SessionService:
+    """会话目录：增删查、列表、风格与技能。与生成无关，单独取。"""
+    return request.app.state.sessions
 
 
 @router.get("/personas", response_model=PersonaList)
@@ -45,37 +54,45 @@ async def list_personas() -> PersonaList:
 
 @router.post("/sessions", response_model=SessionCreated)
 async def create_session(request: Request) -> SessionCreated:
-    """创建会话。"""
-    session = await _service(request).create_session()
+    """创建会话。会话在创建时盖上租户，之后只对该租户可见。"""
+    session = await _sessions(request).create(resolve_tenant_id(request))
     return SessionCreated(session_id=session.id, created_at=session.created_at)
 
 
 @router.get("/sessions", response_model=SessionList)
 async def list_sessions(request: Request) -> SessionList:
-    """列出全部会话，最近的排前面。
+    """列出**本租户**的会话，最近的排前面。
 
     会话列表必须由后端给：桌面版每次启动的端口是随机的，localStorage 按
     源（含端口）隔离，重开程序后前端自己记的列表是空的——用户会以为历史
     消息丢了，实际数据一直在 ``data/sessions.json`` 里。
     """
-    items = await _service(request).list_sessions()
+    items = await _sessions(request).list_rows(resolve_tenant_id(request))
     return SessionList(items=[SessionItem(**item) for item in items])
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(session_id: str, request: Request) -> None:
     """删除会话及其消息。"""
-    await _service(request).delete_session(session_id)
+    await _sessions(request).delete(session_id, resolve_tenant_id(request))
 
 
 @router.get("/sessions/{session_id}/messages", response_model=MessageList)
 async def list_messages(session_id: str, request: Request) -> MessageList:
     """拉取会话历史，用于刷新后恢复。"""
-    session = await _service(request).get_session(session_id)
-    return MessageList(
-        items=[MessageItem(**item.to_dict()) for item in session.messages],
-        persona=session.persona,
-    )
+    service = _service(request)
+    tenant = resolve_tenant_id(request)
+    user_id = resolve_user_id(request)
+    session = await _sessions(request).get(session_id, tenant)
+    items = []
+    for item in session.messages:
+        data = item.to_dict()
+        # 附件元数据不落库：它随时可能因为用户删除附件而变化，存进历史就会过期。
+        # 读的时候按 id 现查，本地文件读一次是微秒级的事。
+        # 传身份进去：不属于当前身份的附件不返回，免得历史里挂个点开就 404 的空卡
+        data["attachment_meta"] = service.attachment_meta(item.attachments, user_id)
+        items.append(MessageItem(**data))
+    return MessageList(items=items, persona=session.persona, skill=session.skill)
 
 
 @router.patch("/sessions/{session_id}/persona", response_model=PersonaOut)
@@ -85,14 +102,29 @@ async def set_persona(session_id: str, payload: PersonaUpdate, request: Request)
     只影响后续轮次，不改历史消息——已经聊过的内容按当时的风格生成，
     这是事实，不该被追溯修改。
     """
-    resolved = await _service(request).set_persona(session_id, payload.persona)
+    resolved = await _sessions(request).set_persona(
+        session_id, payload.persona, resolve_tenant_id(request)
+    )
     return PersonaOut(persona=resolved)
+
+
+@router.patch("/sessions/{session_id}/skill", response_model=SkillOut)
+async def set_skill(session_id: str, payload: SkillUpdate, request: Request) -> SkillOut:
+    """切换本会话固定使用的技能。空串表示回到「不指定」。
+
+    与风格切换不同，未知技能会返回 INVALID_REQUEST：技能会带来额外的工具
+    和提示词，静默回落到默认会让用户以为它正在生效。
+    """
+    resolved = await _sessions(request).set_skill(
+        session_id, payload.skill, resolve_tenant_id(request)
+    )
+    return SkillOut(skill=resolved)
 
 
 @router.get("/sessions/{session_id}/usage", response_model=UsageOut)
 async def get_usage(session_id: str, request: Request) -> UsageOut:
     """会话累计 token 与成本，供前端展示用量。"""
-    return UsageOut(**await _service(request).get_usage(session_id))
+    return UsageOut(**await _sessions(request).usage(session_id, resolve_tenant_id(request)))
 
 
 _SSE_HEADERS = {
@@ -123,6 +155,7 @@ async def send_message(
         payload.message,
         resolve_user_id(request),
         attachments=payload.attachments,
+        tenant=resolve_tenant_id(request),
     )
     headers = dict(_SSE_HEADERS)
     headers["X-Stream-ID"] = state.stream_id

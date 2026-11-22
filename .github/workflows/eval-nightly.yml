@@ -1,0 +1,70 @@
+name: Eval nightly
+
+# 离线自测证明「评测框架没坏」，真模型评测证明「模型表现没退」。
+# 后者要花钱、会随模型版本漂移，不适合卡每次提交，所以放在每天一次 +
+# 手动触发，并和 evals/baseline.json 对比，出现回归就红。
+
+on:
+  schedule:
+    # UTC 18:30 = 北京时间次日 02:30，避开白天额度高峰
+    - cron: "30 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: eval-nightly
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    name: Full eval vs baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MODEL_PROVIDER: openai_compatible
+      MODEL_NAME: ${{ vars.EVAL_MODEL_NAME || 'deepseek-v4-1-flash-economy-261017' }}
+      MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+      STORAGE_BACKEND: memory
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Check key
+        id: key
+        # secrets 不能在 job 级 if 里直接用，只能先落到 env 再判断
+        run: |
+          if [ -z "$MODEL_API_KEY" ]; then
+            echo "::notice::未配置 MODEL_API_KEY，本次跳过真模型评测"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run eval
+        if: steps.key.outputs.ready == 'true'
+        run: |
+          uv run --frozen python -m evals.run \
+            --out eval-report.md \
+            --json eval-report.json \
+            --baseline evals/baseline.json \
+            --fail-on-regression
+
+      - name: Job summary
+        if: always() && hashFiles('eval-report.md') != ''
+        run: cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always() && hashFiles('eval-report.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-nightly
+          path: |
+            eval-report.md
+            eval-report.json
+          if-no-files-found: ignore

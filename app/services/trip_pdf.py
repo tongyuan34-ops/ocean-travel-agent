@@ -6,6 +6,7 @@ ReportLab 是纯 Python wheel，配一个 TTF 中文字体即可稳定输出。
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -28,18 +29,22 @@ from reportlab.platypus import (
 
 from app.schemas.trips import TripPlan
 
+logger = logging.getLogger(__name__)
+
 FONT_NAME = "CJK"
 
 # 中文字体按平台找：桌面版在 Windows 上跑，CI 和 Docker 在 Linux 上跑，
 # 写死 C:/Windows/Fonts 的后果是「Windows 上一切正常，Linux 上导出 PDF 直接抛异常」——
 # 测试也会跟着红，而且报错信息（找不到字体）跟真正的病因（写死了路径）看起来没关系。
 FONT_CANDIDATES = (
-    # Linux：Noto CJK 是各发行版最通用的一套，Docker 里 apt 装 fonts-noto-cjk 即可
+    # Linux：文泉驿是 TrueType 轮廓，reportlab 能直接嵌入，所以排在前面
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    # Noto CJK 是 CFF（PostScript）轮廓，reportlab 注册时会失败、自动跳到下一个；
+    # 留着是因为有些发行版打包的是 TrueType 版本，能用的就先用
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     # macOS
     "/System/Library/Fonts/PingFang.ttc",
     # Windows
@@ -78,16 +83,34 @@ NOTE = ParagraphStyle(
 )
 
 
+def _try_register(path: Path) -> bool:
+    """试着把这个字体注册进去，成功返回 True。
+
+    光看文件存在不够：``.ttc`` 是字体集合，得指定子字体索引；更要命的是
+    Noto CJK 那种 CFF（PostScript）轮廓的字体 reportlab 根本不支持，
+    注册时才抛异常。不在这里试一次，就会变成「在 CI 上导出 PDF 直接失败」。
+    """
+    if FONT_NAME in pdfmetrics.getRegisteredFontNames():
+        return True
+    try:
+        pdfmetrics.registerFont(TTFont(FONT_NAME, str(path), subfontIndex=0))
+    except Exception as exc:  # noqa: BLE001 - 格式不支持是预期情况，换下一个候选
+        logger.debug("字体 %s 注册失败：%s", path, exc)
+        return False
+    return True
+
+
 def find_font() -> Path | None:
-    """按 PDF_FONT_PATH → 各平台常见路径的顺序找一个可用的中文字体。"""
+    """按 PDF_FONT_PATH → 各平台常见路径找一个**能真正用起来**的中文字体。"""
     explicit = os.getenv("PDF_FONT_PATH")
     if explicit:
         wanted = Path(explicit)
-        # 显式指定的路径不给兜底：用户写了却找不到，多半是拼错了，静默换字体会更难查
+        # 显式指定的路径只认存在与否：用户写了却找不到，多半是拼错了，
+        # 静默换一套字体会让他拿到字形不对的 PDF 又不知道为什么
         return wanted if wanted.is_file() else None
     for candidate in FONT_CANDIDATES:
         found = Path(candidate)
-        if found.is_file():
+        if found.is_file() and _try_register(found):
             return found
     return None
 

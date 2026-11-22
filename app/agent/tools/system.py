@@ -185,7 +185,11 @@ class PathInput(BaseModel):
 
 @tool(args_schema=PathInput)
 async def list_dir(path: str) -> str:
-    """列出白名单目录内的文件与子目录。只读取，不修改任何内容。"""
+    """列出白名单目录内的文件与子目录。只读取，不修改任何内容。
+
+    **不确定确切路径时先调用它**，不要凭印象拼文件名——拼错的名字读不到，
+    而模型很容易把「读不到」讲成「文件不存在」。
+    """
     try:
         await _ask_grant(path)
         items = sandbox_list_dir(path, _roots())
@@ -203,7 +207,11 @@ async def list_dir(path: str) -> str:
 
 @tool(args_schema=PathInput)
 async def read_file(path: str) -> str:
-    """读取白名单内的文本文件。只读取，不修改任何内容。"""
+    """读取白名单内的文本文件。只读取，不修改任何内容。
+
+    路径不确定时先用 list_dir 列目录，不要猜。读不到就是没权限或没这个文件，
+    如实说明，不要用记忆里的内容补足。
+    """
     try:
         await _ask_grant(path)
         content, truncated = read_text(path, _roots())
@@ -214,6 +222,30 @@ async def read_file(path: str) -> str:
 
     note = "\n…（文件过大已截断）" if truncated else ""
     return truncate_tool_output(f"{path} 的内容：\n{content}{note}")
+
+
+def launch_default(target: Path) -> str | None:
+    """用系统默认程序打开，成功返回 None，失败返回一句人话。
+
+    抽出来是为了让「生成文件后顺便打开」也能复用：``write_sheet`` 造完文件直接
+    调它，用户不用自己去桌面翻——「找不到文件」正是这条需求要解决的事。
+    """
+    try:
+        if is_windows():
+            # os.startfile 只在 Windows 存在，Linux 的类型桩里没有这个属性。
+            # 必须用**带默认值**的 getattr：写成 getattr(os, "startfile") 会被
+            # ruff 的 B009 自动改回属性访问，mypy 在 Linux 上就会报 attr-defined。
+            opener = getattr(os, "startfile", None)
+            if opener is None:  # pragma: no cover - is_windows() 为真时一定存在
+                return "当前系统不支持用默认程序打开文件"
+            opener(str(target))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except OSError as exc:
+        return f"无法用系统默认程序打开：{exc}"
+    return None
 
 
 @tool(args_schema=PathInput)
@@ -249,21 +281,9 @@ async def open_file(path: str) -> str:
     except PathNotAllowed as exc:
         return _failed(exc.message, exc.code)
 
-    try:
-        if is_windows():
-            # os.startfile 只在 Windows 存在，Linux 的类型桩里没有这个属性。
-            # 必须用**带默认值**的 getattr：写成 getattr(os, "startfile") 会被
-            # ruff 的 B009 自动改回属性访问，mypy 在 Linux 上就会报 attr-defined。
-            opener = getattr(os, "startfile", None)
-            if opener is None:  # pragma: no cover - is_windows() 为真时一定存在
-                return _failed("当前系统不支持用默认程序打开文件", "OPEN_FAILED")
-            opener(str(target))
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(target)])
-        else:
-            subprocess.Popen(["xdg-open", str(target)])
-    except OSError as exc:
-        return _failed(f"无法用系统默认程序打开：{exc}", "OPEN_FAILED")
+    error = launch_default(target)
+    if error:
+        return _failed(error, "OPEN_FAILED")
 
     stat = target.stat()
     lines = [

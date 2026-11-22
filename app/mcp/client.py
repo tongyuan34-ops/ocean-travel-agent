@@ -33,11 +33,13 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
 from app.mcp import protocol
+from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
 CLIENT_NAME = "ocean-travel-agent"
-CLIENT_VERSION = "0.1.0"
+# 和 SERVER_VERSION 一样从 app.version 取，避免升版时两处不同步
+CLIENT_VERSION = __version__
 
 # 探测/调用超时。探测给短一点：老服务端可能根本不回，等太久启动就被拖住
 PROBE_TIMEOUT_SEC = 10.0

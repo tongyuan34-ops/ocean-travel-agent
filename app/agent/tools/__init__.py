@@ -8,12 +8,24 @@ media / delivery 组。
 from __future__ import annotations
 
 from app.agent.tools.delivery import DELIVERY_TOOLS, export_trip_pdf, render_trip_map
+from app.agent.tools.docs import (
+    DOCS_TOOLS,
+    aggregate_sheet,
+    digest_documents,
+    edit_document,
+    organize_documents,
+    query_sheet,
+    read_document,
+    write_sheet,
+)
 from app.agent.tools.info import get_weather, plan_route, search_poi
 from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.media import generate_image, list_image_templates
+from app.agent.tools.meta import discover_tools
 from app.agent.tools.plan import estimate_budget, optimize_day_route
 from app.agent.tools.plugin import parse_shared_link
 from app.agent.tools.search import fetch_url, search_web
+from app.agent.tools.skills import use_skill
 from app.agent.tools.social import generate_scraper, search_social_session
 from app.agent.tools.stay import recommend_stay
 from app.agent.tools.system import (
@@ -52,11 +64,18 @@ KNOWLEDGE_TOOLS = [search_knowledge]
 PLUGIN_TOOLS = [parse_shared_link, search_social_session, generate_scraper]
 MEDIA_TOOLS = [generate_image, list_image_templates]
 
+# 元工具：不在任何能力组里，每轮常驻。工具是按轮路由的（见 app/agent/toolset.py），
+# 模型手上永远只有一小撮工具，没有它们就没法在关键词漏网时自己申请能力或技能。
+# 两个都是「只读说明 + 激活」：真正的业务动作仍走各自被绑定的工具。
+META_TOOLS = [discover_tools, use_skill]
+
 ALL_TOOLS = [
+    *META_TOOLS,
     *DELIVERY_TOOLS,
     *INFO_TOOLS,
     *PLAN_TOOLS,
     *SYSTEM_TOOLS,
+    *DOCS_TOOLS,
     *SEARCH_TOOLS,
     *KNOWLEDGE_TOOLS,
     *PLUGIN_TOOLS,
@@ -66,15 +85,21 @@ ALL_TOOLS = [
 __all__ = [
     "ALL_TOOLS",
     "DELIVERY_TOOLS",
+    "DOCS_TOOLS",
     "INFO_TOOLS",
     "KNOWLEDGE_TOOLS",
     "MEDIA_TOOLS",
+    "META_TOOLS",
     "PLAN_TOOLS",
     "PLUGIN_TOOLS",
     "SEARCH_TOOLS",
     "SYSTEM_TOOLS",
+    "aggregate_sheet",
     "create_dir",
     "delete_path",
+    "digest_documents",
+    "discover_tools",
+    "edit_document",
     "estimate_budget",
     "export_trip_pdf",
     "fetch_url",
@@ -85,9 +110,12 @@ __all__ = [
     "list_image_templates",
     "open_file",
     "optimize_day_route",
+    "organize_documents",
     "parse_shared_link",
     "plan_route",
     "plan_trip",
+    "query_sheet",
+    "read_document",
     "read_file",
     "recommend_stay",
     "recommend_transport",
@@ -97,5 +125,7 @@ __all__ = [
     "search_social_session",
     "search_web",
     "set_wallpaper",
+    "use_skill",
     "write_file",
+    "write_sheet",
 ]

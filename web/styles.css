@@ -450,6 +450,10 @@ img{display:block;max-width:100%}
 .persona-switch:hover{background:rgba(255,255,255,.92);border-color:rgba(20,36,60,.26);color:var(--ink)}
 .persona-switch .persona-dot{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.45;margin-right:6px}
 .persona-switch svg{width:11px;height:11px;margin-left:5px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.55}
+/* 技能入口和风格并排：两者都是「这段对话怎么进行」的元信息 */
+.skill-switch{margin-left:8px}
+.skill-switch .persona-dot{background:var(--sea);opacity:.85}
+.skill-switch.is-active{color:var(--ink);border-color:rgba(57,127,121,.34);background:rgba(232,242,239,.72)}
 .chips{display:flex;flex-wrap:wrap;flex:1 1 100%;margin-top:10px}
 .chip{
   font-size:10.5px;
@@ -772,6 +776,27 @@ img{display:block;max-width:100%}
   font-size:8.5px;
   letter-spacing:.04em;
 }
+/* 文档卡片：宽度随文件名，高度和图片缩略图对齐。
+   文档没有缩略图可画，画个通用文件图标又区分不出「合同」还是「报价单」，
+   所以直接显示扩展名 + 文件名 */
+.attach-chip.is-doc{
+  width:auto;min-width:132px;max-width:200px;
+  padding:0 24px 0 10px;
+  display:flex;align-items:center;
+}
+.attach-file{display:block;min-width:0;text-align:left}
+.attach-file b{
+  display:block;
+  font-size:9px;font-weight:600;letter-spacing:.08em;
+  color:rgba(20,36,60,.55);
+}
+.attach-file i{
+  display:block;
+  font-style:normal;
+  font-size:11px;line-height:1.3;
+  color:rgba(20,36,60,.9);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
 /* 用户气泡里的图：和文字一起右对齐，圆角跟气泡一致 */
 .msg-user .msg-thumbs{
   display:flex;flex-wrap:wrap;gap:6px;
@@ -791,6 +816,17 @@ img{display:block;max-width:100%}
   border-radius:12px;
   background:rgba(255,255,255,.12);
 }
+/* 气泡里的文档：可点开下载，用来确认「我传的到底是哪一份」 */
+.msg-user .msg-file{
+  display:-ms-flexbox;display:flex;align-items:center;
+  max-width:220px;
+  padding:10px 14px;
+  border-radius:12px;
+  background:rgba(255,255,255,.14);
+  text-decoration:none;
+}
+.msg-user .msg-file .attach-file b{color:rgba(255,255,255,.66)}
+.msg-user .msg-file .attach-file i{color:#fff;font-size:12px}
 
 .composer-tool{
   width:34px;height:38px;flex:0 0 auto;

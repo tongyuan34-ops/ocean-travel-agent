@@ -183,23 +183,24 @@ def test_generated_module_round_trips(tmp_path: Path):
         "MODEL_API_KEY": "sk-test-123",
         "MAP_API_KEY": "amap-456",
         # OVERRIDES 永远在，跟 .env 里写没写无关
-        "STORAGE_BACKEND": "file",
+        "STORAGE_BACKEND": "sqlite",
         "SESSION_TTL_SEC": "0",
     }
 
 
-def test_storage_backend_is_forced_to_file(tmp_path: Path):
-    """开发机上是 redis，用户机器上没 Redis——出包时必须强制改成 file。
+def test_storage_backend_is_forced_to_sqlite(tmp_path: Path):
+    """开发机上是 redis，用户机器上没 Redis——出包时必须强制改成 sqlite。
 
     这条是踩出来的：.env 里 ``STORAGE_BACKEND=redis``（当时在测多进程）
-    被原样打进包里，用户的会话就存不进去了。
+    被原样打进包里，用户的会话就存不进去了。sqlite 是标准库自带，
+    比原来的 file 后端写入更省，也不要求用户装任何东西。
     """
     env = tmp_path / ".env"
     env.write_text("MODEL_API_KEY=sk-test\nSTORAGE_BACKEND=redis\n", encoding="utf-8")
 
     values = make_bundled_keys.parse_env_file(env)
     assert values["STORAGE_BACKEND"] == "redis"
-    assert make_bundled_keys.OVERRIDES["STORAGE_BACKEND"] == "file"
+    assert make_bundled_keys.OVERRIDES["STORAGE_BACKEND"] == "sqlite"
 
 
 def test_local_only_settings_are_not_bundled(tmp_path: Path):

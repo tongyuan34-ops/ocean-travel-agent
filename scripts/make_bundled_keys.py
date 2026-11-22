@@ -73,8 +73,9 @@ INCLUDE = (
 # 直接打包进去，用户的机器上根本没有 Redis，会话就存不进去。这类值不能
 # 「取开发机的现状」，必须「取桌面版应有的样子」。
 OVERRIDES = {
-    # 用户机器上没有 Redis。落盘到 exe 旁边的 data/sessions.json
-    "STORAGE_BACKEND": "file",
+    # 用户机器上没有 Redis。SQLite 是标准库自带，落单文件到 exe 旁边的
+    # data/sessions.db；首次从旧版 sessions.json 升级时会自动导入历史会话
+    "STORAGE_BACKEND": "sqlite",
     # 桌面版不该让会话过期——用户关掉程序明天再开，聊天记录得还在
     "SESSION_TTL_SEC": "0",
 }

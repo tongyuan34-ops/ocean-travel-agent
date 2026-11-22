@@ -28,6 +28,21 @@ from app.agent.graph import build_agent_graph
 from app.agent.model import build_chat_model
 from app.agent.resilience import ToolBudget
 from app.core.config import Settings, load_settings
+from evals.baseline import (
+    DEFAULT_BASELINE,
+    build_baseline,
+    compare,
+    is_regression,
+)
+from evals.baseline import (
+    load as load_baseline,
+)
+from evals.baseline import (
+    render_markdown as render_comparison,
+)
+from evals.baseline import (
+    save as save_baseline,
+)
 from evals.fake_model import ScriptedChatModel, tool_call_message
 from evals.runner import (
     DEFAULT_CASES,
@@ -213,8 +228,39 @@ async def run(args: argparse.Namespace) -> int:
     summary["label"] = label
     summary["mode"] = mode
     summary["self_test"] = bool(args.self_test)
+    summary["model"] = settings.model_name
+
+    payload: dict[str, Any] = {"summary": summary, "results": [item.to_dict() for item in results]}
+    baseline_path = Path(args.baseline)
+    comparison: dict[str, Any] | None = None
+
+    if args.update_baseline:
+        # 不许拿自测覆盖真模型基线：两者通过率没有可比性，
+        # 覆盖之后下一次发版前的对比会全部显示「大幅退步」
+        if args.self_test:
+            print("--self-test 不能和 --update-baseline 一起用", file=sys.stderr)
+            return 2
+        save_baseline(
+            baseline_path,
+            build_baseline(
+                summary, payload["results"], label=label, mode=mode, model=settings.model_name
+            ),
+        )
+        print(f"基线已更新：{baseline_path}", file=sys.stderr)
+    elif not args.self_test:
+        baseline = load_baseline(baseline_path)
+        if baseline is None:
+            print(
+                f"没有可用的基线（{baseline_path}），本次只出报告；"
+                "首次建立基线用 --update-baseline",
+                file=sys.stderr,
+            )
+        else:
+            comparison = compare(baseline, payload)
 
     report = render_markdown(summary, results, label=label)
+    if comparison is not None:
+        report += "\n" + render_comparison(comparison)
     # newline="\n"：Windows 上默认写 CRLF，而 .gitattributes 强制 eol=lf，
     # 于是每次跑批都会在 diff 里留下一整份「只改了换行符」的噪音。
     if args.out:
@@ -224,7 +270,7 @@ async def run(args: argparse.Namespace) -> int:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(
             json.dumps(
-                {"summary": summary, "results": [item.to_dict() for item in results]},
+                {**payload, "comparison": comparison},
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -238,6 +284,23 @@ async def run(args: argparse.Namespace) -> int:
         if rate < args.fail_under:
             print(
                 f"通过率 {rate:.1%} 低于阈值 {args.fail_under:.1%}",
+                file=sys.stderr,
+            )
+            return 1
+    if args.fail_on_regression:
+        # 没基线却要求「不许回归」是配置错误，必须显式失败，
+        # 否则 nightly 会一直绿，直到有人发现它其实什么都没比
+        if comparison is None:
+            print(
+                f"--fail-on-regression 需要可用基线：{baseline_path} 不存在或格式不对",
+                file=sys.stderr,
+            )
+            return 2
+        if is_regression(comparison, args.max_drop):
+            print(
+                "检测到回归："
+                f"回归用例 {'、'.join(comparison['regressed']) or '无'}；"
+                f"详见报告中的「与基线对比」",
                 file=sys.stderr,
             )
             return 1
@@ -269,6 +332,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="通过率低于该值时以非零码退出（0-1），默认不检查",
+    )
+    parser.add_argument(
+        "--baseline",
+        default=str(DEFAULT_BASELINE),
+        help="基线文件路径（默认 evals/baseline.json）",
+    )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="把本次运行写成新基线（自测模式禁止）",
+    )
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="有「通过→失败」用例或通过率跌幅超过 --max-drop 时以非零码退出",
+    )
+    parser.add_argument(
+        "--max-drop",
+        type=float,
+        default=0.02,
+        help="允许的通过率跌幅（0-1，默认 0.02）。模型自带抖动，1 条用例不算事故",
     )
     return parser
 

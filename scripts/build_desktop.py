@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,26 @@ def build_bundled_keys() -> None:
         cwd=ROOT,
         check=True,
     )
+
+
+def check_window_deps() -> None:
+    """打包机缺窗口依赖就直接停。
+
+    上一版就是这么出的：环境里没装 pywebview，PyInstaller 一声不响地打出一个
+    没有 GUI 的包，`open_window` 运行时退回系统浏览器——用户装完以为拿到的是
+    网页版，「桌面版」三个字在界面上没有任何体现。这个错误打包阶段就该拦。
+    """
+    if os.name != "nt":
+        return
+    import importlib.util
+
+    missing = [name for name in ("webview", "clr") if importlib.util.find_spec(name) is None]
+    if missing:
+        raise SystemExit(
+            "缺少窗口依赖：" + "、".join(missing) + "\n"
+            "先装：uv pip install -e '.[desktop]'（或 uv sync --extra desktop）"
+        )
+    print("窗口依赖齐全：pywebview + pythonnet")
 
 
 def build_icon() -> None:
@@ -206,6 +227,32 @@ def _fetch(url: str, timeout: float = 5.0) -> tuple[int, str]:
         return 0, ""
 
 
+def _kill_stale() -> int:
+    """清掉上一次留下的实例，返回清掉的个数。
+
+    exe 带单实例锁（``app/desktop.py::InstanceLock``）：只要还有一个
+    OceanTravelAgent.exe 活着，新起的那个会**在写日志之前**就 ``return 0``。
+    冒烟看到的现象是「exe 自己退了（退出码 0），看 logs/app.log」，而那个
+    日志根本不存在——上一轮冒烟被 Ctrl+C 打断、或者用户自己开着窗口，都会
+    留下这种进程。所以跑之前先扫一遍，别让人对着一条不存在的日志找原因。
+    """
+    if os.name != "nt":
+        return 0
+
+    def _run(*args: str) -> str:
+        try:
+            done = subprocess.run(args, capture_output=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return done.stdout.decode("utf-8", "ignore") or done.stdout.decode("mbcs", "ignore")
+
+    listed = _run("tasklist", "/FI", "IMAGENAME eq OceanTravelAgent.exe", "/NH")
+    pids = re.findall(r"OceanTravelAgent\.exe\s+(\d+)", listed)
+    for pid in pids:
+        _run("taskkill", "/F", "/PID", pid)
+    return len(pids)
+
+
 def smoke() -> None:
     """把打出来的 exe 真跑一遍。
 
@@ -220,6 +267,10 @@ def smoke() -> None:
     if not EXE.exists():
         raise SystemExit(f"没有产物：{EXE}")
 
+    killed = _kill_stale()
+    if killed:
+        print(f"先清掉了 {killed} 个还在跑的旧实例（单实例锁会让新进程直接退出）")
+
     port_file = APP_DIR / "data" / "instance.json"
     port_file.unlink(missing_ok=True)
     log_file = APP_DIR / "logs" / "app.log"
@@ -232,7 +283,16 @@ def smoke() -> None:
         port = None
         while time.monotonic() < deadline:
             if proc.poll() is not None:
-                raise SystemExit(f"exe 自己退了（退出码 {proc.returncode}），看 logs/app.log")
+                code = proc.returncode
+                if code == 0 and not log_file.exists():
+                    # 退出码 0 且一个字日志都没写：不是崩溃，是它主动不干活。
+                    # 单实例锁是最常见的原因（刚被 _kill_stale 清过又冒出来一个），
+                    # 其次是启动时就被系统拦下。这两种都别让人去翻不存在的日志
+                    raise SystemExit(
+                        f"exe 退了（退出码 0）但没写任何日志：多半是还有个实例占着单实例锁，"
+                        f"或被安全软件拦下。先确认任务管理器里没有 {EXE.name} 再重跑"
+                    )
+                raise SystemExit(f"exe 自己退了（退出码 {code}），看 {log_file}")
             try:
                 port = int(json.loads(port_file.read_text(encoding="utf-8"))["port"])
                 break
@@ -282,6 +342,24 @@ def smoke() -> None:
                 f"多半是 KNOWLEDGE_DIR 的相对路径没按资源根解析"
             )
         print(f"知识库可检索：{chunks} 个片段")
+
+        # 技能：既要确认文件进包，也要确认运行时真的加载到了。
+        # 只看文件的话，SKILLS_DIR 的相对路径解析错（打包后 CWD 是 exe 目录）
+        # 会得到「文件在包里、技能一个都没有」——用户在选择器里什么都看不到
+        skill_dirs = APP_DIR / "_internal" / "skills"
+        manifests = [path for path in skill_dirs.glob("*/SKILL.md") if path.is_file()]
+        if len(manifests) < 2:
+            raise SystemExit(f"技能没打进包：{skill_dirs} 下只有 {len(manifests)} 个 SKILL.md")
+        try:
+            skills_loaded = int(json.loads(body).get("skills", 0))
+        except (ValueError, TypeError):
+            skills_loaded = 0
+        if skills_loaded <= 0:
+            raise SystemExit(
+                "健康检查说加载了 0 个技能：文件在包里但运行时读不到，"
+                "多半是 SKILLS_DIR 的相对路径没按资源根解析"
+            )
+        print(f"技能已入包并可加载：{len(manifests)} 个目录 / 运行时 {skills_loaded} 个")
     finally:
         proc.terminate()
         try:
@@ -367,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     write_version_file(version)
 
     step("3/5 PyInstaller")
+    check_window_deps()
     clean_dist()
     run_pyinstaller()
 

@@ -338,15 +338,18 @@ def bootstrap_config() -> Path | None:
     该改哪一行；空值在我们的解析链里等于「没配」，会自动落回内置 key。
     """
     from app.core import secrets
-    from app.core.config import KEY_NAMES
+    from app.core.config import KEY_NAMES, TRACING_KEYS
 
     for path in secrets.config_files():
         if path.exists():
             return None
     target = secrets.config_files()[0]
     template = dict.fromkeys(KEY_NAMES, "")
+    # 追踪是可选项：三项都留空就不上报，填了才连 Langfuse
+    template.update(dict.fromkeys(TRACING_KEYS, ""))
     template["_说明"] = (
-        "内置额度用完后，把 MODEL_API_KEY 换成你自己的 key 再重启即可。这里填的值优先于内置 key。"
+        "内置额度用完后，把 MODEL_API_KEY 换成你自己的 key 再重启即可。"
+        "LANGFUSE_* 三项填了才会把调用链上报到 Langfuse，不填不影响使用。"
     )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -358,12 +361,18 @@ def bootstrap_config() -> Path | None:
 
 
 def write_guide() -> Path | None:
-    """首次运行写一份使用说明。只在冻结形态写，免得开发时在仓库里生成垃圾。"""
+    """首次运行写一份使用说明。只在冻结形态写，免得开发时在仓库里生成垃圾。
+
+    **内容变了要覆盖，不能只在文件不存在时写。**
+
+    原来的判断是 ``if target.exists(): return None``，于是这份说明书对老用户
+    是**永久冻结**的：升级到新版本后，里面写的还是第一个版本的操作步骤。
+    实测就撞到了——安装目录里那份是 1039 字节的旧版，而当前版本生成的是
+    1423 字节，用户看到的是已经不成立的说明，而且没有任何提示。
+    """
     if not getattr(sys, "frozen", False):
         return None
     target = PROJECT_ROOT / GUIDE_NAME
-    if target.exists():
-        return None
     text = f"""Ocean 旅行规划 · 使用说明
 
 【怎么用】
@@ -378,6 +387,12 @@ def write_guide() -> Path | None:
 
 你填的 key 优先于内置 key，换 key 不需要等新版本。
 
+【调用链追踪（可选）】
+想把自己的对话上报到 Langfuse 做观测，打开同目录的 config.json，填：
+  LANGFUSE_PUBLIC_KEY、LANGFUSE_SECRET_KEY（Langfuse 项目里的那对）
+  LANGFUSE_HOST（自建服务填地址，本机默认 http://localhost:3000）
+然后关掉窗口重新打开。三项都留空就完全不上报，不影响其它功能。
+
 【文件访问】
 程序不会在启动时要求访问你的文件。只有当你让它写文件、读文件时，
 才会在那一次弹窗里问「是否允许访问某个目录」，允许一次之后同目录不再问。
@@ -390,6 +405,13 @@ grants.json：你授权过的目录。
 
 版本 {__version__}
 """
+    # 内容一致就不动它：每次启动都重写会让文件的修改时间一直变，
+    # 用户以为程序在偷偷改东西。只有真的不一样才覆盖。
+    try:
+        if target.exists() and target.read_text(encoding="utf-8") == text:
+            return None
+    except OSError:
+        pass  # 读不了就直接重写，覆盖比保留一份坏的更安全
     try:
         target.write_text(text, encoding="utf-8")
     except OSError as exc:
@@ -597,6 +619,12 @@ def open_window(boot_server: Callable[[], tuple[Any, int, str]]) -> None:
     server = state["server"]
     if server is not None:
         server.should_exit = True
+    # 关窗到进程退出只有几百毫秒，而追踪事件是后台批量上报的。这里同步刷一次，
+    # 否则最后几轮对话在 Langfuse 里查不到——「刚试了一下没反应」最难查。
+    # 局部 import：本模块刻意只依赖 paths/version，别把整条 config 链拖进启动画面
+    from app.core.tracing import flush_tracing
+
+    flush_tracing()
 
 
 def wait_for_interrupt() -> None:
@@ -672,6 +700,14 @@ def main(argv: list[str] | None = None) -> int:
     # PyInstaller 打包后子进程会重新执行本模块，不调这个会无限开窗口
     multiprocessing.freeze_support()
 
+    # 日志必须先配好再往下走。窗口依赖缺失时 open_window 会打一句 warning，
+    # 但那时服务还没起、configure_logging 还没被调用，这句话会直接丢掉——
+    # 用户看到的是「打开了浏览器」，日志里一个字都没有，只能靠猜。
+    from app.core.config import load_settings
+    from app.core.logging import configure_logging
+
+    configure_logging(load_settings().log_level)
+
     lock = InstanceLock()
     if not lock.acquire():
         # 先试着把那个窗口提到前台——多半它正停在启动画面上转圈
@@ -710,6 +746,11 @@ def main(argv: list[str] | None = None) -> int:
         # 收尾都在那里。daemon 线程直接随进程死掉的话，最后几条会话会丢。
         if server is not None:
             server.should_exit = True
+        # --no-window 路径没有经过 open_window，这里兜一次；窗口路径上已经刷过，
+        # 第二次是空操作（客户端已 shutdown 后 flush 直接返回）
+        from app.core.tracing import flush_tracing
+
+        flush_tracing()
         lock.release()
 
 

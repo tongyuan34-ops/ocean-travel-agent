@@ -50,7 +50,7 @@ class RedisSessionStore(SessionStore):
     async def delete(self, session_id: str) -> None:
         await self._client.delete(self._key(session_id))
 
-    async def list(self) -> list[ChatSession]:
+    async def list(self, tenant: str | None = None) -> list[ChatSession]:
         """扫前缀取全部会话。
 
         ``KEYS`` 在大库上会阻塞 Redis，但会话 key 的数量级是「用户数 × 会话数」，
@@ -70,7 +70,12 @@ class RedisSessionStore(SessionStore):
             except (ValueError, TypeError):
                 continue
             if isinstance(data, dict):
-                sessions.append(ChatSession.from_dict(data))
+                session = ChatSession.from_dict(data)
+                # 租户过滤在解析后做：早期写入的 key 没有租户前缀，
+                # 换 key 布局要迁移存量数据，不值得
+                if tenant is not None and session.tenant != tenant:
+                    continue
+                sessions.append(session)
         return sessions
 
     async def aclose(self) -> None:

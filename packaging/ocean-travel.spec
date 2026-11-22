@@ -20,17 +20,24 @@ grants.json），混在一起的话用户升级覆盖安装时会把会话数据
 不该指望它——包里就不该有。
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
 WEB = ROOT / "web"
 KNOWLEDGE = ROOT / "knowledge"
+SKILLS = ROOT / "skills"
 
 
-def data_pairs(source: Path, target: str, suffixes: tuple[str, ...] | None = None):
+def data_pairs(
+    source: Path,
+    target: str,
+    suffixes: tuple[str, ...] | None = None,
+    keep_py: bool = False,
+):
     """把目录下的文件映射成 PyInstaller 的 datas 条目。
 
     **第二个元素是目标目录，不是目标文件路径。** 写成
@@ -47,8 +54,11 @@ def data_pairs(source: Path, target: str, suffixes: tuple[str, ...] | None = Non
             continue
         if suffixes is not None and path.suffix not in suffixes:
             continue
-        # web/ 里混着 serve.py 这类源码，随包发出去既没用又多一个可执行文本
-        if path.suffix in (".py", ".pyc") or "__pycache__" in path.parts:
+        # web/ 里混着 serve.py 这类源码，随包发出去既没用又多一个可执行文本。
+        # 技能目录相反：tools.py 是运行时用 importlib 加载的，必须进包
+        if "__pycache__" in path.parts:
+            continue
+        if not keep_py and path.suffix in (".py", ".pyc"):
             continue
         parent = path.parent.relative_to(source).as_posix()
         folder = target if parent == "." else f"{target}/{parent}"
@@ -56,11 +66,39 @@ def data_pairs(source: Path, target: str, suffixes: tuple[str, ...] | None = Non
     return pairs
 
 
-# 静态资源与知识库语料：都是只读、随版本走，放进 _MEIPASS
-datas = data_pairs(WEB, "web") + data_pairs(KNOWLEDGE, "knowledge", suffixes=(".md",))
+# 静态资源、知识库语料、技能目录：都是只读、随版本走，放进 _MEIPASS。
+# 技能必须保留 .py：tools.py 是 importlib 运行时加载的，静态分析看不到它
+datas = (
+    data_pairs(WEB, "web")
+    + data_pairs(KNOWLEDGE, "knowledge", suffixes=(".md",))
+    + data_pairs(SKILLS, "skills", keep_py=True)
+)
+
+# python-docx 自带一份 default.docx 模板，``Document()`` 不带参数时要读它。
+# 应用里只打开已有文档，理论上用不到，但「理论上用不到」正是上次 knowledge/
+# 目录没打进包时的说法——所以这里显式收进来，代价是几十 KB。
+# openpyxl 是纯 Python，没有需要额外收集的数据文件。
+datas += collect_data_files("docx")
 
 # uvicorn 按字符串动态导入 loop / protocol / lifespan 实现，静态分析看不到
 hiddenimports = collect_submodules("uvicorn")
+
+# Langfuse 是可选依赖，且只在 app/core/tracing.py 的函数体里导入（为了冷启动）。
+# 静态分析一般能跟到，但 OTLP 导出器里还有按协议名动态取实现的地方——漏一个
+# 就是「配了 key 却一条 trace 都没有」，很难从日志看出来。装了才收，没装不影响打包
+if importlib.util.find_spec("langfuse") is not None:
+    hiddenimports += [
+        "langfuse",
+        "langfuse.langchain",
+        "langfuse.langchain.CallbackHandler",
+        "opentelemetry.exporter.otlp.proto.http",
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+    ]
+else:
+    print("=" * 70)
+    print("提示：环境里没装 langfuse，打出来的包不支持 Langfuse 追踪（不影响其它功能）。")
+    print("      需要的话先 uv sync --extra tracing 再打包。")
+    print("=" * 70)
 
 # 内置 key 是 try/except ImportError 里导入的，文件不存在时也不该让打包失败
 bundled = ROOT / "app" / "core" / "_bundled_keys.py"

@@ -37,11 +37,13 @@ from app.agent.tools import ALL_TOOLS
 from app.core.errors import TOOL_ERROR_PREFIXES
 from app.mcp import protocol
 from app.mcp.protocol import ProtocolError
+from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "ocean-travel-agent"
-SERVER_VERSION = "0.1.0"
+# 产品版本只认 app.version 一处：以前这里手写 0.1.0，升版时最容易漏
+SERVER_VERSION = __version__
 
 INSTRUCTIONS = (
     "旅行规划 Agent 的工具集：天气、路线、POI、预算、住宿、交通、生图、网页检索、"

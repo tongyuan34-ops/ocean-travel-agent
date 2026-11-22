@@ -4,11 +4,11 @@
 
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| `OceanTravelAgent-0.1.0-setup.exe` | 36 MB | 双击安装，带桌面图标、开始菜单、卸载项 |
+| `OceanTravelAgent-0.2.1-setup.exe` | 42.6 MB | 双击安装，带桌面图标、开始菜单、卸载项 |
 
 ## 怎么装
 
-1. 下载 `OceanTravelAgent-0.1.0-setup.exe`
+1. 下载 `OceanTravelAgent-0.2.1-setup.exe`
 2. 双击运行
 3. 如果弹出蓝色窗口「Windows 已保护你的电脑」：点 **更多信息** → **仍要运行**
    （软件没有买代码签名证书，不是病毒）
@@ -57,5 +57,5 @@ python scripts/build_desktop.py --installer
 cp dist/OceanTravelAgent-*-setup.exe releases/
 ```
 
-> 注意：二进制文件进 git 会让仓库随版本线性变大（每版 +36 MB）。版本多了
+> 注意：二进制文件进 git 会让仓库随版本线性变大（每版 +38 MB）。版本多了
 > 之后建议改用 GitHub Releases 挂附件，仓库里只留 `dist/`（已忽略）。

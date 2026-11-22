@@ -17,6 +17,7 @@ from app.core.config import KEY_NAMES, Settings
 from app.core.paths import resolve_resource
 from app.core.security import allowed_roots, is_windows
 from app.rag import get_knowledge_base
+from app.skills import count as skill_count
 from app.version import __version__
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -97,4 +98,7 @@ async def health(request: Request) -> dict[str, Any]:
         "model": settings.model_name,
         "provider": settings.model_provider,
         "knowledge_chunks": chunks,
+        # 技能在运行时加载，路径解析错了会静默变成 0 个。和知识库同理，
+        # 给打包冒烟一个运行时可验证的信号
+        "skills": skill_count(),
     }

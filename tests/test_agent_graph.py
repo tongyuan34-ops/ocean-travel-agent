@@ -211,3 +211,58 @@ async def test_tool_crash_does_not_kill_the_turn(monkeypatch, settings):
     contents = [str(getattr(message, "content", "")) for message in result["messages"]]
     assert any("TOOL_CRASHED" in text for text in contents)
     assert "工具挂了，我如实告诉你" in contents
+
+
+async def test_tracing_callbacks_are_attached_to_the_model(monkeypatch, settings):
+    """追踪回调必须真的挂到模型上，而不是只被构造出来。
+
+    这一条是给「配了 key 却一条 trace 都没有」兜底的：回调挂在模型上，
+    native 与 structured 两条路径都走模型，所以挂一处就全覆盖。挂错位置
+    （比如只挂在 graph.ainvoke 的 config 里）在 structured 模式下会漏掉
+    循环里的每一次模型调用。
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    started: list[str] = []
+
+    class Spy(BaseCallbackHandler):
+        def on_chat_model_start(self, serialized, messages, **kwargs):
+            started.append("start")
+
+    _patch(monkeypatch, [AIMessage(content='{"final": "好了"}')])
+    monkeypatch.setattr(graph_module, "langfuse_callbacks", lambda: [Spy()])
+
+    graph, _ = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
+    result = await graph.ainvoke({"messages": [HumanMessage(content="你好")]})
+
+    assert "好了" in [getattr(message, "content", "") for message in result["messages"]]
+    assert started == ["start"]
+
+
+async def test_graph_runs_when_tracing_is_disabled(monkeypatch, settings):
+    """没配追踪时回调列表为空，构图与执行不能因此有任何变化。"""
+    monkeypatch.setattr(graph_module, "langfuse_callbacks", list)
+    _patch(monkeypatch, [AIMessage(content='{"final": "照常"}')])
+
+    graph, _ = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
+    result = await graph.ainvoke({"messages": [HumanMessage(content="你好")]})
+
+    assert "照常" in [getattr(message, "content", "") for message in result["messages"]]
+
+
+def test_tracing_callbacks_must_be_attached_after_bind_tools(monkeypatch):
+    """回归：先 with_config 再 bind_tools，回调会被静默丢掉。
+
+    ``RunnableBinding`` 没有覆写 ``bind_tools``，靠 ``__getattr__`` 转发给内部模型，
+    返回的是不带原 config 的新对象。这个错误不报错、不告警，症状只是
+    「Langfuse 里一条 trace 都没有」——所以用一条断言把它钉死。
+    """
+    spy = object()
+    monkeypatch.setattr(graph_module, "langfuse_callbacks", lambda: [spy])
+    model = ScriptedChatModel(responses=[AIMessage(content="x")])
+
+    good = graph_module._with_tracing(model.bind_tools([echo]))
+    assert good.config["callbacks"] == [spy]
+
+    bad = model.with_config({"callbacks": [spy]}).bind_tools([echo])
+    assert not (getattr(bad, "config", None) or {}).get("callbacks")

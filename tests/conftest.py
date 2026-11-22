@@ -6,10 +6,17 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# 用例不能写真实存储：``client`` 用的是模块级的 app，它会照 .env / 环境变量
+# 去打开 data/sessions.db。不拦住的话每跑一次 pytest，真实会话库里就多出一批
+# 测试产生的会话（删除、改风格也一样会落到真数据上）。
+# 必须在 app.main 被 import 之前设置——settings 是建 app 时算出来的。
+os.environ["STORAGE_BACKEND"] = "memory"
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +38,17 @@ def _clear_geocode_cache():
     _GEOCODE_CACHE.clear()
     yield
     _GEOCODE_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _silence_langfuse(monkeypatch):
+    """测试进程不往 Langfuse 发数据。
+
+    开发机的 .env 里配了真的 key，不拦的话每跑一次测试就往本地实例灌一批
+    trace，CI 上则是一堆连不上的报错日志——两者都跟断言无关，只会让失败变难读。
+    要测追踪本身的用例自己用 monkeypatch 打开模块状态。
+    """
+    monkeypatch.setenv("LANGFUSE_TRACING", "false")
 
 
 @pytest.fixture

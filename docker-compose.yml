@@ -28,8 +28,18 @@ services:
       CORS_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
       # 容器内文件工具默认无白名单 = 全部禁用；需要时挂卷再打开
       ALLOWED_ROOTS: ""
-    ports:
-      - "8000:8000"
+    # 只发布 web（3001），**不发布 api（8000）**。
+    #
+    # 原来这里是 "8000:8000"：api 直接跑 app.main:app，没有 Basic Auth，
+    # 而 GET /api/v1/sessions 又不按用户过滤——等于把「全部会话历史 + 文件工具
+    # + 模型额度」直接挂在宿主机网卡上。给 web 设的 WEB_AUTH_PASS 一点忙都帮不上，
+    # 因为攻击者根本不用走 3001。
+    #
+    # 需要直连 api 调试时，临时在本地加 ports，别提交。
+    # 注意别留下一个只有注释的 ``ports:`` 键——新版 compose 会报
+    # 「must be a array」并拒绝启动。
+    expose:
+      - "8000"
     volumes:
       - media-data:/app/media
       - app-data:/app/data
@@ -43,14 +53,39 @@ services:
     image: ocean-travel-agent:latest
     command: ["python", "web/serve.py", "--backend", "http://api:8000"]
     environment:
-      # 留空表示不启用访问密码；对外暴露时务必在 .env 设 WEB_AUTH_USER / WEB_AUTH_PASS
-      WEB_AUTH_USER: ${WEB_AUTH_USER:-}
-      WEB_AUTH_PASS: ${WEB_AUTH_PASS:-}
+      # 必须给密码：这个端口是唯一对外入口，空密码等于把会话历史交给整个网络。
+      # 用 :? 让 compose 在启动前就报错，而不是起一个没有门的服务。
+      WEB_AUTH_USER: ${WEB_AUTH_USER:-ocean}
+      WEB_AUTH_PASS: ${WEB_AUTH_PASS:?请在 .env 里设置 WEB_AUTH_PASS（这是对外唯一入口的密码）}
     ports:
       - "3001:3001"
+    # web 与 api 共用同一个镜像，Dockerfile 里的 healthcheck 打的是 8000（api 端口）。
+    # web 进程只监听 3001，不覆盖的话这个容器会一直停在 "health: starting"。
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; socket.create_connection(('127.0.0.1', 3001), timeout=2).close()\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  # 可选：临时公网地址（Cloudflare Quick Tunnel，不用域名、不用服务器）。
+  #   docker compose --profile demo up -d --build
+  #   docker compose --profile demo logs tunnel | grep trycloudflare
+  # 链接是临时的，进程停了就失效；Web 端仍有 Basic Auth，不是裸奔。
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["demo"]
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:3001"]
+    depends_on:
+      - web
     restart: unless-stopped
 
 volumes:

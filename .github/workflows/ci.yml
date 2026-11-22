@@ -98,7 +98,7 @@ jobs:
       - name: Install CJK font
         # 导出 PDF 要中文字体，runner 上默认没有；缺了它这两个用例会跳过，
         # 而 PDF 导出恰恰是最容易「Windows 过、Linux 挂」的地方，跳过等于没测
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-wqy-zenhei
       - name: Run tests
         run: uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml
 

@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -116,13 +117,22 @@ def refresh() -> None:
 
 
 def bundled() -> dict[str, str]:
-    """打包时注入的那份快照。没有就返回空——开发环境本来就没有。"""
+    """打包时注入的那份快照。没有就返回空——开发环境本来就没有。
+
+    用 ``importlib`` 动态取而不是 ``from app.core import _bundled_keys``：
+    这个模块是打包脚本生成的、不进仓库，静态导入会让 mypy 在「没有这个文件」
+    的环境（CI、别人的机器）报 ``Module has no attribute``，
+    而在生成过它的本机又是干净的——典型的「本地过、CI 挂」。
+    """
     try:
-        from app.core import _bundled_keys
+        module = importlib.import_module("app.core._bundled_keys")
     except ImportError:
         return {}
+    loader = getattr(module, "keys", None)
+    if not callable(loader):
+        return {}
     try:
-        return {str(key): str(value) for key, value in _bundled_keys.keys().items()}
+        return {str(key): str(value) for key, value in loader().items()}
     except Exception:
         logger.exception("内置配置解析失败，已忽略")
         return {}

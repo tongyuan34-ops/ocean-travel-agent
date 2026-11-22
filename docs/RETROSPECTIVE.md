@@ -105,6 +105,7 @@ webview.start(worker, private_mode=False, storage_path=str(profile_dir))
 ```python
 PREFERRED_PORT = 8756
 
+
 def pick_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
@@ -514,7 +515,7 @@ Redis 在这个项目里**不是缓存**，一处缓存都没做。四处用法�
 ```python
 # 追加：RPUSH 返回新长度，这个长度天然就是 seq
 seq = int(await self._client.rpush(events_key, json.dumps(payload, ensure_ascii=False)))
-await self._client.expire(events_key, self._ttl)          # 每条都续期
+await self._client.expire(events_key, self._ttl)  # 每条都续期
 await self._client.publish(self._wake_key(stream_id), str(seq))  # 只负责叫醒
 
 # 订阅：LRANGE 一次取完未读部分

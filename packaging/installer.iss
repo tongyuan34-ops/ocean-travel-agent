@@ -1,7 +1,7 @@
 ; Inno Setup 6 脚本：把 dist\OceanTravelAgent 打成安装包。
 ;
 ; 用法（在装了 Inno Setup 的机器上）：
-;   iscc /DMyAppVersion=0.2.1 /DSourceDir=..\dist\OceanTravelAgent packaging\installer.iss
+;   iscc /DMyAppVersion=0.2.2 /DSourceDir=..\dist\OceanTravelAgent packaging\installer.iss
 ; 或者直接 `python scripts/build_desktop.py --installer`，参数会自动带上。
 ;
 ; **装在用户目录，不要 Program Files**

@@ -9,8 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import tool as lc_tool
 from pydantic import Field
 
@@ -78,6 +78,49 @@ async def test_native_mode_binds_tools_and_executes(monkeypatch, settings):
 
     assert "完成" in contents  # 拿到最终回答
     assert "echo:hi" in contents  # 工具真的被执行过
+
+
+class StreamingChatModel(ScriptedChatModel):
+    """逐块吐字的模型：用来验证 native 节点真的走流式，而不是一次性 invoke。"""
+
+    pieces: list[str] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        message = AIMessage(content="".join(self.pieces))
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        for piece in self.pieces:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        for piece in self.pieces:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+
+
+async def test_native_mode_streams_tokens_through_events(monkeypatch, settings):
+    """native 节点必须逐块产出 ``on_chat_model_stream``。
+
+    回归：节点曾是同步 ``bound.invoke``，LangGraph 把它丢进线程池执行，
+    回调上下文在那个线程里丢失，``astream_events`` 收不到任何 stream 事件。
+    症状是回答在服务端生成完毕、也落了库，前端却一个字都收不到，
+    最后只能报「模型未返回内容」——打包版稳定复现，源码环境偶发。
+    """
+    model = StreamingChatModel(pieces=["三", "亚", "攻略"])
+    monkeypatch.setattr(graph_module, "build_chat_model", lambda _s: model)
+    graph, mode = graph_module.build_agent_graph(settings, mode="native", tools=[echo])
+    assert mode == "native"
+
+    pieces: list[str] = []
+    async for event in graph.astream_events(
+        {"messages": [HumanMessage(content="你好")]}, version="v2"
+    ):
+        if event["event"] == "on_chat_model_stream":
+            content = event["data"]["chunk"].content
+            pieces.append(content if isinstance(content, str) else str(content))
+
+    # 末尾可能带一个空 chunk（有的 provider 用它标记结束），只校验有内容的块
+    assert [piece for piece in pieces if piece] == ["三", "亚", "攻略"]
 
 
 async def test_structured_mode_decides_via_json_then_executes(monkeypatch, settings):
@@ -213,13 +256,12 @@ async def test_tool_crash_does_not_kill_the_turn(monkeypatch, settings):
     assert "工具挂了，我如实告诉你" in contents
 
 
-async def test_tracing_callbacks_are_attached_to_the_model(monkeypatch, settings):
-    """追踪回调必须真的挂到模型上，而不是只被构造出来。
+async def test_tracing_callbacks_propagate_from_config(monkeypatch, settings):
+    """回调由调用方通过 config 传入，必须能覆盖循环里的每一次模型调用。
 
-    这一条是给「配了 key 却一条 trace 都没有」兜底的：回调挂在模型上，
-    native 与 structured 两条路径都走模型，所以挂一处就全覆盖。挂错位置
-    （比如只挂在 graph.ainvoke 的 config 里）在 structured 模式下会漏掉
-    循环里的每一次模型调用。
+    这一条是给「配了 key 却一条 trace 都没有」兜底的：structured 模式在节点里
+    反复调模型，只挂在 graph.ainvoke 外层会不会漏？答案是不会——config 会随
+    运行树传进节点，每次 ``ainvoke`` 都继承。
     """
     from langchain_core.callbacks import BaseCallbackHandler
 
@@ -230,39 +272,51 @@ async def test_tracing_callbacks_are_attached_to_the_model(monkeypatch, settings
             started.append("start")
 
     _patch(monkeypatch, [AIMessage(content='{"final": "好了"}')])
-    monkeypatch.setattr(graph_module, "langfuse_callbacks", lambda: [Spy()])
 
     graph, _ = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
-    result = await graph.ainvoke({"messages": [HumanMessage(content="你好")]})
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="你好")]}, config={"callbacks": [Spy()]}
+    )
 
     assert "好了" in [getattr(message, "content", "") for message in result["messages"]]
     assert started == ["start"]
 
 
+async def test_config_callbacks_do_not_swallow_stream_events(monkeypatch, settings):
+    """回归：回调放在 config 里，token 事件一个都不能少。
+
+    曾经把 Langfuse 回调用 ``with_config`` 绑在模型上，模型级事件整组消失
+    （连普通 Spy 回调也一样）。桌面版默认开 Langfuse，所以桌面版稳定复现：
+    回答生成了、也落库了，前端却 0 个 token，只能显示「模型未返回内容」。
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class Spy(BaseCallbackHandler):
+        def on_llm_new_token(self, *args, **kwargs):
+            return None
+
+    model = StreamingChatModel(pieces=["三", "亚", "攻略"])
+    monkeypatch.setattr(graph_module, "build_chat_model", lambda _s: model)
+    graph, _ = graph_module.build_agent_graph(settings, mode="native", tools=[echo])
+
+    pieces: list[str] = []
+    async for event in graph.astream_events(
+        {"messages": [HumanMessage(content="你好")]},
+        version="v2",
+        config={"callbacks": [Spy()]},
+    ):
+        if event["event"] == "on_chat_model_stream":
+            content = event["data"]["chunk"].content
+            pieces.append(content if isinstance(content, str) else str(content))
+
+    assert [piece for piece in pieces if piece] == ["三", "亚", "攻略"]
+
+
 async def test_graph_runs_when_tracing_is_disabled(monkeypatch, settings):
-    """没配追踪时回调列表为空，构图与执行不能因此有任何变化。"""
-    monkeypatch.setattr(graph_module, "langfuse_callbacks", list)
+    """没配追踪时构图与执行不能因此有任何变化。"""
     _patch(monkeypatch, [AIMessage(content='{"final": "照常"}')])
 
     graph, _ = graph_module.build_agent_graph(settings, mode="structured", tools=[echo])
     result = await graph.ainvoke({"messages": [HumanMessage(content="你好")]})
 
     assert "照常" in [getattr(message, "content", "") for message in result["messages"]]
-
-
-def test_tracing_callbacks_must_be_attached_after_bind_tools(monkeypatch):
-    """回归：先 with_config 再 bind_tools，回调会被静默丢掉。
-
-    ``RunnableBinding`` 没有覆写 ``bind_tools``，靠 ``__getattr__`` 转发给内部模型，
-    返回的是不带原 config 的新对象。这个错误不报错、不告警，症状只是
-    「Langfuse 里一条 trace 都没有」——所以用一条断言把它钉死。
-    """
-    spy = object()
-    monkeypatch.setattr(graph_module, "langfuse_callbacks", lambda: [spy])
-    model = ScriptedChatModel(responses=[AIMessage(content="x")])
-
-    good = graph_module._with_tracing(model.bind_tools([echo]))
-    assert good.config["callbacks"] == [spy]
-
-    bad = model.with_config({"callbacks": [spy]}).bind_tools([echo])
-    assert not (getattr(bad, "config", None) or {}).get("callbacks")

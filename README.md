@@ -12,8 +12,8 @@
 
 ## 直接下载（Windows）
 
-**[OceanTravelAgent-0.2.1-setup.exe](https://github.com/tongyuan34-ops/ocean-travel-agent/releases/download/v0.2.1/OceanTravelAgent-0.2.1-setup.exe)**（42.6 MB）
-· [免安装 zip](https://github.com/tongyuan34-ops/ocean-travel-agent/releases/download/v0.2.1/OceanTravelAgent-0.2.1-win64.zip)（50.1 MB）
+**[OceanTravelAgent-0.2.2-setup.exe](https://github.com/tongyuan34-ops/ocean-travel-agent/releases/download/v0.2.2/OceanTravelAgent-0.2.2-setup.exe)**（42.6 MB）
+· [免安装 zip](https://github.com/tongyuan34-ops/ocean-travel-agent/releases/download/v0.2.2/OceanTravelAgent-0.2.2-win64.zip)（50.1 MB）
 —— 双击安装，不需要 Python / Docker / API Key，内置一份低额度 key，装完直接能用。
 安装包未买代码签名证书，Windows 会提示「未知发布者」，点「更多信息 → 仍要运行」即可。
 

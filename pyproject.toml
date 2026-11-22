@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocean-travel-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "旅行规划 Agent：双模式 Agent 循环、可续传 SSE、默认拒绝的权限网关"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -27,7 +27,6 @@ from app.agent.prompts import build_system_prompt
 from app.agent.resilience import RetryPolicy, make_all_resilient
 from app.agent.state import AgentState
 from app.core.config import Settings
-from app.core.tracing import langfuse_callbacks
 from app.mcp.registry import all_tools
 
 logger = logging.getLogger(__name__)
@@ -36,17 +35,16 @@ logger = logging.getLogger(__name__)
 MAX_STEPS = 12
 
 
-def _with_tracing(runnable: Any) -> Any:
-    """把 Langfuse 回调挂到可运行对象上。
-
-    **顺序不能反。** ``with_config`` 返回的是 ``RunnableBinding``，它没有覆写
-    ``bind_tools``，靠 ``__getattr__`` 转发给内部模型并返回一个**不带原 config**
-    的新对象。先 ``with_config`` 再 ``bind_tools``，回调会被静默丢掉——不报错、
-    不告警，症状只是「Langfuse 里一条 trace 都没有」。
-    ``tests/test_agent_graph.py`` 用一条断言把顺序钉死了。
-    """
-    callbacks = langfuse_callbacks()
-    return runnable.with_config({"callbacks": callbacks}) if callbacks else runnable
+# 追踪回调**不能**用 ``with_config`` 绑在模型上。
+#
+# 绑上去之后，模型会带着自己的 ``config["callbacks"]`` 进入调用，子级配置会
+# 顶掉 ``astream_events`` 注入的 streamer——``on_chat_model_start/stream/end``
+# 整组消失（连一个普通 Spy 回调也一样，与 Langfuse 无关）。症状极具迷惑性：
+# 回答正常生成并落库，但前端一个 token 都收不到，用量也只剩估算值。
+# 桌面版默认开启 Langfuse，所以稳定复现；源码环境默认不开，看起来像「打包问题」。
+#
+# 正确做法：回调统一放进 ``trace_config`` 的 config 里（见 app/core/tracing.py），
+# 它会随运行树传给每一个子 run，chain / tool / model 三层都能覆盖。
 
 
 # 系统提示词已按「对话风格」拆到 app/agent/prompts.py：
@@ -129,11 +127,33 @@ def build_agent_graph(
 
 
 def _build_native(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
-    # bind_tools 在前、挂回调在后，理由见 _with_tracing
-    bound = _with_tracing(model.bind_tools(tools))
+    # 只绑工具，不绑回调：回调一旦绑在可运行对象上，模型级事件会被顶掉，
+    # 逐字 token 与真实用量一起消失（原因见 MAX_STEPS 下面的注释）
+    bound = model.bind_tools(tools)
 
-    def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
-        return {"messages": [bound.invoke(state["messages"])]}
+    async def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+        # 必须是异步 + 显式 astream，不能用同步 invoke：
+        #
+        # 1. 同步节点会被 LangGraph 放进线程池执行，回调上下文（ContextVar）
+        #    很多环境下传不进那个线程，``astream_events`` 就收不到
+        #    ``on_chat_model_stream``——回答明明生成完了、也落库了，前端却
+        #    一个字都收不到，最后只能报 MODEL_EMPTY_RESPONSE。实测打包版稳定
+        #    复现，源码环境偶发，正是这种「靠父级回调顺带打开流式」的脆弱点。
+        # 2. ``invoke`` 能否吐 token 取决于 ``_should_stream`` 去猜父级回调，
+        #    显式 ``astream`` 不依赖这个猜测，任何环境下都能逐块产出。
+        #
+        # 顺带修好用量：回调不再丢失，``on_chat_model_end`` 里的真实 usage
+        # 才能记上，而不是退回「按字数估算」。
+        chunks: list[Any] = []
+        async for chunk in bound.astream(state["messages"]):
+            chunks.append(chunk)
+        if not chunks:
+            # 上游没给任何块时退回一次性调用，避免把空消息写进状态
+            return {"messages": [await bound.ainvoke(state["messages"])]}
+        merged: Any = chunks[0]
+        for chunk in chunks[1:]:
+            merged = merged + chunk
+        return {"messages": [merged]}
 
     def route(state: AgentState) -> str:
         last = state["messages"][-1]
@@ -153,9 +173,9 @@ def _build_native(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
 
 def _build_structured(model: BaseChatModel, tools: list[BaseTool]) -> StateGraph:
     catalog = _tool_catalog(tools)
-    # 回调挂在这里而不是 graph.ainvoke 的 config 里：这一支在循环里反复调模型，
-    # 只挂外层会漏掉除最后一次之外的每一次
-    traced = _with_tracing(model)
+    # 回调同样不绑在模型上：它由调用方通过 config 传进来（trace_config），
+    # 这里每一次 ``ainvoke`` 都会从上下文继承，循环里的每一趟都在追踪范围内
+    traced = model
 
     async def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         messages = list(state["messages"])

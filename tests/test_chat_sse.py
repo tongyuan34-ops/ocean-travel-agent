@@ -222,6 +222,23 @@ async def test_streams_tokens_then_end(monkeypatch):
     assert stored.messages[-1].content == "三亚攻略"
 
 
+async def test_native_backfills_answer_when_no_token_events(monkeypatch):
+    """native 模式下一个 stream 事件都没来时，收尾要整段补发。
+
+    实测打包版就是这么坏的：图只给了 ``on_chat_model_end`` / 最终状态，
+    回答已经生成并落库，前端却 0 个 token，最后显示「模型未返回内容」。
+    补发一次比让用户重试可靠——重试还可能再触发同一个环境问题。
+    """
+    service = _service(monkeypatch, FakeGraph([_final_message("完整回答")]), mode="native")
+    session = await service._sessions.create()
+    frames = await _frames(service, session.id, "?")
+
+    tokens = [frame for frame in frames if frame["type"] == "token"]
+    assert [frame["content"] for frame in tokens] == ["完整回答"]
+    assert frames[-1]["type"] == "end"
+    assert not any(frame.get("code") == "MODEL_EMPTY_RESPONSE" for frame in frames)
+
+
 async def test_cancel_stream_is_not_persisted(monkeypatch):
     """用户主动停止时应取消后台生成，不写入半截回答。"""
     service = _service(

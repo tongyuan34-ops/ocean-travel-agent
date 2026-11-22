@@ -101,6 +101,9 @@ class _TurnOutcome:
 
     answer: str = ""
     finish_reason: str = ""
+    # native 模式下已经逐字发给前端的字符数。收尾时若为 0，
+    # 说明这轮一个 token 事件都没发出去，必须整段补发
+    streamed: int = 0
     failed: dict[str, Any] | None = None
     warnings: list[dict[str, str]] = field(default_factory=list)
     media_task_ids: list[str] = field(default_factory=list)
@@ -605,6 +608,8 @@ class ChatService:
         messages = setup.messages
         outcome = _TurnOutcome()
 
+        # 最后一趟 streamed 的字符数。前端收到 retry 事件会把已经显示的文字
+        # 清空重来，所以只认最后一趟，不能跨趟累加
         streamed = ""
         final_state: dict | None = None
         failed: dict | None = None
@@ -718,6 +723,8 @@ class ChatService:
 
         outcome.answer = answer
         outcome.finish_reason = finish_reason
+        # 最后一趟发出去的字符数（structured 模式不算，它本来就不逐字发）
+        outcome.streamed = len(streamed) if setup.mode == "native" else 0
         outcome.failed = failed
         outcome.warnings = warnings
         outcome.media_task_ids = media_task_ids
@@ -752,8 +759,12 @@ class ChatService:
             await state.emit({"type": "error", **outcome.failed, "trace_id": trace_id})
             return
 
-        if setup.mode != "native" and answer:
-            # structured 模式无法逐字流式，整段一次性给出
+        if answer and (setup.mode != "native" or outcome.streamed == 0):
+            # structured 模式无法逐字流式，整段一次性给出。
+            # native 模式正常已经有逐字 token，这里补的是「一个都没发出去」的情况：
+            # 上游或运行环境偶尔只给 on_chat_model_end 而不给 stream 事件
+            # （实测打包版就是如此）。回答已经落库，前端却一个字都没收到，
+            # 最后只能显示「模型未返回内容」——整段补发一次比让用户重试更可靠。
             await state.emit({"type": "token", "content": answer})
 
         if not answer.strip():
